@@ -468,15 +468,21 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str):
 # AUTENTICACIÓN
 # ─────────────────────────────────────────────
 def login():
-    st.markdown("## 🪪 Ingreso al sistema")
-    st.caption("Dirección de Formación Continua · Recursos Humanos")
-    col1, col2 = st.columns(2)
-    with col1:
-        correo = st.text_input("Correo institucional", placeholder="nombre@jalisco.gob.mx")
-    with col2:
-        rfc_input = st.text_input("RFC (contraseña)", type="password", placeholder="XXXX000000XXX")
+    col_izq, col_centro, col_der = st.columns([1, 2, 1])
+    with col_centro:
+        st.image("dfc_logo.png", use_container_width=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown("<h3 style='text-align:center;margin-bottom:0'>🪪 Ingreso al Sistema</h3>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align:center;color:gray;font-size:0.9em'>Dirección de Formación Continua · Recursos Humanos</p>", unsafe_allow_html=True)
+            st.divider()
+            correo    = st.text_input("✉️ Correo electrónico institucional", placeholder="nombre@jalisco.gob.mx")
+            rfc_input = st.text_input("🔑 Clave de Filiación / RFC", type="password", placeholder="XXXX000000XXX")
+            st.caption("⚠️ Usa tu RFC con homoclave en mayúsculas como contraseña.")
+            st.markdown("<br>", unsafe_allow_html=True)
+            entrar = st.button("Iniciar Sesión", type="primary", use_container_width=True)
 
-    if st.button("Entrar", type="primary"):
+    if entrar:
         if not correo or not rfc_input:
             st.error("Ingresa tu correo y RFC.")
             return
@@ -921,6 +927,7 @@ def main():
     st.set_page_config(page_title="Incidencias DFC · RH", page_icon="📋", layout="wide")
 
     if "rol" not in st.session_state:
+        st.markdown("<style>[data-testid='stSidebar']{display:none}</style>", unsafe_allow_html=True)
         login()
         return
 
