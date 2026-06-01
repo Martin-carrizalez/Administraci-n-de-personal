@@ -258,12 +258,12 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
     tabla_datos = [
         ["Nombre completo:", datos["nombre"]],
         ["Filiación:", rfc_oculto(datos["rfc"])],
-        ["Tipo de incidencia:", datos["tipo_label"]],
+        ["Tipo de incidencia:", datos.get("subtipo_label", datos["tipo_label"])],
         ["Fecha de solicitud:", datos["fecha_solicitud"]],
         ["Fecha inicio:", datos["fecha_inicio"]],
         ["Fecha fin:", datos["fecha_fin"]],
-        ["Días solicitados:", str(datos["dias"])],
-        ["Horas de pase:", str(datos.get("horas_pase", "N/A"))],
+        ["Días solicitados:", "N/A" if datos["tipo"] == "PSE" else str(datos["dias"])],
+        ["Horas de pase:", (f"{datos.get('horas_pase', 0)}h" if datos.get("horas_pase", 0) else "No registradas") if datos["tipo"] == "PSE" else "N/A"],
         ["Motivo / Descripción:", datos["motivo"]],
         ["Documento anexo:", "Sí, se presentará en RH" if datos["tiene_anexo"] else "No aplica"],
     ]
@@ -734,18 +734,18 @@ def vista_empleado():
 
     # ── PASE DE SALIDA / ENTRADA ────────────────
     elif tipo == "PSE":
-        subtipo = st.radio("Subtipo", ["Pase de salida", "Pase de entrada", "Pase de salida con retorno"])
+        subtipo = st.radio("Subtipo", ["Pase de salida sin retorno", "Pase de entrada", "Pase de salida"])
         fecha   = st.date_input("Fecha del pase", value=date.today())
 
         col1, col2 = st.columns(2)
         hora_salida = hora_entrada = hora_retorno = None
         with col1:
-            if subtipo in ["Pase de salida", "Pase de salida con retorno"]:
+            if subtipo in ["Pase de salida sin retorno", "Pase de salida"]:
                 hora_salida = st.time_input("Hora de salida")
         with col2:
             if subtipo == "Pase de entrada":
                 hora_entrada = st.time_input("Hora de entrada")
-            elif subtipo == "Pase de salida con retorno":
+            elif subtipo == "Pase de salida":
                 hora_retorno = st.time_input("Hora estimada de retorno")
 
         # Calcular horas del pase
@@ -769,7 +769,7 @@ def vista_empleado():
         if hora_salida:  detalle += f" | Salida: {hora_salida}"
         if hora_entrada: detalle += f" | Entrada: {hora_entrada}"
         if hora_retorno: detalle += f" | Retorno: {hora_retorno}"
-        motivo_completo = f"{detalle}\n{motivo}".strip()
+        enviar_solicitud(rfc, nombre, tipo, fecha, fecha, 0, horas_pase, motivo_completo, tiene_anexo, incidencias, archivo_anexo, subtipo_label=subtipo)
         enviar_solicitud(rfc, nombre, tipo, fecha, fecha, 0, horas_pase, motivo_completo, tiene_anexo, incidencias, archivo_anexo)
 
     # ── COMISIÓN ────────────────────────────────
@@ -832,7 +832,7 @@ def vista_empleado():
             st.error("No se pudo calcular tu fecha de cumpleaños desde el RFC.")
 
 
-def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_anexo, incidencias_df, archivo_anexo=None):
+def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_anexo, incidencias_df, archivo_anexo=None, subtipo_label=None):
     if st.button("Registrar solicitud", type="primary"):
         folio     = generar_folio(tipo, incidencias_df)
         fecha_sol = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -854,6 +854,8 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
             "motivo":          motivo,
             "tiene_anexo":     tiene_anexo or archivo_anexo is not None,
             "link_anexo":      link_anexo,
+            "subtipo_label":   subtipo_label if subtipo_label else None,
+            "subtipo_label":   subtipo_label if subtipo_label else TIPO_LABELS[tipo],
         }
         if tipo == "ECO":
             guardar_dia_economico(datos)
@@ -1008,12 +1010,14 @@ def main():
             st.success("✅ DOCUMENTO AUTÉNTICO Y REGISTRADO EN SISTEMA")
             with st.container(border=True):
                 st.write(f"**Folio Oficial:** {folio_a_buscar}")
-                nombre = row.get("NOMBRE") or row.get("Nombre Completo", "")
-                rfc_reg = row.get("RFC", "")
-                tipo_reg = row.get("TIPO") or row.get("Tipo Permiso", "Día económico")
-                fi_reg = row.get("FECHA_INICIO") or row.get("Fecha Inicio", "")
-                ff_reg = row.get("FECHA_FIN") or row.get("Fecha Fin", "")
-                estado_reg = row.get("ESTADO") or ("AUTORIZADO" if str(row.get("Aprobado Por","")).strip() != "" else "PENDIENTE")
+                nombre     = row.get("NOMBRE") or row.get("Nombre Completo", "")
+                rfc_reg    = row.get("RFC", "")
+                tipo_raw   = row.get("TIPO") or row.get("Tipo Permiso", "")
+                tipo_reg   = "ECO" if str(tipo_raw).lower() in ["economico", "económico"] else tipo_raw
+                fi_reg     = row.get("FECHA_INICIO") or row.get("Fecha Inicio", "")
+                ff_reg     = row.get("FECHA_FIN") or row.get("Fecha Fin", "")
+                aprobado   = row.get("AUTORIZADO_POR") or row.get("Aprobado Por", "")
+                estado_reg = row.get("ESTADO") or ("AUTORIZADO" if str(aprobado).strip() != "" else "PENDIENTE")
                 motivo_reg = row.get("MOTIVO") or row.get("Motivo", "")
                 st.write(f"**Servidor Público:** {nombre}")
                 st.write(f"**Filiación:** {rfc_oculto(str(rfc_reg))}")
