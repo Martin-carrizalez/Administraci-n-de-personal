@@ -468,10 +468,12 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str):
 # AUTENTICACIÓN
 # ─────────────────────────────────────────────
 def login():
-    col_izq, col_centro, col_der = st.columns([1.2, 1.6, 1.2])
+    col_izq, col_centro, col_der = st.columns([1.1, 1.8, 1.1])
     with col_centro:
-        st.image("dfc_logo.png", width=280)
         with st.container(border=True):
+            col_l, col_img, col_r = st.columns([1, 2, 1])
+            with col_img:
+                st.image("dfc_logo.png", use_container_width=True)
             st.markdown("<h3 style='text-align:center;margin-bottom:0;font-size:22px'>🪪 Ingreso al Sistema</h3>", unsafe_allow_html=True)
             st.markdown("<p style='text-align:center;color:gray;font-size:13px'>Dirección de Formación Continua · Personal</p>", unsafe_allow_html=True)
             st.divider()
@@ -922,7 +924,7 @@ def vista_admin():
 # MAIN
 # ─────────────────────────────────────────────
 def main():
-    st.set_page_config(page_title="Incidencias DFC · RH", page_icon="📋", layout="wide")
+    st.set_page_config(page_title="DFC · RH", page_icon="📋", layout="wide")
 
     if "rol" not in st.session_state:
         st.markdown("<style>[data-testid='stSidebar']{display:none}</style>", unsafe_allow_html=True)
