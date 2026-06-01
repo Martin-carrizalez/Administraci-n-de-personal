@@ -468,18 +468,16 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str):
 # AUTENTICACIÓN
 # ─────────────────────────────────────────────
 def login():
-    col_izq, col_centro, col_der = st.columns([1, 2, 1])
+    col_izq, col_centro, col_der = st.columns([1.2, 1.6, 1.2])
     with col_centro:
-        st.image("dfc_logo.png", use_container_width=True)
-        st.markdown("<br>", unsafe_allow_html=True)
+        st.image("dfc_logo.png", width=280)
         with st.container(border=True):
-            st.markdown("<h3 style='text-align:center;margin-bottom:0'>🪪 Ingreso al Sistema</h3>", unsafe_allow_html=True)
-            st.markdown("<p style='text-align:center;color:gray;font-size:0.9em'>Dirección de Formación Continua · Recursos Humanos</p>", unsafe_allow_html=True)
+            st.markdown("<h3 style='text-align:center;margin-bottom:0;font-size:22px'>🪪 Ingreso al Sistema</h3>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align:center;color:gray;font-size:13px'>Dirección de Formación Continua · Personal</p>", unsafe_allow_html=True)
             st.divider()
-            correo    = st.text_input("✉️ Correo electrónico institucional", placeholder="nombre@jalisco.gob.mx")
-            rfc_input = st.text_input("🔑 Clave de Filiación / RFC", type="password", placeholder="XXXX000000XXX")
-            st.caption("⚠️ Usa tu RFC con homoclave en mayúsculas como contraseña.")
-            st.markdown("<br>", unsafe_allow_html=True)
+            correo    = st.text_input("Correo electrónico institucional", placeholder="nombre@jalisco.gob.mx")
+            rfc_input = st.text_input("RFC (Contraseña)", type="password", placeholder="XXXX000000XXX")
+            st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
             entrar = st.button("Iniciar Sesión", type="primary", use_container_width=True)
 
     if entrar:
