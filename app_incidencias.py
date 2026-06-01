@@ -502,7 +502,7 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str):
     registros = ws_emp.get_all_records(numericise_ignore=["all"])
     headers   = ws_emp.row_values(1)
     for i, row in enumerate(registros, start=2):
-        if str(row.get("RFC", "")).upper().strip() == str(emp_id).upper().strip():
+        if str(row.get("RFC", "")).upper().strip() == str(emp_id).upper().strip() or str(row.get("NOMBRE", "")).upper().strip() == str(emp_id).upper().strip():
             for dia, (col_e, col_s) in COLUMNAS_HORARIO.items():
                 if dia in horario_nuevo:
                     if col_e in headers:
@@ -923,16 +923,38 @@ def vista_admin():
                         st.divider()
                         st.markdown("**Ajustar horario en el sistema:**")
                         emp_hor = horarios_df[horarios_df["RFC"].astype(str).str.upper().str.strip() == str(row["RFC"]).upper().strip()]
+
+                        # Parsear horario solicitado del MOTIVO
+                        motivo_cho = str(row.get("MOTIVO", ""))
+                        horario_parsed = {}
+                        for parte in motivo_cho.split(" | "):
+                            for dia in DIAS_SEMANA:
+                                if parte.strip().startswith(dia + " "):
+                                    try:
+                                        horas = parte.strip()[len(dia)+1:]
+                                        e, s = horas.split("-")
+                                        horario_parsed[dia] = {"entrada": e.strip(), "salida": s.strip()}
+                                    except Exception:
+                                        pass
+
                         nuevo_horario = {}
-                        cols_dias = st.columns(7)
+                        cols_dias = st.columns(5)
                         for idx, dia in enumerate(DIAS_SEMANA):
                             col_e, col_s = COLUMNAS_HORARIO[dia]
-                            actual_e = emp_hor.iloc[0].get(col_e, "") if not emp_hor.empty else ""
-                            actual_s = emp_hor.iloc[0].get(col_s, "") if not emp_hor.empty else ""
+                            # Prellenar con horario solicitado, si no con el actual del Sheet
+                            if dia in horario_parsed:
+                                default_e = horario_parsed[dia]["entrada"]
+                                default_s = horario_parsed[dia]["salida"]
+                            elif not emp_hor.empty:
+                                default_e = str(emp_hor.iloc[0].get(col_e, ""))
+                                default_s = str(emp_hor.iloc[0].get(col_s, ""))
+                            else:
+                                default_e = ""
+                                default_s = ""
                             with cols_dias[idx]:
                                 st.caption(dia)
-                                ne = st.text_input("Entrada", value=str(actual_e), key=f"ne_{row['FOLIO']}_{dia}", max_chars=5)
-                                ns = st.text_input("Salida",  value=str(actual_s), key=f"ns_{row['FOLIO']}_{dia}", max_chars=5)
+                                ne = st.text_input("Entrada", value=default_e, key=f"ne_{row['FOLIO']}_{dia}", max_chars=5)
+                                ns = st.text_input("Salida",  value=default_s, key=f"ns_{row['FOLIO']}_{dia}", max_chars=5)
                                 nuevo_horario[dia] = {"entrada": ne, "salida": ns}
                         if st.button("💾 Guardar horario y autorizar", key=f"hor_{row['FOLIO']}", type="primary"):
                             autorizar_cambio_horario(row["RFC"], nuevo_horario, row["FOLIO"])
