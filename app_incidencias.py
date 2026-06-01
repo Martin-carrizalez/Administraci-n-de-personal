@@ -34,6 +34,7 @@ if HABILITAR_CUMPLEANOS:
     TIPO_LABELS["CUM"] = "Día de cumpleaños"
 
 DIAS_SEMANA = ["LUN", "MAR", "MIE", "JUE", "VIE"]
+DRIVE_ANEXOS_FOLDER = "1IZTmKznjU6H7tJt4K4zCtPpxz4Sh_pQA"
 
 COLUMNAS_HORARIO = {
     "LUN": ("ENTRADA_LUN", "SALIDA_LUN"),
@@ -48,7 +49,7 @@ COLUMNAS_HORARIO = {
 COLS_INCIDENCIAS = [
     "ID", "FOLIO", "RFC", "NOMBRE", "TIPO", "FECHA_SOLICITUD",
     "FECHA_INICIO", "FECHA_FIN", "DIAS", "HORAS_PASE",
-    "MOTIVO", "TIENE_ANEXO", "ESTADO", "AUTORIZADO_POR",
+    "MOTIVO", "TIENE_ANEXO", "LINK_ANEXO", "ESTADO", "AUTORIZADO_POR",
     "FECHA_AUTORIZACION", "OBSERVACIONES"
 ]
 
@@ -307,6 +308,46 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
 # ─────────────────────────────────────────────
 # ESCRITURA EN SHEETS
 # ─────────────────────────────────────────────
+def subir_anexo_drive(archivo, folio: str, rfc: str) -> str:
+    """Sube un archivo a Google Drive y retorna el link de visualización."""
+    try:
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+        from google.oauth2.service_account import Credentials
+        import io
+
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        service = build("drive", "v3", credentials=creds)
+
+        ext = archivo.name.split(".")[-1].lower()
+        nombre_archivo = f"{folio}_{rfc}.{ext}"
+        media = MediaIoBaseUpload(io.BytesIO(archivo.read()), mimetype=archivo.type)
+        file_metadata = {
+            "name": nombre_archivo,
+            "parents": [DRIVE_ANEXOS_FOLDER],
+        }
+        archivo_drive = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id",
+            supportsAllDrives=True
+        ).execute()
+
+        file_id = archivo_drive.get("id")
+        # Hacer el archivo visible con el link
+        service.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"},
+            supportsAllDrives=True
+        ).execute()
+
+        return f"https://drive.google.com/file/d/{file_id}/view"
+    except Exception as e:
+        return f"ERROR: {e}"
+
 def guardar_dia_economico(datos: dict):
     """Guarda día económico en tab Solicitudes del Sheet económicos — igual que app3."""
     client = get_client()
@@ -357,6 +398,7 @@ def guardar_incidencia(datos: dict):
         datos.get("horas_pase", ""),
         datos["motivo"],
         "SÍ" if datos["tiene_anexo"] else "NO",
+        datos.get("link_anexo", ""),
         "PENDIENTE",
         "", "", "",
     ]
@@ -655,14 +697,15 @@ def vista_empleado():
             st.caption(f"Acumulado del mes: **{horas_pases + horas_pase}h**")
 
         motivo      = st.text_area("Motivo", max_chars=300)
-        tiene_anexo = st.checkbox("¿Traerás un documento de soporte?")
+        archivo_anexo = st.file_uploader("Adjuntar justificante (opcional)", type=["pdf","png","jpg","jpeg"])
+        tiene_anexo   = archivo_anexo is not None
 
         detalle = subtipo
         if hora_salida:  detalle += f" | Salida: {hora_salida}"
         if hora_entrada: detalle += f" | Entrada: {hora_entrada}"
         if hora_retorno: detalle += f" | Retorno: {hora_retorno}"
         motivo_completo = f"{detalle}\n{motivo}".strip()
-        enviar_solicitud(rfc, nombre, tipo, fecha, fecha, 0, horas_pase, motivo_completo, tiene_anexo, incidencias)
+        enviar_solicitud(rfc, nombre, tipo, fecha, fecha, 0, horas_pase, motivo_completo, tiene_anexo, incidencias, archivo_anexo)
 
     # ── COMISIÓN ────────────────────────────────
     elif tipo == "COM":
@@ -678,12 +721,12 @@ def vista_empleado():
         dias_hab = dias_habiles_entre(fi, ff, festivos)
         st.caption(f"Días de comisión: **{dias_hab}**")
         motivo      = st.text_area("Motivo de la comisión", max_chars=300)
-        tiene_anexo = st.checkbox("¿Traerás constancia (IMSS, oficio, etc.)?")
+        archivo_anexo = st.file_uploader("Adjuntar constancia/oficio (opcional)", type=["pdf","png","jpg","jpeg"])
+        tiene_anexo   = archivo_anexo is not None
         if not tiene_anexo:
             st.caption("Recuerda que sin anexo tu solicitud puede quedar sin soporte documental.")
         enviar_solicitud(rfc, nombre, tipo, fi, ff, dias_hab, 0.0,
-                         motivo, tiene_anexo, incidencias)
-
+                         motivo, tiene_anexo, incidencias, archivo_anexo)
     # ── CAMBIO DE HORARIO ───────────────────────
     elif tipo == "CHO":
         motivo      = st.text_area("Motivo del cambio de horario", max_chars=300)
@@ -724,10 +767,14 @@ def vista_empleado():
             st.error("No se pudo calcular tu fecha de cumpleaños desde el RFC.")
 
 
-def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_anexo, incidencias_df):
+def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_anexo, incidencias_df, archivo_anexo=None):
     if st.button("Registrar solicitud", type="primary"):
         folio     = generar_folio(tipo, incidencias_df)
         fecha_sol = datetime.now().strftime("%Y-%m-%d %H:%M")
+        link_anexo = ""
+        if archivo_anexo is not None:
+            with st.spinner("Subiendo anexo a Drive..."):
+                link_anexo = subir_anexo_drive(archivo_anexo, folio, rfc)
         datos = {
             "folio":           folio,
             "rfc":             rfc,
@@ -740,7 +787,8 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
             "dias":            dias,
             "horas_pase":      horas_pase,
             "motivo":          motivo,
-            "tiene_anexo":     tiene_anexo,
+            "tiene_anexo":     tiene_anexo or archivo_anexo is not None,
+            "link_anexo":      link_anexo,
         }
         if tipo == "ECO":
             guardar_dia_economico(datos)
