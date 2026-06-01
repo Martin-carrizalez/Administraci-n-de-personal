@@ -10,6 +10,8 @@ from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
+import qrcode
+from reportlab.platypus import Image as RLImage
 
 # ─────────────────────────────────────────────
 # FLAGS DE FUNCIONALIDAD
@@ -323,7 +325,25 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
                                                          fontSize=8, fontName="Helvetica",
                                                          leftIndent=10, spaceAfter=3)))
 
-    elementos.append(Spacer(1, 0.8*cm))
+    # ── QR de seguridad ──────────────────────────
+    url_validacion = f"https://gestion-personal-dfc.streamlit.app/?validar_folio={datos['folio']}"
+    qr = qrcode.QRCode(version=1, box_size=10, border=1)
+    qr.add_data(url_validacion)
+    qr.make(fit=True)
+    img_qr = qr.make_image(fill_color="black", back_color="white")
+    qr_buffer = BytesIO()
+    img_qr.save(qr_buffer, format="PNG")
+    qr_buffer.seek(0)
+    qr_flowable = RLImage(qr_buffer, width=2.5*cm, height=2.5*cm)
+    tabla_qr = Table([
+        [qr_flowable, Paragraph(
+            "<b>ESCÁNER DE SEGURIDAD DIGITAL</b><br/>Escanea este QR para verificar la autenticidad de este documento en tiempo real. Cualquier alteración anula el comprobante.",
+            ParagraphStyle("txt_qr", parent=styles["Normal"], fontSize=7, textColor=colors.HexColor("#555555"))
+        )]
+    ], colWidths=[3*cm, 13*cm])
+    tabla_qr.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "MIDDLE")]))
+    elementos.append(tabla_qr)
+    elementos.append(Spacer(1, 0.4*cm))
     elementos.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CCCCCC")))
     elementos.append(Spacer(1, 0.2*cm))
     elementos.append(Paragraph(f"Generado el {datos['fecha_solicitud']} · Sistema ARI — DFC · SEJ", estilo_aviso))
@@ -951,6 +971,33 @@ def vista_admin():
 # ─────────────────────────────────────────────
 def main():
     st.set_page_config(page_title="Incidencias DFC · RH", page_icon="📋", layout="wide")
+
+    # ── Interceptor QR de validación ─────────────
+    if "validar_folio" in st.query_params:
+        folio_a_buscar = st.query_params["validar_folio"]
+        st.markdown("## 🔍 Verificación de Autenticidad")
+        st.caption("Módulo de Control Interno · Dirección de Formación Continua · SEJ")
+        st.divider()
+        incidencias = cargar_incidencias()
+        match = incidencias[incidencias["FOLIO"].astype(str) == folio_a_buscar]
+        if not match.empty:
+            row = match.iloc[0]
+            st.success("✅ DOCUMENTO AUTÉNTICO Y REGISTRADO EN SISTEMA")
+            with st.container(border=True):
+                st.write(f"**Folio Oficial:** {row['FOLIO']}")
+                st.write(f"**Servidor Público:** {row['NOMBRE']}")
+                st.write(f"**Filiación:** {rfc_oculto(str(row['RFC']))}")
+                st.write(f"**Incidencia:** {TIPO_LABELS.get(row['TIPO'], row['TIPO'])}")
+                st.write(f"**Periodo:** {row['FECHA_INICIO']} al {row['FECHA_FIN']}")
+                st.write(f"**Estado:** {row['ESTADO']}")
+                st.write(f"**Motivo:** {row['MOTIVO']}")
+        else:
+            st.error("🚨 ALERTA: DOCUMENTO NO ENCONTRADO O ALTERADO")
+            st.warning("Este folio no existe en los registros oficiales de la DFC. El formato impreso podría ser falso o modificado de manera ilícita.")
+        if st.button("Ir al inicio de sesión"):
+            st.query_params.clear()
+            st.rerun()
+        return
 
     if "rol" not in st.session_state:
         st.markdown("<style>[data-testid='stSidebar']{display:none}</style>", unsafe_allow_html=True)
