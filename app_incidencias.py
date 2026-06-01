@@ -33,7 +33,7 @@ TIPO_LABELS = {
 if HABILITAR_CUMPLEANOS:
     TIPO_LABELS["CUM"] = "Día de cumpleaños"
 
-DIAS_SEMANA = ["LUN", "MAR", "MIE", "JUE", "VIE", "SAB", "DOM"]
+DIAS_SEMANA = ["LUN", "MAR", "MIE", "JUE", "VIE"]
 
 COLUMNAS_HORARIO = {
     "LUN": ("ENTRADA_LUN", "SALIDA_LUN"),
@@ -424,9 +424,6 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str):
 # AUTENTICACIÓN
 # ─────────────────────────────────────────────
 def login():
-    col1, col2, col3 = st.columns([2,1,2])
-    with col2:
-        st.image("dfc_logo.png", width=150)
     st.markdown("## 🪪 Ingreso al sistema")
     st.caption("Dirección de Formación Continua · Recursos Humanos")
     col1, col2 = st.columns(2)
@@ -879,7 +876,7 @@ def main():
 
     with st.sidebar:
         st.image("dfc_logo.png", use_container_width=True)
-        st.markdown("**Portal de Gestión de Incidencias**")
+        st.markdown("**Portal de Gestión de Personal**")
         st.caption('👤 Servidor(a) Público(a): ' + st.session_state['nombre'])
         st.caption('🏷️ Nivel de acceso: ' + ('Administrador RH' if st.session_state['rol'] == 'admin' else 'Personal de la Dirección'))
         st.divider()
