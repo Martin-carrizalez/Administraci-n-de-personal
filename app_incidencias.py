@@ -795,6 +795,7 @@ def vista_empleado():
                          motivo, tiene_anexo, incidencias, archivo_anexo)
     # ── CAMBIO DE HORARIO ───────────────────────
     elif tipo == "CHO":
+        fecha_inicio_cho = st.date_input("¿A partir de qué fecha aplica el cambio?", value=date.today())
         motivo      = st.text_area("Motivo del cambio de horario", max_chars=300)
         tiene_anexo = st.checkbox("¿Traerás documento de soporte (oficio, etc.)?")
         st.markdown("**Horario solicitado:**")
@@ -816,7 +817,7 @@ def vista_empleado():
             if v["entrada"]
         )
         motivo_completo = f"Horario solicitado: {horario_str} | Motivo: {motivo}".strip()
-        enviar_solicitud(rfc, nombre, tipo, date.today(), date.today(), 0, 0.0,
+        enviar_solicitud(rfc, nombre, tipo, fecha_inicio_cho, fecha_inicio_cho, 0, 0.0,
                          motivo_completo, tiene_anexo, incidencias)
 
     # ── CUMPLEAÑOS (oculto hasta autorización) ──
