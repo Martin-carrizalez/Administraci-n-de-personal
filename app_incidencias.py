@@ -286,12 +286,38 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
     ]))
     elementos.append(et)
     elementos.append(Spacer(1, 0.6*cm))
+    # ── Bloque de firmas ─────────────────────────
+    elementos.append(Paragraph("<b>REQUISITO OBLIGATORIO: SECCIÓN DE FIRMAS</b>",
+        ParagraphStyle("tf", parent=styles["Normal"], fontSize=9, fontName="Helvetica-Bold", spaceAfter=6)))
 
+    estilo_firma = ParagraphStyle("firmas", parent=styles["Normal"], fontSize=8, fontName="Helvetica", alignment=TA_CENTER)
+    firma_interesado = Paragraph("<br/><br/>___________________________<br/><b>Firma del Interesado</b><br/>Servidor(a) Público(a)", estilo_firma)
+    firma_jefe       = Paragraph("<br/><br/>___________________________<br/><b>Autoriza Jefe(a) Inmediato</b><br/>Nombre y Firma", estilo_firma)
+    firma_vob        = Paragraph("<br/><br/>___________________________<br/><b>Vo.Bo. Titular del Área</b><br/>Nombre y Firma", estilo_firma)
+
+    if datos["tipo"] in ["ECO", "CHO"]:
+        t_firmas = Table([[firma_interesado, firma_jefe, firma_vob]], colWidths=[5.3*cm, 5.3*cm, 5.4*cm])
+    else:
+        t_firmas = Table([[firma_interesado, firma_jefe]], colWidths=[8*cm, 8*cm])
+
+    t_firmas.setStyle(TableStyle([
+        ("VALIGN",        (0,0), (-1,-1), "TOP"),
+        ("ALIGN",         (0,0), (-1,-1), "CENTER"),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 10),
+    ]))
+    elementos.append(t_firmas)
+    elementos.append(Spacer(1, 0.3*cm))
+    elementos.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CCCCCC")))
+    elementos.append(Spacer(1, 0.3*cm))
+
+    # ── Instrucciones finales ─────────────────────
+    elementos.append(Paragraph("<b>INSTRUCCIONES DE ENTREGA:</b>",
+        ParagraphStyle("tit_i", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Bold", spaceAfter=3)))
     for inst in [
-        "1. Imprime este comprobante y preséntalo en el Área de Recursos Humanos (piso 5 o 6).",
-        "2. Trae el documento físico original correspondiente (formato de día económico, pase, constancia, etc.).",
-        "3. El folio de este comprobante es tu número de seguimiento.",
-        "4. Tu solicitud será revisada y autorizada por el Enlace de Recursos Humanos.",
+        "1. Recaba las firmas físicas obligatorias que se muestran arriba.",
+        "2. Adjunta la documentación de soporte original si aplica (cita IMSS, oficio de comisión, etc.).",
+        "3. Entrega el expediente completo en el Área de Recursos Humanos (Administración de Personal DFC).",
+        "4. Resguarda tu copia digital. El folio es tu número de seguimiento oficial.",
     ]:
         elementos.append(Paragraph(inst, ParagraphStyle("i", parent=styles["Normal"],
                                                          fontSize=8, fontName="Helvetica",
@@ -924,7 +950,7 @@ def vista_admin():
 # MAIN
 # ─────────────────────────────────────────────
 def main():
-    st.set_page_config(page_title="DFC · RH", page_icon="📋", layout="wide")
+    st.set_page_config(page_title="Incidencias DFC · RH", page_icon="📋", layout="wide")
 
     if "rol" not in st.session_state:
         st.markdown("<style>[data-testid='stSidebar']{display:none}</style>", unsafe_allow_html=True)
