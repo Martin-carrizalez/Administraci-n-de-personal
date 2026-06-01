@@ -424,6 +424,9 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str):
 # AUTENTICACIÓN
 # ─────────────────────────────────────────────
 def login():
+    col_logo, col_centro, col_logo2 = st.columns([1,2,1])
+    with col_centro:
+        st.image("dfc_logo.png", use_container_width=True)
     st.markdown("## 🪪 Ingreso al sistema")
     st.caption("Dirección de Formación Continua · Recursos Humanos")
     col1, col2 = st.columns(2)
@@ -875,6 +878,8 @@ def main():
         return
 
     with st.sidebar:
+        st.image("dfc_logo.png", use_container_width=True)
+        st.markdown("**Portal de Gestión de Incidencias**")
         st.caption('👤 Servidor(a) Público(a): ' + st.session_state['nombre'])
         st.caption('🏷️ Nivel de acceso: ' + ('Administrador RH' if st.session_state['rol'] == 'admin' else 'Personal de la Dirección'))
         st.divider()
