@@ -222,8 +222,8 @@ def rfc_oculto(rfc: str) -> str:
 def generar_comprobante_pdf(datos: dict) -> bytes:
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter,
-                            leftMargin=2*cm, rightMargin=2*cm,
-                            topMargin=2*cm, bottomMargin=2*cm)
+                            leftMargin=1.5*cm, rightMargin=1.5*cm,
+                            topMargin=1.2*cm, bottomMargin=1.2*cm)
     styles = getSampleStyleSheet()
 
     estilo_titulo   = ParagraphStyle("t", parent=styles["Normal"], fontSize=13, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=4)
@@ -232,10 +232,21 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
     estilo_aviso    = ParagraphStyle("a", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Oblique", alignment=TA_CENTER, textColor=colors.HexColor("#888888"))
 
     elementos = []
-    elementos.append(Paragraph("Secretaría de Educación Jalisco", estilo_titulo))
-    elementos.append(Paragraph("Dirección de Formación Continua", estilo_sub))
-    elementos.append(Paragraph("Área de Recursos Humanos", estilo_sub))
-    elementos.append(Spacer(1, 0.3*cm))
+    # Logo SEJ
+    import os
+    logo_path = "logos_gris.png"
+    if os.path.exists(logo_path):
+        logo_rl = RLImage(logo_path, width=6*cm, height=1.5*cm)
+        tabla_header = Table([[logo_rl, Paragraph(
+            "<b>Dirección de Formación Continua</b><br/>Área de Recursos Humanos · SEJ",
+            ParagraphStyle("hdr", parent=styles["Normal"], fontSize=9, fontName="Helvetica", alignment=TA_CENTER)
+        )]], colWidths=[7*cm, 10*cm])
+        tabla_header.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(1,0),(1,0),"CENTER")]))
+        elementos.append(tabla_header)
+    else:
+        elementos.append(Paragraph("Secretaría de Educación Jalisco", estilo_titulo))
+        elementos.append(Paragraph("Dirección de Formación Continua · Área de Recursos Humanos", estilo_sub))
+    elementos.append(Spacer(1, 0.2*cm))
     elementos.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#4B3FA0")))
     elementos.append(Spacer(1, 0.3*cm))
     elementos.append(Paragraph("COMPROBANTE DE CAPTURA DE INCIDENCIA", estilo_titulo))
@@ -978,19 +989,38 @@ def main():
         st.markdown("## 🔍 Verificación de Autenticidad")
         st.caption("Módulo de Control Interno · Dirección de Formación Continua · SEJ")
         st.divider()
-        incidencias = cargar_incidencias()
+        incidencias   = cargar_incidencias()
+        solicitudes   = cargar_solicitudes_eco()
+        # Buscar en Incidencias (PSE, COM, CHO)
         match = incidencias[incidencias["FOLIO"].astype(str) == folio_a_buscar]
-        if not match.empty:
-            row = match.iloc[0]
+        # Si no está, buscar en Solicitudes (ECO)
+        if match.empty and not solicitudes.empty and "FOLIO" in solicitudes.columns:
+            match_eco = solicitudes[solicitudes["FOLIO"].astype(str) == folio_a_buscar]
+            encontrado_en = "solicitudes"
+        else:
+            match_eco = pd.DataFrame()
+            encontrado_en = "incidencias"
+
+        registro = match if not match.empty else match_eco
+
+        if not registro.empty:
+            row = registro.iloc[0]
             st.success("✅ DOCUMENTO AUTÉNTICO Y REGISTRADO EN SISTEMA")
             with st.container(border=True):
-                st.write(f"**Folio Oficial:** {row['FOLIO']}")
-                st.write(f"**Servidor Público:** {row['NOMBRE']}")
-                st.write(f"**Filiación:** {rfc_oculto(str(row['RFC']))}")
-                st.write(f"**Incidencia:** {TIPO_LABELS.get(row['TIPO'], row['TIPO'])}")
-                st.write(f"**Periodo:** {row['FECHA_INICIO']} al {row['FECHA_FIN']}")
-                st.write(f"**Estado:** {row['ESTADO']}")
-                st.write(f"**Motivo:** {row['MOTIVO']}")
+                st.write(f"**Folio Oficial:** {folio_a_buscar}")
+                nombre = row.get("NOMBRE") or row.get("Nombre Completo", "")
+                rfc_reg = row.get("RFC", "")
+                tipo_reg = row.get("TIPO") or row.get("Tipo Permiso", "Día económico")
+                fi_reg = row.get("FECHA_INICIO") or row.get("Fecha Inicio", "")
+                ff_reg = row.get("FECHA_FIN") or row.get("Fecha Fin", "")
+                estado_reg = row.get("ESTADO") or ("AUTORIZADO" if str(row.get("Aprobado Por","")).strip() != "" else "PENDIENTE")
+                motivo_reg = row.get("MOTIVO") or row.get("Motivo", "")
+                st.write(f"**Servidor Público:** {nombre}")
+                st.write(f"**Filiación:** {rfc_oculto(str(rfc_reg))}")
+                st.write(f"**Incidencia:** {TIPO_LABELS.get(tipo_reg, tipo_reg)}")
+                st.write(f"**Periodo:** {fi_reg} al {ff_reg}")
+                st.write(f"**Estado:** {estado_reg}")
+                st.write(f"**Motivo:** {motivo_reg}")
         else:
             st.error("🚨 ALERTA: DOCUMENTO NO ENCONTRADO O ALTERADO")
             st.warning("Este folio no existe en los registros oficiales de la DFC. El formato impreso podría ser falso o modificado de manera ilícita.")
