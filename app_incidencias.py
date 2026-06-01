@@ -333,11 +333,11 @@ def subir_anexo_drive(archivo, folio: str, rfc: str) -> str:
             body=file_metadata,
             media_body=media,
             fields="id",
-            supportsAllDrives=True
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
         ).execute()
 
         file_id = archivo_drive.get("id")
-        # Hacer el archivo visible con el link
         service.permissions().create(
             fileId=file_id,
             body={"type": "anyone", "role": "reader"},
@@ -924,7 +924,7 @@ def main():
 
     with st.sidebar:
         st.image("dfc_logo.png", use_container_width=True)
-        st.markdown("**Portal de Gestión de Personal**")
+        st.markdown("**Portal de Gestión de Incidencias**")
         st.caption('👤 Servidor(a) Público(a): ' + st.session_state['nombre'])
         st.caption('🏷️ Nivel de acceso: ' + ('Administrador RH' if st.session_state['rol'] == 'admin' else 'Personal de la Dirección'))
         st.divider()
