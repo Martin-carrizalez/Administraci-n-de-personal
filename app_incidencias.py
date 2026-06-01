@@ -228,7 +228,7 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
 
     estilo_titulo   = ParagraphStyle("t", parent=styles["Normal"], fontSize=13, fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=4)
     estilo_sub      = ParagraphStyle("s", parent=styles["Normal"], fontSize=10, fontName="Helvetica", alignment=TA_CENTER, spaceAfter=2)
-    estilo_folio    = ParagraphStyle("f", parent=styles["Normal"], fontSize=16, fontName="Helvetica-Bold", alignment=TA_CENTER, textColor=colors.HexColor("#4B3FA0"), spaceAfter=6)
+    estilo_folio    = ParagraphStyle("f", parent=styles["Normal"], fontSize=16, fontName="Helvetica-Bold", alignment=TA_CENTER, textColor=colors.HexColor("#002F6C"), spaceAfter=6)
     estilo_aviso    = ParagraphStyle("a", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Oblique", alignment=TA_CENTER, textColor=colors.HexColor("#888888"))
 
     elementos = []
@@ -247,7 +247,7 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
         elementos.append(Paragraph("Secretaría de Educación Jalisco", estilo_titulo))
         elementos.append(Paragraph("Dirección de Formación Continua · Área de Recursos Humanos", estilo_sub))
     elementos.append(Spacer(1, 0.2*cm))
-    elementos.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#4B3FA0")))
+    elementos.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#002F6C")))
     elementos.append(Spacer(1, 0.3*cm))
     elementos.append(Paragraph("COMPROBANTE DE CAPTURA DE INCIDENCIA", estilo_titulo))
     elementos.append(Spacer(1, 0.2*cm))
@@ -260,12 +260,12 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
         ["Filiación:", rfc_oculto(datos["rfc"])],
         ["Tipo de incidencia:", datos.get("subtipo_label", datos["tipo_label"])],
         ["Fecha de solicitud:", datos["fecha_solicitud"]],
-        ["Fecha inicio:", datos["fecha_inicio"]],
-        ["Fecha fin:", datos["fecha_fin"]],
+        ["Fecha de solicitud:", datos["fecha_solicitud"]],
+        ["Fecha de aplicación:", datos["fecha_inicio"] if datos["tipo"] == "CHO" else datos["fecha_inicio"]],
         ["Días solicitados:", "N/A" if datos["tipo"] == "PSE" else str(datos["dias"])],
         ["Horas de pase:", (f"{datos.get('horas_pase', 0)}h" if datos.get("horas_pase", 0) else "No registradas") if datos["tipo"] == "PSE" else "N/A"],
         ["Motivo / Descripción:", datos["motivo"]],
-        ["Documento anexo:", "Sí, se presentará en RH" if datos["tiene_anexo"] else "No aplica"],
+        ["Motivo / Descripción:", Paragraph(datos["motivo"], ParagraphStyle('mot', parent=styles['Normal'], fontSize=9, fontName='Helvetica'))],
     ]
 
     t = Table(tabla_datos, colWidths=[5*cm, 11*cm])
@@ -274,7 +274,7 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
         ("FONTNAME",    (1, 0), (1, -1), "Helvetica"),
         ("FONTSIZE",    (0, 0), (-1, -1), 9),
         ("VALIGN",      (0, 0), (-1, -1), "TOP"),
-        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#F7F5FF"), colors.white]),
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#F4F6F9"), colors.white]),
         ("GRID",        (0, 0), (-1, -1), 0.3, colors.HexColor("#DDDDDD")),
         ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ("RIGHTPADDING",(0, 0), (-1, -1), 8),
@@ -462,7 +462,7 @@ def guardar_incidencia(datos: dict):
         "", "", "",
     ]
     ws.append_row(fila, value_input_option="USER_ENTERED")
-    st.cache_data.clear()
+    cargar_incidencias.clear()
 
 def autorizar_incidencia(folio: str, obs: str = ""):
     client = get_client()
@@ -478,7 +478,7 @@ def autorizar_incidencia(folio: str, obs: str = ""):
             if obs:
                 ws.update_cell(i, headers.index("OBSERVACIONES") + 1, obs)
             break
-    st.cache_data.clear()
+    cargar_incidencias.clear()
 
 def rechazar_incidencia(folio: str, obs: str):
     client = get_client()
@@ -493,7 +493,7 @@ def rechazar_incidencia(folio: str, obs: str):
             ws.update_cell(i, headers.index("FECHA_AUTORIZACION") + 1, datetime.now().strftime("%Y-%m-%d %H:%M"))
             ws.update_cell(i, headers.index("OBSERVACIONES") + 1,      obs)
             break
-    st.cache_data.clear()
+    cargar_incidencias.clear()
 
 def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str):
     client = get_client()
@@ -595,6 +595,12 @@ def login():
 # ─────────────────────────────────────────────
 # VISTA EMPLEADO
 # ─────────────────────────────────────────────
+def mapear_emojis_estado(estado: str) -> str:
+    est = str(estado).upper()
+    if "AUTORIZADO" in est or "✅" in est: return "✅ AUTORIZADO"
+    if "RECHAZADO"  in est or "🔴" in est: return "🔴 RECHAZADO"
+    return "🟡 PENDIENTE"
+
 def vista_empleado():
     rfc      = st.session_state["rfc"]
     nombre   = st.session_state["nombre"]
@@ -665,16 +671,12 @@ def vista_empleado():
             sol_hist["FOLIO"]              = "HISTÓRICO"
             sol_hist["HORAS_PASE"]         = ""
             sol_hist["ESTADO"]             = sol_hist["AUTORIZADO_POR"].apply(
-                lambda x: "✅ AUTORIZADO" if str(x).strip() != "" else "🟡 PENDIENTE"
+                lambda x: mapear_emojis_estado("AUTORIZADO" if str(x).strip() != "" else "PENDIENTE")
             )
             sol_hist["FECHA_AUTORIZACION"] = ""
 
         if not mis_inc.empty:
-            mis_inc["ESTADO"] = mis_inc["ESTADO"].map({
-                "AUTORIZADO": "✅ AUTORIZADO",
-                "PENDIENTE":  "🟡 PENDIENTE",
-                "RECHAZADO":  "🔴 RECHAZADO",
-            }).fillna(mis_inc["ESTADO"])
+            mis_inc["ESTADO"] = mis_inc["ESTADO"].apply(mapear_emojis_estado)
 
         cols_mostrar = ["FOLIO", "TIPO", "FECHA_INICIO", "FECHA_FIN", "DIAS", "HORAS_PASE", "ESTADO", "FECHA_AUTORIZACION"]
         frames = []
@@ -856,7 +858,6 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
             "motivo":          motivo,
             "tiene_anexo":     tiene_anexo or archivo_anexo is not None,
             "link_anexo":      link_anexo,
-            "subtipo_label":   subtipo_label if subtipo_label else None,
             "subtipo_label":   subtipo_label if subtipo_label else TIPO_LABELS[tipo],
         }
         if tipo == "ECO":
