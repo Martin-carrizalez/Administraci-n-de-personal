@@ -333,16 +333,18 @@ def subir_anexo_drive(archivo, folio: str, rfc: str) -> str:
             body=file_metadata,
             media_body=media,
             fields="id",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True
+            supportsAllDrives=True
         ).execute()
 
         file_id = archivo_drive.get("id")
-        service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-            supportsAllDrives=True
-        ).execute()
+        try:
+            service.permissions().create(
+                fileId=file_id,
+                body={"type": "anyone", "role": "reader"},
+                supportsAllDrives=True
+            ).execute()
+        except Exception:
+            pass  # En Shared Drive los permisos los maneja el admin
 
         return f"https://drive.google.com/file/d/{file_id}/view"
     except Exception as e:
