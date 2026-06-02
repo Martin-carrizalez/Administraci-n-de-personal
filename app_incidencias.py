@@ -1420,34 +1420,21 @@ def vista_empleado():
             except:
                 st.warning("Formato inválido. Usa HH:MM (ej: 08:37)")
         elif hora_salida:
-            horas_pase_inp = st.number_input("Horas aproximadas de ausencia", min_value=0.5, max_value=8.0, step=0.5, value=1.0)
-            horas_pase     = horas_pase_inp
-            st.caption(f"Acumulado del mes: **{horas_pases + horas_pase}h**")
-        motivo      = st.text_area("Motivo", max_chars=300)
-        archivo_anexo = st.file_uploader("Adjuntar justificante (opcional)", type=["pdf","png","jpg","jpeg"])
-        tiene_anexo   = archivo_anexo is not None
-
-        detalle = subtipo
-        if hora_salida:  detalle += f" | Salida: {hora_salida}"
-        if hora_entrada: detalle += f" | Entrada: {hora_entrada}"
-        if hora_retorno: detalle += f" | Retorno: {hora_retorno}"
-        motivo_completo = (detalle + '\n' + motivo).strip()
-        enviar_solicitud(rfc, nombre, tipo, fecha, fecha, 0, horas_pase, motivo_completo, tiene_anexo, incidencias, archivo_anexo, subtipo_label=subtipo, hora_retorno=hora_retorno or "")
-
-
-    # ── COMISIÓN ────────────────────────────────
-    elif tipo == "COM":
-        col1, col2 = st.columns(2)
-        with col1:
-            fi = st.date_input("Fecha inicio comisión", value=date.today())
-        with col2:
-            ff = st.date_input("Fecha fin comisión",    value=date.today())
-        if ff < fi:
-            st.error("La fecha fin no puede ser anterior a la fecha inicio.")
-            return
-        festivos = cargar_festivos()
-        dias_hab = dias_habiles_entre(fi, ff, festivos)
-        st.caption(f"Días de comisión: **{dias_hab}**")
+            try:
+                horarios_df_pse = cargar_horarios()
+                emp_hor_pse = horarios_df_pse[horarios_df_pse["RFC"].astype(str).str.upper().str.strip() == rfc.upper().strip()]
+                nd_pse = ["LUN","MAR","MIE","JUE","VIE","SAB","DOM"][fecha.weekday()]
+                salida_prog = str(emp_hor_pse.iloc[0].get(f"SALIDA_{nd_pse}","")).strip() if not emp_hor_pse.empty else ""
+                if salida_prog:
+                    sal_dt = datetime.combine(fecha, datetime.strptime(hora_salida.strip(), "%H:%M").time())
+                    fin_dt = datetime.combine(fecha, datetime.strptime(salida_prog, "%H:%M").time())
+                    horas_pase = round(max((fin_dt - sal_dt).total_seconds() / 3600, 0), 2)
+                    st.caption(f"Horas de ausencia (hasta fin de jornada {salida_prog}): **{horas_pase}h** · Acumulado mes: **{horas_pases + horas_pase}h**")
+                else:
+                    horas_pase = 0.0
+            except:
+                horas_pase = 0.0
+                st.warning("No se pudo calcular automáticamente.")
         motivo      = st.text_area("Motivo de la comisión", max_chars=300)
         archivo_anexo = st.file_uploader("Adjuntar constancia/oficio (opcional)", type=["pdf","png","jpg","jpeg"])
         tiene_anexo   = archivo_anexo is not None
