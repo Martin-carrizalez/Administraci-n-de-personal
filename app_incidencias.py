@@ -1435,6 +1435,20 @@ def vista_empleado():
             except:
                 horas_pase = 0.0
                 st.warning("No se pudo calcular automáticamente.")
+
+    # ── COMISIÓN ────────────────────────────────
+    elif tipo == "COM":
+        col1, col2 = st.columns(2)
+        with col1:
+            fi = st.date_input("Fecha inicio comisión", value=date.today())
+        with col2:
+            ff = st.date_input("Fecha fin comisión",    value=date.today())
+        if ff < fi:
+            st.error("La fecha fin no puede ser anterior a la fecha inicio.")
+        else:
+            festivos = cargar_festivos()
+            dias_hab = dias_habiles_entre(fi, ff, festivos)
+            st.caption(f"Días de comisión: **{dias_hab}**")
         motivo      = st.text_area("Motivo de la comisión", max_chars=300)
         archivo_anexo = st.file_uploader("Adjuntar constancia/oficio (opcional)", type=["pdf","png","jpg","jpeg"])
         tiene_anexo   = archivo_anexo is not None
