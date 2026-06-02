@@ -1409,17 +1409,20 @@ def vista_empleado():
 
         # Calcular horas del pase
         horas_pase = 0.0
+        horas_pase = 0.0
         if hora_salida and hora_retorno:
-            sal  = datetime.combine(fecha, hora_salida)
-            ret  = datetime.combine(fecha, hora_retorno)
-            diff = (ret - sal).total_seconds() / 3600
-            horas_pase = round(max(diff, 0), 2)
-            st.caption(f"Horas de ausencia estimadas: **{horas_pase}h** · Acumulado del mes: **{horas_pases + horas_pase}h**")
+            try:
+                sal  = datetime.combine(fecha, datetime.strptime(hora_salida.strip(),  "%H:%M").time())
+                ret  = datetime.combine(fecha, datetime.strptime(hora_retorno.strip(), "%H:%M").time())
+                diff = (ret - sal).total_seconds() / 3600
+                horas_pase = round(max(diff, 0), 2)
+                st.caption(f"Horas de ausencia: **{horas_pase}h** · Acumulado mes: **{horas_pases + horas_pase}h**")
+            except:
+                st.warning("Formato inválido. Usa HH:MM (ej: 08:37)")
         elif hora_salida:
             horas_pase_inp = st.number_input("Horas aproximadas de ausencia", min_value=0.5, max_value=8.0, step=0.5, value=1.0)
             horas_pase     = horas_pase_inp
             st.caption(f"Acumulado del mes: **{horas_pases + horas_pase}h**")
-
         motivo      = st.text_area("Motivo", max_chars=300)
         archivo_anexo = st.file_uploader("Adjuntar justificante (opcional)", type=["pdf","png","jpg","jpeg"])
         tiene_anexo   = archivo_anexo is not None
