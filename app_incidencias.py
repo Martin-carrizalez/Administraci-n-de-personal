@@ -109,6 +109,19 @@ def cargar_incidencias():
     return pd.DataFrame(data) if data else pd.DataFrame(columns=COLS_INCIDENCIAS)
 
 @st.cache_data(ttl=300)
+def cargar_historial_horarios():
+    client = get_client()
+    sh = client.open_by_key(st.secrets["sheet_checador_id"])
+    ws = sh.worksheet("HISTORIAL_HORARIOS")
+    data = ws.get_all_records(numericise_ignore=["all"])
+    return pd.DataFrame(data) if data else pd.DataFrame(columns=[
+        "RFC","NOMBRE","FECHA_INICIO","FECHA_FIN",
+        "ENTRADA_LUN","SALIDA_LUN","ENTRADA_MAR","SALIDA_MAR",
+        "ENTRADA_MIE","SALIDA_MIE","ENTRADA_JUE","SALIDA_JUE",
+        "ENTRADA_VIE","SALIDA_VIE"
+    ])
+
+@st.cache_data(ttl=300)
 def cargar_festivos():
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
@@ -260,12 +273,18 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
         ["Filiación:", rfc_oculto(datos["rfc"])],
         ["Tipo de incidencia:", datos.get("subtipo_label", datos["tipo_label"])],
         ["Fecha de solicitud:", datos["fecha_solicitud"]],
-        ["Fecha de solicitud:", datos["fecha_solicitud"]],
-        ["Fecha de aplicación:", datos["fecha_inicio"] if datos["tipo"] == "CHO" else datos["fecha_inicio"]],
-        ["Días solicitados:", "N/A" if datos["tipo"] == "PSE" else str(datos["dias"])],
-        ["Horas de pase:", (f"{datos.get('horas_pase', 0)}h" if datos.get("horas_pase", 0) else "No registradas") if datos["tipo"] == "PSE" else "N/A"],
-        ["Motivo / Descripción:", datos["motivo"]],
-        ["Motivo / Descripción:", Paragraph(datos["motivo"], ParagraphStyle('mot', parent=styles['Normal'], fontSize=9, fontName='Helvetica'))],
+    ]
+    if datos["tipo"] == "CHO":
+        tabla_datos.insert(4, ["Fecha de aplicación:", datos["fecha_inicio"]])
+    else:
+        tabla_datos.insert(4, ["Fecha inicio:", datos["fecha_inicio"]])
+        tabla_datos.insert(5, ["Fecha fin:", datos["fecha_fin"]])
+    horas_val = datos.get("horas_pase", 0)
+    tabla_datos += [
+        ["Días solicitados:", "N/A" if datos["tipo"] in ["PSE", "CHO"] else str(datos["dias"])],
+        ["Horas de pase:", (f"{horas_val}h" if horas_val else "No registradas") if datos["tipo"] == "PSE" else "N/A"],
+        ["Motivo / Descripción:", Paragraph(str(datos["motivo"]), ParagraphStyle("mot", parent=styles["Normal"], fontSize=9, fontName="Helvetica"))],
+        ["Documento anexo:", "Sí, se presentará en RH" if datos["tiene_anexo"] else "No aplica"],
     ]
 
     t = Table(tabla_datos, colWidths=[5*cm, 11*cm])
@@ -495,14 +514,50 @@ def rechazar_incidencia(folio: str, obs: str):
             break
     cargar_incidencias.clear()
 
-def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str):
+def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha_inicio_cho: str = None):
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
     ws_emp = sh.worksheet("empleados")
     registros = ws_emp.get_all_records(numericise_ignore=["all"])
     headers   = ws_emp.row_values(1)
+    fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+    fecha_aplicacion = fecha_inicio_cho if fecha_inicio_cho else fecha_hoy
+
     for i, row in enumerate(registros, start=2):
         if str(row.get("RFC", "")).upper().strip() == str(emp_id).upper().strip() or str(row.get("NOMBRE", "")).upper().strip() == str(emp_id).upper().strip():
+            # Guardar horario ANTERIOR en HISTORIAL_HORARIOS antes de sobrescribir
+            try:
+                ws_hist = sh.worksheet("HISTORIAL_HORARIOS")
+                hist_data = ws_hist.get_all_records(numericise_ignore=["all"])
+                fila_hist = [
+                    str(row.get("RFC", emp_id)),
+                    str(row.get("NOMBRE", "")),
+                    "",  # FECHA_INICIO — se llenará con la del registro anterior
+                    str(fecha_aplicacion),  # FECHA_FIN — hasta el día antes del nuevo
+                    str(row.get("ENTRADA_LUN", "")), str(row.get("SALIDA_LUN", "")),
+                    str(row.get("ENTRADA_MAR", "")), str(row.get("SALIDA_MAR", "")),
+                    str(row.get("ENTRADA_MIE", "")), str(row.get("SALIDA_MIE", "")),
+                    str(row.get("ENTRADA_JUE", "")), str(row.get("SALIDA_JUE", "")),
+                    str(row.get("ENTRADA_VIE", "")), str(row.get("SALIDA_VIE", "")),
+                ]
+                ws_hist.append_row(fila_hist, value_input_option="USER_ENTERED")
+                # Agregar también el nuevo horario con FECHA_INICIO
+                fila_nuevo = [
+                    str(row.get("RFC", emp_id)),
+                    str(row.get("NOMBRE", "")),
+                    str(fecha_aplicacion),  # FECHA_INICIO
+                    "",  # FECHA_FIN — vacío porque es el vigente
+                    horario_nuevo.get("LUN",{}).get("entrada",""), horario_nuevo.get("LUN",{}).get("salida",""),
+                    horario_nuevo.get("MAR",{}).get("entrada",""), horario_nuevo.get("MAR",{}).get("salida",""),
+                    horario_nuevo.get("MIE",{}).get("entrada",""), horario_nuevo.get("MIE",{}).get("salida",""),
+                    horario_nuevo.get("JUE",{}).get("entrada",""), horario_nuevo.get("JUE",{}).get("salida",""),
+                    horario_nuevo.get("VIE",{}).get("entrada",""), horario_nuevo.get("VIE",{}).get("salida",""),
+                ]
+                ws_hist.append_row(fila_nuevo, value_input_option="USER_ENTERED")
+            except Exception as e:
+                st.warning(f"No se pudo guardar historial: {e}")
+
+            # Sobrescribir horario actual en tab empleados
             for dia, (col_e, col_s) in COLUMNAS_HORARIO.items():
                 if dia in horario_nuevo:
                     if col_e in headers:
@@ -600,6 +655,576 @@ def mapear_emojis_estado(estado: str) -> str:
     if "AUTORIZADO" in est or "✅" in est: return "✅ AUTORIZADO"
     if "RECHAZADO"  in est or "🔴" in est: return "🔴 RECHAZADO"
     return "🟡 PENDIENTE"
+
+# ── TAB RELOJ CHECADOR (solo admin) ──────────────
+def render_checador():
+    import xlrd
+    import io as _io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    DIAS_NUM_CH  = {0:"LUN",1:"MAR",2:"MIE",3:"JUE",4:"VIE",5:"SAB",6:"DOM"}
+    DIAS_NOMBRE  = {"LUN":"Lunes","MAR":"Martes","MIE":"Miércoles","JUE":"Jueves","VIE":"Viernes","SAB":"Sábado","DOM":"Domingo"}
+
+    def get_client_ch():
+        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=SCOPES)
+        return gspread.authorize(creds)
+
+    @st.cache_data(ttl=300)
+    def load_emp_ch():
+        client = get_client_ch()
+        ws = client.open_by_key(st.secrets["sheet_checador_id"]).worksheet("empleados")
+        data = ws.get_all_records(numericise_ignore=["all"])
+        df = pd.DataFrame(data).fillna("")
+        df["ID"] = df["ID"].astype(str).str.strip()
+        if "ACTIVO" not in df.columns:
+            df["ACTIVO"] = "SI"
+        return df
+
+    @st.cache_data(ttl=300)
+    def load_fest_ch():
+        client = get_client_ch()
+        ws = client.open_by_key(st.secrets["sheet_checador_id"]).worksheet("festivos")
+        data = ws.get_all_records()
+        df = pd.DataFrame(data).fillna("")
+        fechas = set()
+        if "FECHA_INICIO" in df.columns:
+            for _, r in df.iterrows():
+                fi = pd.to_datetime(r.get("FECHA_INICIO",""), errors="coerce")
+                ff = pd.to_datetime(r.get("FECHA_FIN","") or r.get("FECHA_INICIO",""), errors="coerce")
+                if pd.isna(fi): continue
+                if pd.isna(ff): ff = fi
+                d = fi
+                while d <= ff:
+                    fechas.add(d.date())
+                    d += timedelta(days=1)
+        return fechas
+
+    @st.cache_data(ttl=300)
+    def load_hist_ch():
+        try:
+            client = get_client_ch()
+            ws = client.open_by_key(st.secrets["sheet_checador_id"]).worksheet("HISTORIAL_HORARIOS")
+            data = ws.get_all_records(numericise_ignore=["all"])
+            return pd.DataFrame(data).fillna("") if data else pd.DataFrame()
+        except:
+            return pd.DataFrame()
+
+    @st.cache_data(ttl=300)
+    def load_economicos_ch(fi_str, ff_str):
+        try:
+            client = get_client_ch()
+            ws = client.open_by_key(st.secrets["sheet_economicos_id"]).worksheet("Solicitudes")
+            data = ws.get_all_records(numericise_ignore=["all"])
+            df = pd.DataFrame(data).fillna("")
+            if df.empty: return pd.DataFrame()
+            df["Fecha Inicio"] = pd.to_datetime(df["Fecha Inicio"], errors="coerce", dayfirst=True)
+            df["Fecha Fin"]    = pd.to_datetime(df["Fecha Fin"],    errors="coerce", dayfirst=True)
+            fi = datetime.strptime(fi_str, "%Y-%m-%d")
+            ff = datetime.strptime(ff_str, "%Y-%m-%d")
+            mask = (df["Fecha Inicio"] <= ff) & (df["Fecha Fin"] >= fi)
+            # Solo aprobados
+            aprobados = df[mask & (df["Aprobado Por"].astype(str).str.strip() != "")]
+            return aprobados
+        except Exception as e:
+            return pd.DataFrame()
+
+    @st.cache_data(ttl=300)
+    def load_incapacidades_ch(fi_str, ff_str):
+        try:
+            client = get_client_ch()
+            ws = client.open_by_key(st.secrets["sheet_economicos_id"]).worksheet("Incapacidades")
+            data = ws.get_all_records(numericise_ignore=["all"])
+            df = pd.DataFrame(data).fillna("")
+            if df.empty: return pd.DataFrame()
+            df["Fecha Inicio"]  = pd.to_datetime(df["Fecha Inicio"],  errors="coerce", dayfirst=True)
+            df["Fecha Termino"] = pd.to_datetime(df["Fecha Termino"], errors="coerce", dayfirst=True)
+            fi = datetime.strptime(fi_str, "%Y-%m-%d")
+            ff = datetime.strptime(ff_str, "%Y-%m-%d")
+            mask = (df["Fecha Inicio"] <= ff) & (df["Fecha Termino"] >= fi)
+            return df[mask].copy()
+        except:
+            return pd.DataFrame()
+
+    @st.cache_data(ttl=300)
+    def load_incidencias_ch(fi_str, ff_str):
+        """Carga pases y comisiones autorizados del Sheet del checador."""
+        try:
+            client = get_client_ch()
+            ws = client.open_by_key(st.secrets["sheet_checador_id"]).worksheet("Incidencias")
+            data = ws.get_all_records(numericise_ignore=["all"])
+            df = pd.DataFrame(data).fillna("")
+            if df.empty: return pd.DataFrame()
+            df = df[df["ESTADO"] == "AUTORIZADO"]
+            df["FECHA_INICIO"] = pd.to_datetime(df["FECHA_INICIO"], errors="coerce")
+            df["FECHA_FIN"]    = pd.to_datetime(df["FECHA_FIN"],    errors="coerce")
+            fi = datetime.strptime(fi_str, "%Y-%m-%d")
+            ff = datetime.strptime(ff_str, "%Y-%m-%d")
+            mask = (df["FECHA_INICIO"] <= ff) & (df["FECHA_FIN"] >= fi)
+            return df[mask].copy()
+        except:
+            return pd.DataFrame()
+
+    def build_justificantes_rfc(economicos, incapacidades, incidencias_df, fi, ff):
+        """
+        Retorna dict: {RFC_upper -> {date -> tipo_justificante}}
+        Incluye: días económicos, incapacidades, comisiones, pases de entrada
+        """
+        resultado = {}
+
+        # Días económicos aprobados
+        if not economicos.empty:
+            col_rfc = next((c for c in economicos.columns if "RFC" in c.upper()), None)
+            col_fi  = next((c for c in economicos.columns if "INICIO" in c.upper()), None)
+            col_ff  = next((c for c in economicos.columns if "FIN" in c.upper() and "INICIO" not in c.upper()), None)
+            if col_rfc and col_fi and col_ff:
+                for _, r in economicos.iterrows():
+                    rfc = str(r.get(col_rfc,"")).strip().upper()
+                    if not rfc: continue
+                    try:
+                        d = r[col_fi]
+                        f = r[col_ff]
+                        while d <= f:
+                            if fi <= d.date() <= ff:
+                                resultado.setdefault(rfc, {})[d.date()] = "Día económico"
+                            d += timedelta(days=1)
+                    except: pass
+
+        # Incapacidades
+        if not incapacidades.empty:
+            col_rfc  = next((c for c in incapacidades.columns if "RFC" in c.upper()), None)
+            col_fi   = next((c for c in incapacidades.columns if "INICIO" in c.upper()), None)
+            col_ff   = next((c for c in incapacidades.columns if "TERMINO" in c.upper() or ("FIN" in c.upper() and "INICIO" not in c.upper())), None)
+            col_tipo = next((c for c in incapacidades.columns if "TIPO" in c.upper()), None)
+            if col_rfc and col_fi and col_ff:
+                for _, r in incapacidades.iterrows():
+                    rfc = str(r.get(col_rfc,"")).strip().upper()
+                    if not rfc: continue
+                    tipo = str(r.get(col_tipo,"Incapacidad")).strip() if col_tipo else "Incapacidad"
+                    try:
+                        d = r[col_fi]
+                        f = r[col_ff]
+                        while d <= f:
+                            if fi <= d.date() <= ff:
+                                resultado.setdefault(rfc, {})[d.date()] = tipo or "Incapacidad"
+                            d += timedelta(days=1)
+                    except: pass
+
+        # Comisiones y pases autorizados desde Incidencias
+        if not incidencias_df.empty:
+            for _, r in incidencias_df.iterrows():
+                rfc  = str(r.get("RFC","")).strip().upper()
+                tipo = str(r.get("TIPO","")).strip()
+                if not rfc: continue
+                try:
+                    d = r["FECHA_INICIO"]
+                    f = r["FECHA_FIN"]
+                    if pd.isna(d) or pd.isna(f): continue
+                    while d <= f:
+                        if fi <= d.date() <= ff:
+                            if tipo == "COM":
+                                resultado.setdefault(rfc, {})[d.date()] = "Comisión"
+                            elif tipo == "PSE":
+                                # Pase de entrada: no retardo mayor ese día
+                                resultado.setdefault(rfc, {}).setdefault(d.date(), "Pase de entrada")
+                        d += timedelta(days=1)
+                except: pass
+
+        return resultado
+
+    def get_horario_fecha(emp_row, fecha, historial_df):
+        rfc = str(emp_row.get("RFC","")).upper().strip()
+        if historial_df.empty or not rfc:
+            return emp_row
+        hist_emp = historial_df[historial_df["RFC"].astype(str).str.upper().str.strip() == rfc]
+        if hist_emp.empty:
+            return emp_row
+        for _, h in hist_emp.sort_values("FECHA_INICIO", ascending=False).iterrows():
+            try:
+                fi_h = datetime.strptime(str(h["FECHA_INICIO"]), "%Y-%m-%d").date() if h["FECHA_INICIO"] else None
+                ff_h = datetime.strptime(str(h["FECHA_FIN"]),    "%Y-%m-%d").date() if h["FECHA_FIN"]    else None
+                if fi_h and ff_h and fi_h <= fecha <= ff_h:
+                    return h
+                if fi_h and not ff_h and fecha >= fi_h:
+                    return h
+            except: pass
+        return emp_row
+
+    def parse_checada_ch(val):
+        s = str(val).strip()
+        if not s or s == "nan" or len(s) < 5:
+            return None, None
+        return s[:5], (s[5:10] if len(s) >= 10 else "")
+
+    def parse_report_ch(file_bytes, empleados, festivos, historial_df, just_rfc, umbral=10):
+        wb = xlrd.open_workbook(file_contents=file_bytes)
+        if "Reporte de Asistencia" not in wb.sheet_names():
+            raise ValueError("No encontré hoja 'Reporte de Asistencia'.")
+        sh = wb.sheet_by_name("Reporte de Asistencia")
+        periodo = ""
+        for i in range(5):
+            for j in range(sh.ncols):
+                v = str(sh.cell_value(i,j)).strip()
+                if "~" in v and "-" in v:
+                    periodo = v; break
+        fecha_ini = datetime.strptime(periodo.split("~")[0].strip(), "%Y-%m-%d")
+        fecha_fin = datetime.strptime(periodo.split("~")[1].strip(), "%Y-%m-%d")
+        dias = []
+        d = fecha_ini
+        while d <= fecha_fin:
+            dias.append(d); d += timedelta(days=1)
+        col_to_day = {}
+        for i in range(5):
+            row = sh.row_values(i)
+            if sum(1 for v in row if isinstance(v, float) and 1 <= v <= 31) >= 10:
+                for j, v in enumerate(row):
+                    if isinstance(v, float) and 1 <= v <= 31:
+                        col_to_day[j] = int(v)
+                break
+        checadas = {}
+        i = 0
+        while i < sh.nrows:
+            row = sh.row_values(i)
+            if str(row[0]).strip() == "ID:" and str(row[4]).strip().replace(".0",""):
+                uid = str(row[4]).strip().replace(".0","")
+                checadas[uid] = {}
+                if i+1 < sh.nrows:
+                    dr = sh.row_values(i+1)
+                    for col, dn in col_to_day.items():
+                        val = str(dr[col]).strip() if col < len(dr) else ""
+                        if val and val != "nan":
+                            e, s = parse_checada_ch(val)
+                            if e: checadas[uid][dn] = (e, s)
+                i += 2; continue
+            i += 1
+
+        activos = empleados[empleados["ACTIVO"]=="SI"]
+        resumen, detalle_faltas, detalle_retardos = [], [], []
+
+        for _, emp_row in activos.iterrows():
+            uid    = emp_row["ID"]
+            nombre = emp_row["NOMBRE"]
+            rfc    = str(emp_row.get("RFC","")).upper().strip()
+            dias_prog = asistidos = faltas = retardos = retardos_min = justif = 0
+            uid_ch     = checadas.get(uid, {})
+            just_emp   = just_rfc.get(rfc, {})
+            dias_falta = []
+            dias_just  = []
+            det_retardos_emp = []
+
+            for dia_dt in dias:
+                if dia_dt.date() in festivos:
+                    continue
+                nd = DIAS_NUM_CH[dia_dt.weekday()]
+                hor = get_horario_fecha(emp_row, dia_dt.date(), historial_df)
+                ep  = str(hor.get(f"ENTRADA_{nd}","")).strip()
+                if not ep:
+                    continue
+                dias_prog += 1
+                ch  = uid_ch.get(dia_dt.day)
+                just_tipo = just_emp.get(dia_dt.date())
+
+                if not ch:
+                    if just_tipo and just_tipo not in ["Pase de entrada"]:
+                        justif += 1
+                        dias_just.append(f"{dia_dt.strftime('%d/%m')} ({just_tipo})")
+                    else:
+                        faltas += 1
+                        dias_falta.append(dia_dt.strftime("%d/%m"))
+                    continue
+
+                asistidos += 1
+                entrada_real, salida_real = ch
+                mins   = 0
+                estado = "Asistió"
+                try:
+                    ep_dt = datetime.strptime(ep, "%H:%M")
+                    er_dt = datetime.strptime(entrada_real, "%H:%M")
+                    mins  = (er_dt.hour - ep_dt.hour)*60 + (er_dt.minute - ep_dt.minute)
+                    if mins > umbral:
+                        # Si tiene pase de entrada autorizado ese día, no cuenta retardo
+                        if just_tipo == "Pase de entrada":
+                            estado = "Asistió"
+                        else:
+                            retardos += 1
+                            retardos_min += mins
+                            estado = "Retardo"
+                            det_retardos_emp.append({
+                                "Empleado": nombre,
+                                "Fecha": dia_dt.strftime("%d/%m/%Y"),
+                                "Día": DIAS_NOMBRE.get(nd, nd),
+                                "Hora prog.": ep,
+                                "Hora real": entrada_real,
+                                "Minutos tarde": mins,
+                                "Observación": ""
+                            })
+                except: pass
+
+                detalle_faltas.append({
+                    "nombre": nombre, "fecha": dia_dt.date(), "nd": nd,
+                    "prog_entrada": ep, "checada_entrada": entrada_real,
+                    "checada_salida": salida_real, "retardo_min": max(0,mins),
+                    "estado": estado, "justificante": just_tipo or ""
+                })
+                detalle_retardos.extend(det_retardos_emp)
+                det_retardos_emp = []
+
+            pct = round((asistidos+justif)/dias_prog*100) if dias_prog > 0 else 0
+            resumen.append({
+                "Empleado": nombre,
+                "Días prog.": dias_prog,
+                "Asistidos": asistidos,
+                "Faltas": faltas,
+                "Justificadas": justif,
+                "Retardos": retardos,
+                "% Asistencia": f"{pct}%",
+                "Días que faltó": ", ".join(dias_falta) if dias_falta else "—",
+                "Días justificados": ", ".join(dias_just) if dias_just else "—",
+            })
+
+        return pd.DataFrame(resumen), pd.DataFrame(detalle_retardos), periodo, fecha_ini, fecha_fin
+
+    def generar_excel_reporte(df_res, df_ret, periodo, fecha_ini, fecha_fin, umbral):
+        wb = Workbook()
+        AZUL    = "002F6C"
+        BLANCO  = "FFFFFF"
+        GRIS    = "F4F6F9"
+        VERDE   = "D4EDDA"
+        AMARILLO= "FFF3CD"
+        ROJO    = "F8D7DA"
+        AZUL_C  = "D0E4F7"
+
+        def hdr_font(bold=True, color=BLANCO, sz=11):
+            return Font(bold=bold, color=color, size=sz, name="Arial")
+        def fill(color):
+            return PatternFill("solid", fgColor=color)
+        def center():
+            return Alignment(horizontal="center", vertical="center", wrap_text=True)
+        def left():
+            return Alignment(horizontal="left", vertical="center", wrap_text=True)
+        def border():
+            s = Side(style="thin", color="CCCCCC")
+            return Border(left=s, right=s, top=s, bottom=s)
+
+        # ── Hoja 1: Reporte Ejecutivo ──────────────────────────────────────
+        ws1 = wb.active
+        ws1.title = "Reporte Ejecutivo"
+        mes_nombre = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][fecha_ini.month-1]
+
+        ws1.merge_cells("A1:I1")
+        ws1["A1"] = "SECRETARÍA DE EDUCACIÓN JALISCO"
+        ws1["A1"].font = Font(bold=True, size=13, name="Arial", color=AZUL)
+        ws1["A1"].alignment = center()
+
+        ws1.merge_cells("A2:I2")
+        ws1["A2"] = "DIRECCIÓN DE FORMACIÓN CONTINUA"
+        ws1["A2"].font = Font(bold=True, size=12, name="Arial", color=AZUL)
+        ws1["A2"].alignment = center()
+
+        ws1.merge_cells("A3:I3")
+        ws1["A3"] = f"REPORTE DE ASISTENCIA — {mes_nombre.upper()} {fecha_ini.year}"
+        ws1["A3"].font = Font(bold=True, size=11, name="Arial")
+        ws1["A3"].alignment = center()
+
+        ws1.merge_cells("A4:I4")
+        ws1["A4"] = (f"Período: {fecha_ini.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')}  |  "
+                     f"Justificantes: días económicos, incapacidades, comisiones y pases aplicados  |  "
+                     f"Tolerancia retardo: {umbral} min")
+        ws1["A4"].font = Font(italic=True, size=9, name="Arial", color="555555")
+        ws1["A4"].alignment = center()
+        ws1.row_dimensions[4].height = 30
+
+        ws1.append([])
+
+        hdrs = ["Empleado","Días prog.","Asistidos","Faltas","Justificadas","Retardos","% Asistencia","Días que faltó","Días justificados"]
+        ws1.append(hdrs)
+        hrow = ws1.max_row
+        for col, _ in enumerate(hdrs, 1):
+            c = ws1.cell(hrow, col)
+            c.font      = hdr_font()
+            c.fill      = fill(AZUL)
+            c.alignment = center()
+            c.border    = border()
+
+        for _, r in df_res.sort_values("Faltas", ascending=False).iterrows():
+            faltas = r["Faltas"]
+            pct    = int(str(r["% Asistencia"]).replace("%","") or 0)
+            bg = ROJO if faltas >= 10 or pct < 75 else (AMARILLO if faltas >= 3 or pct < 90 else (VERDE if r["Justificadas"] > 0 else BLANCO))
+            row_data = [r["Empleado"], r["Días prog."], r["Asistidos"], r["Faltas"],
+                        r["Justificadas"], r["Retardos"], r["% Asistencia"],
+                        r["Días que faltó"], r["Días justificados"]]
+            ws1.append(row_data)
+            drow = ws1.max_row
+            for col in range(1, 10):
+                c = ws1.cell(drow, col)
+                c.fill      = fill(bg)
+                c.border    = border()
+                c.font      = Font(size=9, name="Arial")
+                c.alignment = center() if col > 1 else left()
+
+        ws1.append([])
+        ws1.append(["Leyenda:", "0-2 faltas/≥90%", "3-9 faltas/75-89%", "≥10 faltas/<75%", "Justificado"])
+        lrow = ws1.max_row
+        for col, bg in [(2,BLANCO),(3,AMARILLO),(4,ROJO),(5,VERDE)]:
+            c = ws1.cell(lrow, col)
+            c.fill = fill(bg)
+            c.font = Font(size=8, name="Arial", bold=True)
+            c.alignment = center()
+
+        ws1.column_dimensions["A"].width = 35
+        for col in ["B","C","D","E","F","G"]:
+            ws1.column_dimensions[col].width = 12
+        ws1.column_dimensions["H"].width = 45
+        ws1.column_dimensions["I"].width = 45
+
+        # ── Hoja 2: Detalle faltas ──────────────────────────────────────────
+        ws2 = wb.create_sheet("Detalle faltas y justificantes")
+        ws2.merge_cells("A1:E1")
+        ws2["A1"] = f"DETALLE DE FALTAS Y JUSTIFICANTES — {mes_nombre.upper()} {fecha_ini.year}"
+        ws2["A1"].font = Font(bold=True, size=11, name="Arial", color=AZUL)
+        ws2["A1"].alignment = center()
+        ws2.append([])
+
+        hdrs2 = ["Empleado","Días prog.","Faltas","Justificadas","Días que faltó / Justificante"]
+        ws2.append(hdrs2)
+        hrow2 = ws2.max_row
+        for col, _ in enumerate(hdrs2, 1):
+            c = ws2.cell(hrow2, col)
+            c.font = hdr_font(); c.fill = fill(AZUL); c.alignment = center(); c.border = border()
+
+        df_faltas = df_res[df_res["Faltas"] > 0].sort_values("Faltas", ascending=False)
+        for _, r in df_faltas.iterrows():
+            detalle_txt = ""
+            if r["Días que faltó"] != "—":
+                detalle_txt += "FALTA: " + r["Días que faltó"]
+            if r["Días justificados"] != "—":
+                detalle_txt += (" | " if detalle_txt else "") + "JUST: " + r["Días justificados"]
+            ws2.append([r["Empleado"], r["Días prog."], r["Faltas"], r["Justificadas"], detalle_txt])
+            drow = ws2.max_row
+            for col in range(1,6):
+                c = ws2.cell(drow, col)
+                c.border = border(); c.font = Font(size=9, name="Arial")
+                c.alignment = center() if col > 1 else left()
+
+        ws2.column_dimensions["A"].width = 35
+        for col in ["B","C","D"]:
+            ws2.column_dimensions[col].width = 12
+        ws2.column_dimensions["E"].width = 70
+
+        # ── Hoja 3: Detalle retardos ───────────────────────────────────────
+        ws3 = wb.create_sheet("Detalle de retardos")
+        ws3.merge_cells("A1:G1")
+        ws3["A1"] = f"DETALLE DE RETARDOS — {mes_nombre.upper()} {fecha_ini.year}  (tolerancia {umbral} min)"
+        ws3["A1"].font = Font(bold=True, size=11, name="Arial", color=AZUL)
+        ws3["A1"].alignment = center()
+        ws3.append([])
+
+        hdrs3 = ["Empleado","Fecha","Día","Hora prog.","Hora real","Minutos tarde","Observación"]
+        ws3.append(hdrs3)
+        hrow3 = ws3.max_row
+        for col, _ in enumerate(hdrs3, 1):
+            c = ws3.cell(hrow3, col)
+            c.font = hdr_font(); c.fill = fill(AZUL); c.alignment = center(); c.border = border()
+
+        if not df_ret.empty:
+            for _, r in df_ret.iterrows():
+                ws3.append([r["Empleado"],r["Fecha"],r["Día"],r["Hora prog."],r["Hora real"],r["Minutos tarde"],r.get("Observación","")])
+                drow = ws3.max_row
+                for col in range(1,8):
+                    c = ws3.cell(drow, col)
+                    c.border = border(); c.font = Font(size=9, name="Arial")
+                    c.alignment = center() if col > 1 else left()
+                    if r["Minutos tarde"] > 30:
+                        c.fill = fill(ROJO)
+                    elif r["Minutos tarde"] > 15:
+                        c.fill = fill(AMARILLO)
+
+        ws3.column_dimensions["A"].width = 35
+        for col in ["B","C","D","E","F","G"]:
+            ws3.column_dimensions[col].width = 14
+
+        buf = _io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    # ── UI ────────────────────────────────────────────────────────────────
+    st.markdown("### 🕐 Reloj Checador")
+    col_up, col_tol = st.columns([3,1])
+    with col_up:
+        uploaded_xls = st.file_uploader("StandardReport.xls del checador", type=["xls"])
+    with col_tol:
+        umbral_r = st.number_input("Tolerancia retardo (min)", min_value=1, max_value=30, value=10)
+
+    if uploaded_xls:
+        # Pre-leer período
+        try:
+            import xlrd as _xlrd
+            _wb = _xlrd.open_workbook(file_contents=uploaded_xls.getvalue())
+            _sh = _wb.sheet_by_name("Reporte de Asistencia")
+            _periodo = ""
+            for _i in range(5):
+                for _j in range(_sh.ncols):
+                    _v = str(_sh.cell_value(_i,_j)).strip()
+                    if "~" in _v and "-" in _v:
+                        _periodo = _v; break
+            _fi_str, _ff_str = [x.strip() for x in _periodo.split("~")]
+        except Exception as e:
+            st.error(f"No se pudo leer el archivo: {e}")
+            return
+
+        with st.spinner("Cargando datos..."):
+            empleados_ch  = load_emp_ch()
+            festivos_ch   = load_fest_ch()
+            historial_df  = load_hist_ch()
+            economicos    = load_economicos_ch(_fi_str, _ff_str)
+            incapacidades = load_incapacidades_ch(_fi_str, _ff_str)
+            incidencias_p = load_incidencias_ch(_fi_str, _ff_str)
+
+            fi = datetime.strptime(_fi_str, "%Y-%m-%d").date()
+            ff = datetime.strptime(_ff_str, "%Y-%m-%d").date()
+            just_rfc = build_justificantes_rfc(economicos, incapacidades, incidencias_p, fi, ff)
+
+        try:
+            df_res, df_ret, periodo, fecha_ini, fecha_fin = parse_report_ch(
+                uploaded_xls.getvalue(), empleados_ch, festivos_ch,
+                historial_df, just_rfc, umbral_r)
+
+            mes_nombre = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio",
+                          "Agosto","Septiembre","Octubre","Noviembre","Diciembre"][fecha_ini.month-1]
+
+            st.success(f"📅 {periodo} — {mes_nombre} {fecha_ini.year}")
+
+            c1,c2,c3,c4,c5 = st.columns(5)
+            c1.metric("Empleados activos", len(df_res))
+            c2.metric("Asistencia prom.", df_res["% Asistencia"].apply(lambda x: int(str(x).replace("%","") or 0)).mean().__round__(1).__str__() + "%")
+            c3.metric("Total faltas",   int(df_res["Faltas"].sum()))
+            c4.metric("Total retardos", int(df_res["Retardos"].sum()))
+            c5.metric("Justificadas",   int(df_res["Justificadas"].sum()))
+
+            st.dataframe(
+                df_res.sort_values("Faltas", ascending=False),
+                use_container_width=True, hide_index=True
+            )
+
+            if not df_ret.empty:
+                with st.expander(f"📋 Detalle de retardos ({len(df_ret)} registros)"):
+                    st.dataframe(df_ret, use_container_width=True, hide_index=True)
+
+            excel_bytes = generar_excel_reporte(df_res, df_ret, periodo, fecha_ini, fecha_fin, umbral_r)
+            st.download_button(
+                "⬇️ Descargar reporte Excel (3 hojas)",
+                data=excel_bytes,
+                file_name=f"Asistencia_{mes_nombre}_{fecha_ini.year}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+        except Exception as e:
+            st.error(f"Error procesando el archivo: {e}")
+    else:
+        st.info("Sube el StandardReport.xls para procesar la asistencia del período.")
+
+
 
 def vista_empleado():
     rfc      = st.session_state["rfc"]
@@ -883,7 +1508,7 @@ def vista_admin():
     incidencias = cargar_incidencias()
     horarios_df = cargar_horarios()
 
-    tab1, tab2, tab3 = st.tabs(["Pendientes", "Historial completo", "Reporte mensual"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Pendientes", "Historial completo", "Reporte mensual", "🕐 Reloj Checador"])
 
     with tab1:
         pendientes = incidencias[incidencias["ESTADO"] == "PENDIENTE"]
@@ -972,6 +1597,9 @@ def vista_admin():
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
         st.download_button("⬇️ Exportar CSV", data=df_hist.to_csv(index=False).encode("utf-8"),
                            file_name="incidencias.csv", mime="text/csv")
+
+    with tab4:
+        render_checador()
 
     with tab3:
         st.markdown("Reporte consolidado para la directora.")

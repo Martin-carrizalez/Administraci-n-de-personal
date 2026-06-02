@@ -5,3 +5,6 @@ google-api-python-client
 pandas
 reportlab
 qrcode[pil]
+xlrd
+plotly
+openpyxl
