@@ -8,3 +8,4 @@ qrcode[pil]
 xlrd
 plotly
 openpyxl
+pytz

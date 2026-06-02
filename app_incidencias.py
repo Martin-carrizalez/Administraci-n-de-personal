@@ -11,6 +11,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 import qrcode
+from datetime import timezone
+import pytz
 from reportlab.platypus import Image as RLImage
 
 # ─────────────────────────────────────────────
@@ -50,7 +52,7 @@ COLUMNAS_HORARIO = {
 
 COLS_INCIDENCIAS = [
     "ID", "FOLIO", "RFC", "NOMBRE", "TIPO", "FECHA_SOLICITUD",
-    "FECHA_INICIO", "FECHA_FIN", "DIAS", "HORAS_PASE",
+    "FECHA_INICIO", "FECHA_FIN", "DIAS", "HORAS_PASE", "HORA_RETORNO",
     "MOTIVO", "TIENE_ANEXO", "LINK_ANEXO", "ESTADO", "AUTORIZADO_POR",
     "FECHA_AUTORIZACION", "OBSERVACIONES"
 ]
@@ -474,6 +476,7 @@ def guardar_incidencia(datos: dict):
         datos["fecha_fin"],
         datos["dias"],
         datos.get("horas_pase", ""),
+        datos.get("hora_retorno", ""),
         datos["motivo"],
         "SÍ" if datos["tiene_anexo"] else "NO",
         datos.get("link_anexo", ""),
@@ -533,7 +536,7 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha
                     str(row.get("RFC", emp_id)),
                     str(row.get("NOMBRE", "")),
                     "",  # FECHA_INICIO — se llenará con la del registro anterior
-                    str(fecha_aplicacion),  # FECHA_FIN — hasta el día antes del nuevo
+                    (datetime.strptime(fecha_aplicacion, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d"),  # FECHA_FIN — día anterior al cambio
                     str(row.get("ENTRADA_LUN", "")), str(row.get("SALIDA_LUN", "")),
                     str(row.get("ENTRADA_MAR", "")), str(row.get("SALIDA_MAR", "")),
                     str(row.get("ENTRADA_MIE", "")), str(row.get("SALIDA_MIE", "")),
@@ -826,8 +829,14 @@ def render_checador():
                             if tipo == "COM":
                                 resultado.setdefault(rfc, {})[d.date()] = "Comisión"
                             elif tipo == "PSE":
-                                # Pase de entrada: no retardo mayor ese día
-                                resultado.setdefault(rfc, {}).setdefault(d.date(), "Pase de entrada")
+                                motivo_pse = str(r.get("MOTIVO","")).lower()
+                                hora_ret   = str(r.get("HORA_RETORNO","")).strip()
+                                if "sin retorno" in motivo_pse:
+                                    resultado.setdefault(rfc, {})[d.date()] = "Pase de salida sin retorno"
+                                elif hora_ret:
+                                    resultado.setdefault(rfc, {})[d.date()] = f"Pase de salida|retorno:{hora_ret}"
+                                else:
+                                    resultado.setdefault(rfc, {}).setdefault(d.date(), "Pase de entrada")
                         d += timedelta(days=1)
                 except: pass
 
@@ -926,9 +935,9 @@ def render_checador():
                 just_tipo = just_emp.get(dia_dt.date())
 
                 if not ch:
-                    if just_tipo and just_tipo not in ["Pase de entrada"]:
+                    if just_tipo and not just_tipo.startswith("Pase de entrada"):
                         justif += 1
-                        dias_just.append(f"{dia_dt.strftime('%d/%m')} ({just_tipo})")
+                        dias_just.append(f"{dia_dt.strftime('%d/%m')} ({just_tipo.split('|')[0]})")
                     else:
                         faltas += 1
                         dias_falta.append(dia_dt.strftime("%d/%m"))
@@ -943,9 +952,8 @@ def render_checador():
                     er_dt = datetime.strptime(entrada_real, "%H:%M")
                     mins  = (er_dt.hour - ep_dt.hour)*60 + (er_dt.minute - ep_dt.minute)
                     if mins > umbral:
-                        # Si tiene pase de entrada autorizado ese día, no cuenta retardo
-                        if just_tipo == "Pase de entrada":
-                            estado = "Asistió"
+                        if just_tipo and just_tipo.startswith("Pase de entrada"):
+                            estado = "Asistió"  # pase de entrada: no retardo
                         else:
                             retardos += 1
                             retardos_min += mins
@@ -960,6 +968,27 @@ def render_checador():
                                 "Observación": ""
                             })
                 except: pass
+
+                # Detectar regreso tardío en pase de salida con retorno
+                if just_tipo and "retorno:" in str(just_tipo) and salida_real:
+                    try:
+                        hora_ret_aut = just_tipo.split("retorno:")[1].strip()
+                        ret_aut_dt   = datetime.strptime(hora_ret_aut, "%H:%M")
+                        sal_real_dt  = datetime.strptime(salida_real,  "%H:%M")
+                        mins_tarde   = (sal_real_dt.hour - ret_aut_dt.hour)*60 + (sal_real_dt.minute - ret_aut_dt.minute)
+                        if mins_tarde > umbral:
+                            retardos += 1
+                            retardos_min += mins_tarde
+                            det_retardos_emp.append({
+                                "Empleado": nombre,
+                                "Fecha": dia_dt.strftime("%d/%m/%Y"),
+                                "Día": DIAS_NOMBRE.get(nd, nd),
+                                "Hora prog.": hora_ret_aut,
+                                "Hora real": salida_real,
+                                "Minutos tarde": mins_tarde,
+                                "Observación": "Regreso tardío de pase de salida"
+                            })
+                    except: pass
 
                 detalle_faltas.append({
                     "nombre": nombre, "fecha": dia_dt.date(), "nd": nd,
@@ -1368,12 +1397,15 @@ def vista_empleado():
         hora_salida = hora_entrada = hora_retorno = None
         with col1:
             if subtipo in ["Pase de salida sin retorno", "Pase de salida"]:
-                hora_salida = st.time_input("Hora de salida")
+                hora_salida = st.text_input("Hora de salida (HH:MM)", placeholder="08:37", max_chars=5)
+                hora_salida = hora_salida.strip() if hora_salida else None
         with col2:
             if subtipo == "Pase de entrada":
-                hora_entrada = st.time_input("Hora de entrada")
+                hora_entrada = st.text_input("Hora de entrada (HH:MM)", placeholder="08:37", max_chars=5)
+                hora_entrada = hora_entrada.strip() if hora_entrada else None
             elif subtipo == "Pase de salida":
-                hora_retorno = st.time_input("Hora estimada de retorno")
+                hora_retorno = st.text_input("Hora estimada de retorno (HH:MM)", placeholder="10:30", max_chars=5)
+                hora_retorno = hora_retorno.strip() if hora_retorno else None
 
         # Calcular horas del pase
         horas_pase = 0.0
@@ -1397,7 +1429,7 @@ def vista_empleado():
         if hora_entrada: detalle += f" | Entrada: {hora_entrada}"
         if hora_retorno: detalle += f" | Retorno: {hora_retorno}"
         motivo_completo = (detalle + '\n' + motivo).strip()
-        enviar_solicitud(rfc, nombre, tipo, fecha, fecha, 0, horas_pase, motivo_completo, tiene_anexo, incidencias, archivo_anexo, subtipo_label=subtipo)
+        enviar_solicitud(rfc, nombre, tipo, fecha, fecha, 0, horas_pase, motivo_completo, tiene_anexo, incidencias, archivo_anexo, subtipo_label=subtipo, hora_retorno=hora_retorno or "")
 
 
     # ── COMISIÓN ────────────────────────────────
@@ -1461,10 +1493,11 @@ def vista_empleado():
             st.error("No se pudo calcular tu fecha de cumpleaños desde el RFC.")
 
 
-def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_anexo, incidencias_df, archivo_anexo=None, subtipo_label=None):
+def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_anexo, incidencias_df, archivo_anexo=None, subtipo_label=None, hora_retorno=""):
     if st.button("Registrar solicitud", type="primary"):
         folio     = generar_folio(tipo, incidencias_df)
-        fecha_sol = datetime.now().strftime("%Y-%m-%d %H:%M")
+        tz_mx = pytz.timezone("America/Mexico_City")
+        fecha_sol = datetime.now(tz_mx).strftime("%Y-%m-%d %H:%M")
         link_anexo = ""
         if archivo_anexo is not None:
             with st.spinner("Subiendo anexo a Drive..."):
@@ -1484,6 +1517,7 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
             "tiene_anexo":     tiene_anexo or archivo_anexo is not None,
             "link_anexo":      link_anexo,
             "subtipo_label":   subtipo_label if subtipo_label else TIPO_LABELS[tipo],
+            "hora_retorno":    hora_retorno,
         }
         if tipo == "ECO":
             guardar_dia_economico(datos)
