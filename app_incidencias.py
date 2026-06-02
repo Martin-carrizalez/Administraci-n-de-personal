@@ -1409,7 +1409,6 @@ def vista_empleado():
 
         # Calcular horas del pase
         horas_pase = 0.0
-        horas_pase = 0.0
         if hora_salida and hora_retorno:
             try:
                 sal  = datetime.combine(fecha, datetime.strptime(hora_salida.strip(),  "%H:%M").time())
@@ -1435,6 +1434,16 @@ def vista_empleado():
             except:
                 horas_pase = 0.0
                 st.warning("No se pudo calcular automáticamente.")
+
+        motivo = st.text_area("Motivo", max_chars=300)
+        archivo_anexo = st.file_uploader("Adjuntar justificante (opcional)", type=["pdf","png","jpg","jpeg"])
+        tiene_anexo   = archivo_anexo is not None
+        detalle = subtipo
+        if hora_salida:  detalle += f" | Salida: {hora_salida}"
+        if hora_entrada: detalle += f" | Entrada: {hora_entrada}"
+        if hora_retorno: detalle += f" | Retorno: {hora_retorno}"
+        motivo_completo = (detalle + "\n" + motivo).strip()
+        enviar_solicitud(rfc, nombre, tipo, fecha, fecha, 0, horas_pase, motivo_completo, tiene_anexo, incidencias, archivo_anexo, subtipo_label=subtipo, hora_retorno=hora_retorno or "")
 
     # ── COMISIÓN ────────────────────────────────
     elif tipo == "COM":
