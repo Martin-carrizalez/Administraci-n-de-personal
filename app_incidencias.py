@@ -148,6 +148,22 @@ def cargar_festivos():
 def generar_folio(tipo: str, incidencias_df: pd.DataFrame) -> str:
     anio = datetime.now().year
     prefijo = f"{tipo}-{anio}-"
+    # Para ECO buscar en Solicitudes
+    if tipo == "ECO":
+        try:
+            sol = cargar_solicitudes_eco()
+            col_folio = next((c for c in sol.columns if "FOLIO" in c.upper()), None)
+            if col_folio:
+                existentes = sol[sol[col_folio].astype(str).str.startswith(prefijo)][col_folio].tolist()
+                nums = []
+                for f in existentes:
+                    partes = f.split("-")
+                    if len(partes) == 3 and partes[2].isdigit():
+                        nums.append(int(partes[2]))
+                return f"{prefijo}{str(max(nums) + 1 if nums else 1).zfill(4)}"
+        except Exception:
+            pass
+        return f"{prefijo}0001"
     if incidencias_df.empty:
         return f"{prefijo}0001"
     existentes = incidencias_df[
@@ -1370,7 +1386,8 @@ def vista_empleado():
         else:
             mis_inc = mis_inc_all
         # Solo días económicos del mes actual
-        sol_hist_all = solicitudes[solicitudes["RFC"].astype(str).str.upper() == rfc].copy()
+        col_rfc_sol = next((c for c in solicitudes.columns if c.upper() == "RFC"), None)
+        sol_hist_all = solicitudes[solicitudes[col_rfc_sol].astype(str).str.upper().str.strip() == rfc.upper().strip()].copy() if col_rfc_sol else pd.DataFrame()
         if not sol_hist_all.empty:
             col_fi_eco = next((c for c in sol_hist_all.columns if "Inicio" in c or "INICIO" in c), None)
             if col_fi_eco:
