@@ -1411,7 +1411,11 @@ def vista_empleado():
                 "Aprobado Por":     "AUTORIZADO_POR",
                 "Fecha Registro":   "FECHA_SOLICITUD",
             })
-            sol_hist["FOLIO"]              = "HISTÓRICO"
+            col_folio_sol = next((c for c in sol_hist.columns if "FOLIO" in c.upper()), None)
+            if col_folio_sol and col_folio_sol != "FOLIO":
+                sol_hist["FOLIO"] = sol_hist[col_folio_sol]
+            elif "FOLIO" not in sol_hist.columns:
+                sol_hist["FOLIO"] = "HISTÓRICO"
             sol_hist["HORAS_PASE"]         = ""
             sol_hist["ESTADO"]             = sol_hist["AUTORIZADO_POR"].apply(
                 lambda x: mapear_emojis_estado("AUTORIZADO" if str(x).strip() != "" else "PENDIENTE")
