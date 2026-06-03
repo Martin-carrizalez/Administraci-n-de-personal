@@ -276,14 +276,14 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
     else:
         elementos.append(Paragraph("Secretaría de Educación Jalisco", estilo_titulo))
         elementos.append(Paragraph("Dirección de Formación Continua · Área de Recursos Humanos", estilo_sub))
-    elementos.append(Spacer(1, 0.2*cm))
+    elementos.append(Spacer(1, 0.1*cm))
     elementos.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#002F6C")))
-    elementos.append(Spacer(1, 0.3*cm))
+    elementos.append(Spacer(1, 0.1*cm))
     elementos.append(Paragraph("COMPROBANTE DE CAPTURA DE INCIDENCIA", estilo_titulo))
-    elementos.append(Spacer(1, 0.2*cm))
+    elementos.append(Spacer(1, 0.1*cm))
     elementos.append(Paragraph(f"FOLIO: {datos['folio']}", estilo_folio))
     elementos.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CCCCCC")))
-    elementos.append(Spacer(1, 0.4*cm))
+    elementos.append(Spacer(1, 0.15*cm))
 
     tabla_datos = [
         ["Nombre completo:", datos["nombre"]],
@@ -314,13 +314,13 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
         ("GRID",        (0, 0), (-1, -1), 0.3, colors.HexColor("#DDDDDD")),
         ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ("RIGHTPADDING",(0, 0), (-1, -1), 8),
-        ("TOPPADDING",  (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING",(0, 0), (-1, -1), 5),
+        ("TOPPADDING",  (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 3),
     ]))
     elementos.append(t)
-    elementos.append(Spacer(1, 0.6*cm))
+    elementos.append(Spacer(1, 0.1*cm))
     elementos.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CCCCCC")))
-    elementos.append(Spacer(1, 0.3*cm))
+    elementos.append(Spacer(1, 0.1*cm))
 
     color_estado = colors.HexColor("#F59E0B")
     et = Table([[Paragraph("<b>ESTADO: PENDIENTE DE AUTORIZACIÓN</b>",
@@ -334,7 +334,7 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
         ("BOTTOMPADDING", (0,0), (-1,-1), 6),
     ]))
     elementos.append(et)
-    elementos.append(Spacer(1, 0.6*cm))
+    elementos.append(Spacer(1, 0.1*cm))
     # ── Bloque de firmas ─────────────────────────
     elementos.append(Paragraph("<b>REQUISITO OBLIGATORIO: SECCIÓN DE FIRMAS</b>",
         ParagraphStyle("tf", parent=styles["Normal"], fontSize=9, fontName="Helvetica-Bold", spaceAfter=6)))
@@ -357,9 +357,9 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
         ("BOTTOMPADDING", (0,0), (-1,-1), 10),
     ]))
     elementos.append(t_firmas)
-    elementos.append(Spacer(1, 0.3*cm))
+    elementos.append(Spacer(1, 0.1*cm))
     elementos.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CCCCCC")))
-    elementos.append(Spacer(1, 0.3*cm))
+    elementos.append(Spacer(1, 0.1*cm))
 
     # ── Instrucciones finales ─────────────────────
     elementos.append(Paragraph("<b>INSTRUCCIONES DE ENTREGA:</b>",
@@ -392,9 +392,9 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
     ], colWidths=[3*cm, 13*cm])
     tabla_qr.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "MIDDLE")]))
     elementos.append(tabla_qr)
-    elementos.append(Spacer(1, 0.4*cm))
+    elementos.append(Spacer(1, 0.15*cm))
     elementos.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CCCCCC")))
-    elementos.append(Spacer(1, 0.2*cm))
+    elementos.append(Spacer(1, 0.1*cm))
     elementos.append(Paragraph(f"Generado el {datos['fecha_solicitud']} · Sistema ARI — DFC · SEJ", estilo_aviso))
     doc.build(elementos)
     buffer.seek(0)
@@ -1372,8 +1372,12 @@ def vista_empleado():
         # Solo días económicos del mes actual
         sol_hist_all = solicitudes[solicitudes["RFC"].astype(str).str.upper() == rfc].copy()
         if not sol_hist_all.empty:
-            sol_hist_all["FECHA_DT"] = pd.to_datetime(sol_hist_all["Fecha Inicio"], errors="coerce", dayfirst=True)
-            sol_hist = sol_hist_all[(sol_hist_all["FECHA_DT"].dt.year == ahora.year) & (sol_hist_all["FECHA_DT"].dt.month == ahora.month)].copy()
+            col_fi_eco = next((c for c in sol_hist_all.columns if "Inicio" in c or "INICIO" in c), None)
+            if col_fi_eco:
+                sol_hist_all["FECHA_DT"] = pd.to_datetime(sol_hist_all[col_fi_eco], errors="coerce", dayfirst=True)
+                sol_hist = sol_hist_all[(sol_hist_all["FECHA_DT"].dt.year == ahora.year) & (sol_hist_all["FECHA_DT"].dt.month == ahora.month)].copy()
+            else:
+                sol_hist = sol_hist_all
         else:
             sol_hist = sol_hist_all
 
