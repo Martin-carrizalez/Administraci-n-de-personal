@@ -487,20 +487,31 @@ def guardar_incidencia(datos: dict):
     cargar_incidencias.clear()
 
 def autorizar_incidencia(folio: str, obs: str = ""):
-    client = get_client()
-    sh = client.open_by_key(st.secrets["sheet_checador_id"])
-    ws = sh.worksheet("Incidencias")
-    headers = ws.row_values(1)
-    data = ws.get_all_records(numericise_ignore=["all"])
-    for i, row in enumerate(data, start=2):
-        if str(row.get("FOLIO", "")) == folio:
-            ws.update_cell(i, headers.index("ESTADO") + 1,             "AUTORIZADO")
-            ws.update_cell(i, headers.index("AUTORIZADO_POR") + 1,     "admin")
-            ws.update_cell(i, headers.index("FECHA_AUTORIZACION") + 1, datetime.now().strftime("%Y-%m-%d %H:%M"))
-            if obs:
-                ws.update_cell(i, headers.index("OBSERVACIONES") + 1, obs)
-            break
-    cargar_incidencias.clear()
+    try:
+        import pytz
+        tz_mx = pytz.timezone("America/Mexico_City")
+        ahora = datetime.now(pytz.utc).astimezone(tz_mx).strftime("%Y-%m-%d %H:%M")
+        client = get_client()
+        sh = client.open_by_key(st.secrets["sheet_checador_id"])
+        ws = sh.worksheet("Incidencias")
+        headers = [h.upper().strip() for h in ws.row_values(1)]
+        data = ws.get_all_records(numericise_ignore=["all"])
+        if "ESTADO" not in headers:
+            st.error("No se encontró columna ESTADO en el Sheet.")
+            return
+        for i, row in enumerate(data, start=2):
+            if str(row.get("FOLIO", "")) == folio:
+                ws.update_cell(i, headers.index("ESTADO") + 1,             "AUTORIZADO")
+                ws.update_cell(i, headers.index("AUTORIZADO_POR") + 1,     "admin")
+                ws.update_cell(i, headers.index("FECHA_AUTORIZACION") + 1, ahora)
+                if obs and "OBSERVACIONES" in headers:
+                    ws.update_cell(i, headers.index("OBSERVACIONES") + 1, obs)
+                break
+        cargar_incidencias.clear()
+    except gspread.exceptions.APIError:
+        st.error("⏳ Google Sheets está saturado temporalmente. Espera 5 segundos e intenta de nuevo.")
+    except Exception as e:
+        st.error(f"Error al autorizar: {e}")
 
 def rechazar_incidencia(folio: str, obs: str):
     client = get_client()
@@ -512,10 +523,31 @@ def rechazar_incidencia(folio: str, obs: str):
         if str(row.get("FOLIO", "")) == folio:
             ws.update_cell(i, headers.index("ESTADO") + 1,             "RECHAZADO")
             ws.update_cell(i, headers.index("AUTORIZADO_POR") + 1,     "admin")
-            ws.update_cell(i, headers.index("FECHA_AUTORIZACION") + 1, datetime.now().strftime("%Y-%m-%d %H:%M"))
+            ws.update_cell(i, headers.index("FECHA_AUTORIZACION") + 1, datetime.now(__import__("pytz").utc).astimezone(__import__("pytz").timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M"))
             ws.update_cell(i, headers.index("OBSERVACIONES") + 1,      obs)
             break
     cargar_incidencias.clear()
+
+def aprobar_dia_economico(row_idx: int, nombre_admin: str):
+    """Escribe el nombre del admin en Aprobado Por de la tab Solicitudes."""
+    try:
+        import pytz
+        tz_mx = pytz.timezone("America/Mexico_City")
+        ahora = datetime.now(pytz.utc).astimezone(tz_mx).strftime("%Y-%m-%d %H:%M")
+        client = get_client()
+        sh = client.open_by_key(st.secrets["sheet_economicos_id"])
+        ws = sh.worksheet("Solicitudes")
+        headers = [h.upper().strip() for h in ws.row_values(1)]
+        col_aprobado = headers.index("APROBADO POR") + 1 if "APROBADO POR" in headers else None
+        col_fecha    = headers.index("FECHA REGISTRO") + 1 if "FECHA REGISTRO" in headers else None
+        if col_aprobado:
+            ws.update_cell(row_idx, col_aprobado, nombre_admin)
+        if col_fecha:
+            ws.update_cell(row_idx, col_fecha, ahora)
+        cargar_solicitudes_eco.clear()
+        st.success("Día económico autorizado correctamente.")
+    except Exception as e:
+        st.error(f"Error al aprobar: {e}")
 
 def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha_inicio_cho: str = None):
     client = get_client()
@@ -575,7 +607,7 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha
         if str(row.get("FOLIO", "")) == folio:
             ws_inc.update_cell(i, inc_h.index("ESTADO") + 1,             "AUTORIZADO")
             ws_inc.update_cell(i, inc_h.index("AUTORIZADO_POR") + 1,     "admin")
-            ws_inc.update_cell(i, inc_h.index("FECHA_AUTORIZACION") + 1, datetime.now().strftime("%Y-%m-%d %H:%M"))
+            ws_inc.update_cell(i, inc_h.index("FECHA_AUTORIZACION") + 1, datetime.now(__import__("pytz").utc).astimezone(__import__("pytz").timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M"))
             break
     st.cache_data.clear()
 
@@ -1507,10 +1539,16 @@ def vista_empleado():
 
 
 def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_anexo, incidencias_df, archivo_anexo=None, subtipo_label=None, hora_retorno=""):
-    if st.button("Registrar solicitud", type="primary"):
+    key_btn = f"btn_registrar_{tipo}_{str(fi)}_{str(ff)}"
+    if st.button("Registrar solicitud", type="primary", key=key_btn):
+        if st.session_state.get(f"registrado_{key_btn}"):
+            st.warning("Esta solicitud ya fue registrada.")
+            return
+        st.session_state[f"registrado_{key_btn}"] = True
         folio     = generar_folio(tipo, incidencias_df)
+        import pytz
         tz_mx = pytz.timezone("America/Mexico_City")
-        fecha_sol = datetime.now(tz_mx).strftime("%Y-%m-%d %H:%M")
+        fecha_sol = datetime.now(pytz.utc).astimezone(tz_mx).strftime("%Y-%m-%d %H:%M")
         link_anexo = ""
         if archivo_anexo is not None:
             with st.spinner("Subiendo anexo a Drive..."):
@@ -1558,6 +1596,30 @@ def vista_admin():
     tab1, tab2, tab3, tab4 = st.tabs(["Pendientes", "Historial completo", "Reporte mensual", "🕐 Reloj Checador"])
 
     with tab1:
+        # ── Días económicos pendientes de aprobar ────
+        solicitudes_eco = cargar_solicitudes_eco()
+        if not solicitudes_eco.empty:
+            col_aprobado = next((c for c in solicitudes_eco.columns if "Aprobado" in c), None)
+            col_folio    = next((c for c in solicitudes_eco.columns if "FOLIO" in c.upper() or "Folio" in c), None)
+            if col_aprobado:
+                eco_pend = solicitudes_eco[solicitudes_eco[col_aprobado].astype(str).str.strip() == ""]
+                if not eco_pend.empty:
+                    st.markdown(f"#### 📅 Días económicos pendientes ({len(eco_pend)})")
+                    for idx, row in eco_pend.iterrows():
+                        folio_eco = str(row.get(col_folio, "")) if col_folio else f"ECO-{idx}"
+                        nombre_eco = str(row.get("Nombre Completo", row.get("NOMBRE", "")))
+                        with st.expander(f"**{folio_eco}** · Día económico · {nombre_eco}"):
+                            st.write(f"**RFC:** {str(row.get('RFC',''))}")
+                            st.write(f"**Fecha inicio:** {str(row.get('Fecha Inicio',''))}")
+                            st.write(f"**Fecha fin:** {str(row.get('Fecha Fin',''))}")
+                            st.write(f"**Días:** {str(row.get('Dias Solicitados',''))}")
+                            st.write(f"**Motivo:** {str(row.get('Motivo',''))}")
+                            st.write(f"**Registrado:** {str(row.get('Fecha Registro',''))}")
+                            if st.button("✅ Aprobar día económico", key=f"eco_{idx}", type="primary"):
+                                aprobar_dia_economico(idx + 2, "admin")
+                                st.rerun()
+                    st.divider()
+
         pendientes = incidencias[incidencias["ESTADO"] == "PENDIENTE"]
         if pendientes.empty:
             st.success("No hay solicitudes pendientes.")
