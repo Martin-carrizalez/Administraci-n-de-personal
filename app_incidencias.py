@@ -38,6 +38,17 @@ if HABILITAR_CUMPLEANOS:
     TIPO_LABELS["CUM"] = "Día de cumpleaños"
 
 DIAS_SEMANA = ["LUN", "MAR", "MIE", "JUE", "VIE"]
+
+DICT_JEFES = {
+    "Martín Ángel Carrizalez Piña":                         "Martín Ángel Carrizalez Piña",
+    "Maricela Esquivel Domínguez — Dir. Desarrollo Académico": "Maricela Esquivel Domínguez<br/>Directora de Desarrollo Académico",
+    "Ignacio Aguilar García — Dir. Gestión y Evaluación":    "Ignacio Aguilar García<br/>Director de Gestión y Evaluación de Profesionales de la Educación",
+    "Héctor Manuel Ramos Rico":                              "Héctor Manuel Ramos Rico",
+    "Hugo Verduzco Zuñiga":                                  "Hugo Verduzco Zuñiga",
+    "Erika Soledad Castillo Flores":                         "Erika Soledad Castillo Flores",
+}
+
+NOMBRE_DIRECTORA = "Claudia Gisela Ramírez Monroy<br/>Encargada del Despacho de la Dirección de Formación Continua"
 DRIVE_ANEXOS_FOLDER = "1LnQjrhjEKgKxFTJD8USLoiCpCKQHfOQC"
 
 COLUMNAS_HORARIO = {
@@ -183,20 +194,24 @@ def dias_economicos_usados(rfc: str, solicitudes_df: pd.DataFrame) -> int:
     return total
 
 def horas_pases_mes(rfc: str, incidencias_df: pd.DataFrame) -> float:
-    """Suma las horas de pases de salida/entrada del mes en curso."""
-    ahora = datetime.now()
+    """Suma las horas de pases autorizados del mes en curso usando FECHA_INICIO."""
+    import pytz
+    tz_mx = pytz.timezone("America/Mexico_City")
+    ahora = datetime.now(pytz.utc).astimezone(tz_mx)
     df = incidencias_df[
         (incidencias_df["RFC"].astype(str).str.upper() == rfc.upper()) &
-        (incidencias_df["TIPO"] == "PSE")
+        (incidencias_df["TIPO"] == "PSE") &
+        (incidencias_df["ESTADO"].astype(str).str.contains("AUTORIZADO"))
     ].copy()
     if df.empty:
         return 0.0
-    df["FECHA_DT"] = pd.to_datetime(df["FECHA_SOLICITUD"], errors="coerce")
+    df["FECHA_DT"] = pd.to_datetime(df["FECHA_INICIO"], errors="coerce")
     df = df[(df["FECHA_DT"].dt.year == ahora.year) & (df["FECHA_DT"].dt.month == ahora.month)]
     total = 0.0
     for _, row in df.iterrows():
         try:
-            total += float(row.get("HORAS_PASE", 0) or 0)
+            val = str(row.get("HORAS_PASE", 0) or 0).replace(",", ".")
+            total += float(val)
         except Exception:
             pass
     return round(total, 2)
@@ -325,9 +340,11 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
         ParagraphStyle("tf", parent=styles["Normal"], fontSize=9, fontName="Helvetica-Bold", spaceAfter=6)))
 
     estilo_firma = ParagraphStyle("firmas", parent=styles["Normal"], fontSize=8, fontName="Helvetica", alignment=TA_CENTER)
-    firma_interesado = Paragraph("<br/><br/>___________________________<br/><b>Firma del Interesado</b><br/>Servidor(a) Público(a)", estilo_firma)
-    firma_jefe       = Paragraph("<br/><br/>___________________________<br/><b>Autoriza Jefe(a) Inmediato</b><br/>Nombre y Firma", estilo_firma)
-    firma_vob        = Paragraph("<br/><br/>___________________________<br/><b>Vo.Bo. Titular del Área</b><br/>Nombre y Firma", estilo_firma)
+    nombre_interesado = datos.get("nombre", "Servidor(a) Público(a)")
+    jefe_pdf_texto    = datos.get("jefe_inmediato", "Nombre y Firma")
+    firma_interesado  = Paragraph(f"<br/><br/>___________________________<br/><b>Firma del Interesado</b><br/>{nombre_interesado}", estilo_firma)
+    firma_jefe        = Paragraph(f"<br/><br/>___________________________<br/><b>Autoriza Jefe(a) Inmediato</b><br/>{jefe_pdf_texto}", estilo_firma)
+    firma_vob         = Paragraph(f"<br/><br/>___________________________<br/><b>Vo.Bo. Titular del Área</b><br/>{NOMBRE_DIRECTORA}", estilo_firma)
 
     if datos["tipo"] in ["ECO", "CHO"]:
         t_firmas = Table([[firma_interesado, firma_jefe, firma_vob]], colWidths=[5.3*cm, 5.3*cm, 5.4*cm])
@@ -1341,9 +1358,24 @@ def vista_empleado():
             st.caption("No se encontró tu horario en el sistema.")
 
     # ── Mis solicitudes ──────────────────────────
-    with st.expander("📋 Mis solicitudes registradas", expanded=False):
-        mis_inc  = incidencias[incidencias["RFC"].astype(str).str.upper() == rfc].copy()
-        sol_hist = solicitudes[solicitudes["RFC"].astype(str).str.upper() == rfc].copy()
+    with st.expander("📋 Mis solicitudes registradas (último mes)", expanded=False):
+        import pytz
+        tz_mx  = pytz.timezone("America/Mexico_City")
+        ahora  = datetime.now(pytz.utc).astimezone(tz_mx)
+        # Solo incidencias del mes actual
+        mis_inc_all = incidencias[incidencias["RFC"].astype(str).str.upper() == rfc].copy()
+        if not mis_inc_all.empty:
+            mis_inc_all["FECHA_DT"] = pd.to_datetime(mis_inc_all["FECHA_INICIO"], errors="coerce")
+            mis_inc = mis_inc_all[(mis_inc_all["FECHA_DT"].dt.year == ahora.year) & (mis_inc_all["FECHA_DT"].dt.month == ahora.month)].copy()
+        else:
+            mis_inc = mis_inc_all
+        # Solo días económicos del mes actual
+        sol_hist_all = solicitudes[solicitudes["RFC"].astype(str).str.upper() == rfc].copy()
+        if not sol_hist_all.empty:
+            sol_hist_all["FECHA_DT"] = pd.to_datetime(sol_hist_all["Fecha Inicio"], errors="coerce", dayfirst=True)
+            sol_hist = sol_hist_all[(sol_hist_all["FECHA_DT"].dt.year == ahora.year) & (sol_hist_all["FECHA_DT"].dt.month == ahora.month)].copy()
+        else:
+            sol_hist = sol_hist_all
 
         if not sol_hist.empty:
             sol_hist = sol_hist.rename(columns={
@@ -1390,6 +1422,9 @@ def vista_empleado():
     st.divider()
     st.markdown("### Nueva solicitud")
 
+    jefe_sel = st.selectbox("👤 Jefe inmediato que autoriza", options=list(DICT_JEFES.keys()))
+    jefe_pdf  = DICT_JEFES[jefe_sel]
+
     tipo = st.selectbox(
         "Tipo de incidencia",
         options=list(TIPO_LABELS.keys()),
@@ -1418,7 +1453,7 @@ def vista_empleado():
             return
         motivo = st.text_area("Motivo (opcional)", max_chars=300)
         st.caption("El día económico no requiere anexo digital. Trae el formato físico original.")
-        enviar_solicitud(rfc, nombre, tipo, fi, ff, dias_hab, 0.0, motivo, False, incidencias)
+        enviar_solicitud(rfc, nombre, tipo, fi, ff, dias_hab, 0.0, motivo, False, incidencias, jefe_inmediato=jefe_pdf)
 
     # ── PASE DE SALIDA / ENTRADA ────────────────
     elif tipo == "PSE":
@@ -1475,7 +1510,7 @@ def vista_empleado():
         if hora_entrada: detalle += f" | Entrada: {hora_entrada}"
         if hora_retorno: detalle += f" | Retorno: {hora_retorno}"
         motivo_completo = (detalle + "\n" + motivo).strip()
-        enviar_solicitud(rfc, nombre, tipo, fecha, fecha, 0, horas_pase, motivo_completo, tiene_anexo, incidencias, archivo_anexo, subtipo_label=subtipo, hora_retorno=hora_retorno or "")
+        enviar_solicitud(rfc, nombre, tipo, fecha, fecha, 0, horas_pase, motivo_completo, tiene_anexo, incidencias, archivo_anexo, subtipo_label=subtipo, hora_retorno=hora_retorno or "", jefe_inmediato=jefe_pdf)
 
     # ── COMISIÓN ────────────────────────────────
     elif tipo == "COM":
@@ -1496,7 +1531,7 @@ def vista_empleado():
         if not tiene_anexo:
             st.caption("Recuerda que sin anexo tu solicitud puede quedar sin soporte documental.")
         enviar_solicitud(rfc, nombre, tipo, fi, ff, dias_hab, 0.0,
-                         motivo, tiene_anexo, incidencias, archivo_anexo)
+                         motivo, tiene_anexo, incidencias, archivo_anexo, jefe_inmediato=jefe_pdf)
     # ── CAMBIO DE HORARIO ───────────────────────
     elif tipo == "CHO":
         fecha_inicio_cho = st.date_input("¿A partir de qué fecha aplica el cambio?", value=date.today())
@@ -1522,7 +1557,7 @@ def vista_empleado():
         )
         motivo_completo = f"Horario solicitado: {horario_str} | Motivo: {motivo}".strip()
         enviar_solicitud(rfc, nombre, tipo, fecha_inicio_cho, fecha_inicio_cho, 0, 0.0,
-                         motivo_completo, tiene_anexo, incidencias)
+                         motivo_completo, tiene_anexo, incidencias, jefe_inmediato=jefe_pdf)
 
     # ── CUMPLEAÑOS (oculto hasta autorización) ──
     if HABILITAR_CUMPLEANOS and tipo == "CUM":
@@ -1533,12 +1568,12 @@ def vista_empleado():
             ff = cumple
             motivo = "Día de cumpleaños"
             st.caption("Solo el día hábil correspondiente a tu fecha de nacimiento.")
-            enviar_solicitud(rfc, nombre, tipo, fi, ff, 1, 0.0, motivo, False, incidencias)
+            enviar_solicitud(rfc, nombre, tipo, fi, ff, 1, 0.0, motivo, False, incidencias, jefe_inmediato=jefe_pdf)
         else:
             st.error("No se pudo calcular tu fecha de cumpleaños desde el RFC.")
 
 
-def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_anexo, incidencias_df, archivo_anexo=None, subtipo_label=None, hora_retorno=""):
+def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_anexo, incidencias_df, archivo_anexo=None, subtipo_label=None, hora_retorno="", jefe_inmediato=""):
     key_btn = f"btn_registrar_{tipo}_{str(fi)}_{str(ff)}"
     if st.button("Registrar solicitud", type="primary", key=key_btn):
         if st.session_state.get(f"registrado_{key_btn}"):
@@ -1568,6 +1603,7 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
             "tiene_anexo":     tiene_anexo or archivo_anexo is not None,
             "link_anexo":      link_anexo,
             "subtipo_label":   subtipo_label if subtipo_label else TIPO_LABELS[tipo],
+            "jefe_inmediato":   jefe_inmediato,
             "hora_retorno":    hora_retorno,
         }
         if tipo == "ECO":
@@ -1596,35 +1632,36 @@ def vista_admin():
     tab1, tab2, tab3, tab4 = st.tabs(["Pendientes", "Historial completo", "Reporte mensual", "🕐 Reloj Checador"])
 
     with tab1:
-        # ── Días económicos pendientes de aprobar ────
         solicitudes_eco = cargar_solicitudes_eco()
-        if not solicitudes_eco.empty:
-            col_aprobado = next((c for c in solicitudes_eco.columns if "Aprobado" in c), None)
-            col_folio    = next((c for c in solicitudes_eco.columns if "FOLIO" in c.upper() or "Folio" in c), None)
-            if col_aprobado:
-                eco_pend = solicitudes_eco[solicitudes_eco[col_aprobado].astype(str).str.strip() == ""]
-                if not eco_pend.empty:
-                    st.markdown(f"#### 📅 Días económicos pendientes ({len(eco_pend)})")
-                    for idx, row in eco_pend.iterrows():
-                        folio_eco = str(row.get(col_folio, "")) if col_folio else f"ECO-{idx}"
-                        nombre_eco = str(row.get("Nombre Completo", row.get("NOMBRE", "")))
-                        with st.expander(f"**{folio_eco}** · Día económico · {nombre_eco}"):
-                            st.write(f"**RFC:** {str(row.get('RFC',''))}")
-                            st.write(f"**Fecha inicio:** {str(row.get('Fecha Inicio',''))}")
-                            st.write(f"**Fecha fin:** {str(row.get('Fecha Fin',''))}")
-                            st.write(f"**Días:** {str(row.get('Dias Solicitados',''))}")
-                            st.write(f"**Motivo:** {str(row.get('Motivo',''))}")
-                            st.write(f"**Registrado:** {str(row.get('Fecha Registro',''))}")
-                            if st.button("✅ Aprobar día económico", key=f"eco_{idx}", type="primary"):
-                                aprobar_dia_economico(idx + 2, "admin")
-                                st.rerun()
-                    st.divider()
+        col_aprobado = next((c for c in solicitudes_eco.columns if "Aprobado" in c), None)
+        col_folio    = next((c for c in solicitudes_eco.columns if "FOLIO" in c.upper() or "Folio" in c), None)
+        eco_pend = pd.DataFrame()
+        if col_aprobado and not solicitudes_eco.empty:
+            eco_pend = solicitudes_eco[solicitudes_eco[col_aprobado].astype(str).str.strip() == ""]
 
         pendientes = incidencias[incidencias["ESTADO"] == "PENDIENTE"]
-        if pendientes.empty:
+        total_pend = len(pendientes) + len(eco_pend)
+
+        if total_pend == 0:
             st.success("No hay solicitudes pendientes.")
         else:
-            st.caption(f"{len(pendientes)} solicitud(es) pendiente(s)")
+            st.caption(f"{total_pend} solicitud(es) pendiente(s)")
+
+            # Días económicos primero
+            for idx, row in eco_pend.iterrows():
+                folio_eco  = str(row.get(col_folio, "")) if col_folio else f"ECO-{idx}"
+                nombre_eco = str(row.get("Nombre Completo", row.get("NOMBRE", "")))
+                with st.expander(f"**{folio_eco}** · Día económico · {nombre_eco}"):
+                    col1, col2 = st.columns(2)
+                    col1.write(f"**RFC:** {str(row.get('RFC',''))}")
+                    col1.write(f"**Fecha inicio:** {str(row.get('Fecha Inicio',''))}")
+                    col1.write(f"**Fecha fin:** {str(row.get('Fecha Fin',''))}")
+                    col1.write(f"**Días:** {str(row.get('Dias Solicitados',''))}")
+                    col2.write(f"**Motivo:** {str(row.get('Motivo',''))}")
+                    col2.write(f"**Registrado:** {str(row.get('Fecha Registro',''))}")
+                    if st.button("✅ Aprobar día económico", key=f"eco_{idx}", type="primary"):
+                        aprobar_dia_economico(idx + 2, "admin")
+                        st.rerun()
             for _, row in pendientes.iterrows():
                 with st.expander(f"**{row['FOLIO']}** · {TIPO_LABELS.get(row['TIPO'], row['TIPO'])} · {row['NOMBRE']}"):
                     col1, col2 = st.columns(2)
