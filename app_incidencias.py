@@ -1386,8 +1386,7 @@ def vista_empleado():
         else:
             mis_inc = mis_inc_all
         # Solo días económicos del mes actual
-        col_rfc_sol = next((c for c in solicitudes.columns if c.upper() == "RFC"), None)
-        sol_hist_all = solicitudes[solicitudes[col_rfc_sol].astype(str).str.upper().str.strip() == rfc.upper().strip()].copy() if col_rfc_sol else pd.DataFrame()
+        sol_hist_all = solicitudes[solicitudes["RFC"].astype(str).str.upper().str.strip() == rfc.upper().strip()].copy() if "RFC" in solicitudes.columns else pd.DataFrame()
         if not sol_hist_all.empty:
             col_fi_eco = next((c for c in sol_hist_all.columns if "Inicio" in c or "INICIO" in c), None)
             if col_fi_eco:
