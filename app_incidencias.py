@@ -1390,8 +1390,13 @@ def vista_empleado():
         if not sol_hist_all.empty:
             col_fi_eco = next((c for c in sol_hist_all.columns if "Inicio" in c or "INICIO" in c), None)
             if col_fi_eco:
-                sol_hist_all["FECHA_DT"] = pd.to_datetime(sol_hist_all[col_fi_eco], errors="coerce", dayfirst=True)
-                sol_hist = sol_hist_all[(sol_hist_all["FECHA_DT"].dt.year == ahora.year) & (sol_hist_all["FECHA_DT"].dt.month == ahora.month)].copy()
+                sol_hist_all["FECHA_DT"] = pd.to_datetime(sol_hist_all[col_fi_eco], errors="coerce")
+                sol_hist = sol_hist_all[
+                    (sol_hist_all["FECHA_DT"].dt.year == ahora.year) &
+                    (sol_hist_all["FECHA_DT"].dt.month == ahora.month)
+                ].copy()
+                if sol_hist.empty:
+                    sol_hist = sol_hist_all  # si falla el filtro mostrar todo
             else:
                 sol_hist = sol_hist_all
         else:
