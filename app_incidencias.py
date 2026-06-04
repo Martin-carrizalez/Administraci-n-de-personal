@@ -1727,6 +1727,7 @@ def vista_admin():
                             else:
                                 rechazar_dia_economico(idx + 2, obs_eco)
                                 st.rerun()
+            for _, row in pendientes.iterrows():
                 with st.expander(f"**{row['FOLIO']}** · {TIPO_LABELS.get(row['TIPO'], row['TIPO'])} · {row['NOMBRE']}"):
                     col1, col2 = st.columns(2)
                     col1.write('**Filiación:** ' + rfc_oculto(str(row['RFC'])))
