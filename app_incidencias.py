@@ -561,6 +561,24 @@ def rechazar_incidencia(folio: str, obs: str):
             break
     cargar_incidencias.clear()
 
+def rechazar_dia_economico(row_idx: int, obs: str):
+    try:
+        import pytz
+        tz_mx = pytz.timezone("America/Mexico_City")
+        ahora = datetime.now(pytz.utc).astimezone(tz_mx).strftime("%Y-%m-%d %H:%M")
+        client = get_client()
+        sh = client.open_by_key(st.secrets["sheet_economicos_id"])
+        ws = sh.worksheet("Solicitudes")
+        headers = [h.upper().strip() for h in ws.row_values(1)]
+        col_aprobado = headers.index("APROBADO POR") + 1 if "APROBADO POR" in headers else None
+        col_motivo   = headers.index("MOTIVO") + 1 if "MOTIVO" in headers else None
+        if col_aprobado:
+            ws.update_cell(row_idx, col_aprobado, f"RECHAZADO — {obs}")
+        cargar_solicitudes_eco.clear()
+        st.warning("Solicitud rechazada.")
+    except Exception as e:
+        st.error(f"Error al rechazar: {e}")
+
 def aprobar_dia_economico(row_idx: int, nombre_admin: str):
     """Escribe el nombre del admin en Aprobado Por de la tab Solicitudes."""
     try:
@@ -708,11 +726,14 @@ def login():
                 nombre_completo = correo.split("@")[0].replace(".", " ").title()
             emp_dict = {}
 
-        st.session_state["rol"]          = "empleado"
-        st.session_state["correo"]       = correo
-        st.session_state["rfc"]          = rfc_input.upper()
-        st.session_state["nombre"]       = nombre_completo
-        st.session_state["empleado_row"] = emp_dict
+        jefe_auto = str(usr_row.get("JEFE_INMEDIATO", "")).strip()
+        jefe_pdf_auto = DICT_JEFES.get(jefe_auto, jefe_auto) if jefe_auto else ""
+        st.session_state["rol"]             = "empleado"
+        st.session_state["correo"]          = correo
+        st.session_state["rfc"]             = rfc_input.upper()
+        st.session_state["nombre"]          = nombre_completo
+        st.session_state["empleado_row"]    = emp_dict
+        st.session_state["jefe_inmediato"]  = jefe_pdf_auto
         st.rerun()
 
 # ─────────────────────────────────────────────
@@ -1451,8 +1472,13 @@ def vista_empleado():
     st.divider()
     st.markdown("### Nueva solicitud")
 
-    jefe_sel = st.selectbox("👤 Jefe inmediato que autoriza", options=list(DICT_JEFES.keys()))
-    jefe_pdf  = DICT_JEFES[jefe_sel]
+    jefe_guardado = st.session_state.get("jefe_inmediato", "")
+    if jefe_guardado:
+        jefe_pdf = jefe_guardado
+        st.caption(f"👤 Jefe inmediato: {jefe_guardado.split(chr(60))[0]}")
+    else:
+        jefe_sel = st.selectbox("👤 Jefe inmediato que autoriza", options=list(DICT_JEFES.keys()))
+        jefe_pdf = DICT_JEFES[jefe_sel]
 
     tipo = st.selectbox(
         "Tipo de incidencia",
@@ -1688,10 +1714,19 @@ def vista_admin():
                     col1.write(f"**Días:** {str(row.get('Dias Solicitados',''))}")
                     col2.write(f"**Motivo:** {str(row.get('Motivo',''))}")
                     col2.write(f"**Registrado:** {str(row.get('Fecha Registro',''))}")
-                    if st.button("✅ Aprobar día económico", key=f"eco_{idx}", type="primary"):
-                        aprobar_dia_economico(idx + 2, "admin")
-                        st.rerun()
-            for _, row in pendientes.iterrows():
+                    obs_eco = st.text_input("Observaciones (para rechazo)", key=f"obs_eco_{idx}")
+                    col_a, col_r = st.columns(2)
+                    with col_a:
+                        if st.button("✅ Aprobar", key=f"eco_{idx}", type="primary"):
+                            aprobar_dia_economico(idx + 2, "admin")
+                            st.rerun()
+                    with col_r:
+                        if st.button("❌ Rechazar", key=f"rec_eco_{idx}"):
+                            if not obs_eco:
+                                st.error("Escribe una observación para rechazar.")
+                            else:
+                                rechazar_dia_economico(idx + 2, obs_eco)
+                                st.rerun()
                 with st.expander(f"**{row['FOLIO']}** · {TIPO_LABELS.get(row['TIPO'], row['TIPO'])} · {row['NOMBRE']}"):
                     col1, col2 = st.columns(2)
                     col1.write('**Filiación:** ' + rfc_oculto(str(row['RFC'])))
@@ -1872,6 +1907,10 @@ def main():
         st.caption('👤 Servidor(a) Público(a): ' + st.session_state['nombre'])
         st.caption('🏷️ Nivel de acceso: ' + ('Administrador RH' if st.session_state['rol'] == 'admin' else 'Personal de la Dirección'))
         st.divider()
+        if st.session_state.get("rol") == "admin":
+            if st.button("🔄 Limpiar caché"):
+                st.cache_data.clear()
+                st.success("Caché limpiado.")
         if st.button("Cerrar sesión"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
