@@ -1915,18 +1915,39 @@ def vista_directorio():
             for _, row in resultados.iterrows():
                 tarjeta(row)
     else:
-        areas = df["AREA"].unique()
-        for area in areas:
-            sub = df[df["AREA"] == area]
-            depts = sub["DEPARTAMENTO"].unique()
-            bg, tc = color(area)
-            with st.expander(f"{area}  ·  {len(sub)} personas"):
-                for dept in depts:
-                    personas = sub[sub["DEPARTAMENTO"] == dept]
-                    if dept:
-                        st.markdown(f"<p style='font-size:11px;font-weight:600;color:gray;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px'>{dept}</p>", unsafe_allow_html=True)
-                    for _, row in personas.iterrows():
-                        tarjeta(row)
+        # Agrupar por DEPARTAMENTO como área visible (7 secciones)
+        ORDEN_AREAS = [
+            "Despacho",
+            "Recursos Humanos",
+            "Viáticos",
+            "Recursos Materiales",
+            "Licitaciones y Presupuestos",
+            "Comunicación Social",
+            "Dir. Desarrollo Académico",
+        ]
+        ICONOS = {
+            "Despacho":                    "🏢",
+            "Recursos Humanos":            "👥",
+            "Viáticos":                    "🧾",
+            "Recursos Materiales":         "📦",
+            "Licitaciones y Presupuestos": "📋",
+            "Comunicación Social":         "📢",
+            "Dir. Desarrollo Académico":   "🎓",
+        }
+        # Normalizar: si DEPARTAMENTO está vacío usar AREA como dept
+        df["DEPT_VISTA"] = df.apply(lambda r: r["DEPARTAMENTO"] if r["DEPARTAMENTO"] else r["AREA"], axis=1)
+
+        depts_en_datos = df["DEPT_VISTA"].unique().tolist()
+        # Mostrar en orden acordado + cualquier otro que no esté en la lista
+        orden_final = [d for d in ORDEN_AREAS if d in depts_en_datos] + [d for d in depts_en_datos if d not in ORDEN_AREAS]
+
+        for dept in orden_final:
+            personas = df[df["DEPT_VISTA"] == dept]
+            icono = ICONOS.get(dept, "📁")
+            bg, tc = color(df[df["DEPT_VISTA"]==dept]["AREA"].iloc[0])
+            with st.expander(f"{icono} {dept}  ·  {len(personas)} personas"):
+                for _, row in personas.iterrows():
+                    tarjeta(row)
 
 
 def main():
