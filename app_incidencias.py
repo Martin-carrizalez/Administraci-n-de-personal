@@ -1887,84 +1887,71 @@ def vista_admin():
 # ─────────────────────────────────────────────
 def vista_calendario():
     st.markdown("## 📅 Calendario de Pagos y Prestaciones 2026")
-    st.caption("Dirección de Formación Continua · SEJ")
-
-    # Leyenda de categorías
     st.markdown("""
     <div style='display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;font-size:12px'>
         <span>🟡 Docentes Básica</span>
         <span>🟣 Docentes Nivel Superior</span>
         <span>🟢 Personal de Apoyo Básica</span>
-        <span>🔵 Personal de Apoyo y No Docente Nivel Superior</span>
+        <span>🔵 Personal de Apoyo No Docente Nivel Superior</span>
     </div>""", unsafe_allow_html=True)
 
-    # cada quincena: (fecha, qna, [(concepto, categorias)])
-    # categorias: DB=Docente Básica, DNS=Docente Nivel Superior, PAB=Personal Apoyo Básica, PANS=Personal Apoyo No Docente Superior
     PAGOS = [
         ("Enero", [
-            ("14 Ene", "Q-01", [("Estímulo puntualidad y asistencia 2ª parte", "🟡🟢"), ("Prima Dominical", "🟣🔵")]),
-            ("29 Ene", "Q-02", [("Compensación Nacional Única 1ª Parte", "🟢")]),
+            ("14 Ene", "Q-01", [("Estímulo puntualidad y asistencia 2ª parte", "🟣🔵"), ("Prima Dominical", "🟣🔵")]),
+            ("29 Ene", "Q-02", [("Compensación Nacional Única 1ª Parte", "🟡🟢")]),
         ]),
         ("Febrero", [
-            ("12 Feb", "Q-03", []),
-            ("26 Feb", "Q-04", []),
+            ("12 Feb", "Q-03", [("Sueldo ordinario", "")]),
+            ("26 Feb", "Q-04", [("Sueldo ordinario", "")]),
         ]),
         ("Marzo", [
-            ("12 Mar", "Q-05", []),
-            ("26 Mar", "Q-06", [("1ª Parte Aguinaldo", "🟡🟣🟢🔵")]),
+            ("12 Mar", "Q-05", [("Sueldo ordinario", "")]),
+            ("26 Mar", "Q-06", [("1ª Parte Aguinaldo", "🟢🔵")]),
         ]),
         ("Abril", [
-            ("14 Abr", "Q-07", []),
-            ("29 Abr", "Q-08", []),
+            ("14 Abr", "Q-07", [("Sueldo ordinario", "")]),
+            ("29 Abr", "Q-08", [("Sueldo ordinario", "")]),
         ]),
         ("Mayo", [
             ("14 May", "Q-09", [
-                ("1ª Parte Aguinaldo", "🟡🟢"),
-                ("Gratificación Día del Maestro", "🟡🟣🟢🔵"),
+                ("1ª Parte Aguinaldo", "🟡"),
+                ("Gratificación Día del Maestro", "🟡"),
+                ("1ª Parte Aguinaldo", "🟣"),
                 ("Reconocimiento Docentes Nivel Superior", "🟣"),
-                ("Ayuda para Libros Docentes Nivel Superior", "🟣"),
+                ("Ayuda para Libros", "🟣"),
             ]),
-            ("28 May", "Q-10", []),
+            ("28 May", "Q-10", [("Sueldo ordinario", "")]),
         ]),
         ("Junio", [
-            ("12 Jun", "Q-11", [("Estímulo puntualidad y asistencia 1ª parte", "🟡🟢")]),
-            ("29 Jun", "Q-12", [("Reconocimiento a Directores", "🟣")]),
+            ("12 Jun", "Q-11", [("Estímulo puntualidad y asistencia 1ª parte", "🟣🔵")]),
+            ("29 Jun", "Q-12", [("Reconocimiento a Directores", "🟡")]),
         ]),
         ("Julio", [
-            ("14 Jul", "Q-13", []),
+            ("14 Jul", "Q-13", [("Sueldo ordinario", "")]),
             ("30 Jul", "Q-14", [("Gratificación por el trabajo", "🟢")]),
         ]),
         ("Agosto", [
-            ("13 Ago", "Q-15", [("Organización Escolar", "🟢"), ("Ayuda para gastos escolares", "🟢")]),
-            ("28 Ago", "Q-16", [
-                ("Compensación Nacional Única 2ª Parte", "🟢"),
-                ("Medida Económica Única para Maestras y Maestros", "🟡🟣"),
-            ]),
+            ("13 Ago", "Q-15", [("Organización Escolar", "🟡"), ("Ayuda para gastos escolares", "🟢")]),
+            ("28 Ago", "Q-16", [("Compensación Nacional Única 2ª Parte", "🟡🟢"), ("Medida Económica Única", "🟣🔵")]),
         ]),
         ("Septiembre", [
             ("14 Sep", "Q-17", [
-                ("Estímulo a la Actividad Docente", "🟡🟢"),
-                ("Estímulo a Directores", "🟣"),
+                ("Estímulo a la Actividad Docente", "🟡"),
+                ("Estímulo a Directores", "🟡"),
                 ("Gratificación Única 1ª Parte", "🔵"),
             ]),
             ("29 Sep", "Q-18", [
-                ("Gratificación Fortalecimiento Académico", "🟡🟣"),
-                ("Bono Extraordinario superación académica 1ª Parte", "🟡🟣"),
+                ("Gratificación Fortalecimiento Académico", "🟡"),
+                ("Bono Extraordinario superación académica 1ª Parte", "🟣"),
             ]),
         ]),
         ("Octubre", [
-            ("14 Oct", "Q-19", []),
-            ("29 Oct", "Q-20", [
-                ("Fortalecimiento CC según ajustes salariales", "🟡🟢"),
-                ("Fortalecimiento CT según ajustes salariales", "🟣🔵"),
-            ]),
+            ("14 Oct", "Q-19", [("Sueldo ordinario", "")]),
+            ("29 Oct", "Q-20", [("Fortalecimiento CC según ajustes salariales", "🟡"), ("Fortalecimiento CT según ajustes salariales", "🟢")]),
         ]),
         ("Noviembre", [
-            ("12 Nov", "Q-21", []),
-            ("27 Nov", "Q-22", [
-                ("Bono anual 24 días inicial", "🟡🟣"),
-                ("Apoyo a la integración educativa especial", "🟢"),
-            ]),
+            ("12 Nov", "Q-21", [("Sueldo ordinario", "")]),
+            ("27 Nov", "Q-22", [("Bono anual 24 días inicial", "🟡"), ("Apoyo a la integración educativa especial", "🟡")]),
         ]),
         ("Diciembre", [
             ("Por definir", "", [("Fecha de pago por definir", "")]),
@@ -1994,7 +1981,7 @@ def vista_calendario():
 
     st.divider()
     try:
-        with open("calendario_pagos_est_2026.ics", "rb") as f_ics:
+        with open("1780634863696_calendario_pagos_est_2026.ics", "rb") as f_ics:
             ics_bytes = f_ics.read()
         st.download_button(
             "⬇️ Descargar calendario (.ics)",
@@ -2005,7 +1992,7 @@ def vista_calendario():
             type="primary"
         )
     except:
-        st.info("Sube el archivo .ics al repo para habilitar la descarga.")
+        st.info("Archivo .ics no disponible.")
 
     st.markdown("### 📲 ¿Cómo agregar este calendario a tu dispositivo?")
     with st.expander("📱 iPhone / iPad"):
@@ -2014,30 +2001,27 @@ def vista_calendario():
 2. Abre la app **Archivos** en tu iPhone
 3. Toca el archivo descargado
 4. Aparecerá una pantalla para **Agregar todos** los eventos — confirma
-5. Los pagos aparecerán en tu app **Calendario** con recordatorio
+5. Los pagos aparecerán en tu app **Calendario**
         """)
     with st.expander("🤖 Android / Google Calendar"):
         st.markdown("""
 1. Descarga el archivo **.ics**
 2. Ve a [calendar.google.com](https://calendar.google.com) desde tu navegador
-3. En la barra lateral izquierda toca **Otros calendarios** → **+** → **Importar**
-4. Selecciona el archivo **.ics** descargado
-5. Elige en qué calendario importar y confirma
+3. En la barra lateral toca **Otros calendarios** → **+** → **Importar**
+4. Selecciona el archivo **.ics** descargado y confirma
         """)
     with st.expander("💻 Outlook (PC o Mac)"):
         st.markdown("""
 1. Descarga el archivo **.ics**
-2. Abre **Outlook**
-3. Ve a **Archivo** → **Abrir y exportar** → **Importar o exportar**
-4. Selecciona **Importar un archivo iCalendar (.ics)**
-5. Busca el archivo descargado y confirma
+2. Abre **Outlook** → **Archivo** → **Abrir y exportar** → **Importar o exportar**
+3. Selecciona **Importar un archivo iCalendar (.ics)**
+4. Busca el archivo descargado y confirma
         """)
 
 
 def vista_nomina():
-    import webbrowser
-    st.markdown("<meta http-equiv='refresh' content='0; url=https://miscomprobantesnomina.jalisco.gob.mx/login'>", unsafe_allow_html=True)
     st.link_button("🔗 Abrir mis comprobantes de nómina", "https://miscomprobantesnomina.jalisco.gob.mx/login", type="primary", use_container_width=True)
+    st.caption("Se abrirá en una nueva pestaña. Inicia sesión con tus credenciales institucionales.")
 
 
 def vista_directorio():
