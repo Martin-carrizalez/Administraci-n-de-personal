@@ -1965,19 +1965,23 @@ def vista_calendario():
     MESES_NUM = {"Enero":1,"Febrero":2,"Marzo":3,"Abril":4,"Mayo":5,"Junio":6,
                  "Julio":7,"Agosto":8,"Septiembre":9,"Octubre":10,"Noviembre":11,"Diciembre":12}
 
-    cols = st.columns(3)
-    for i, (mes, quincenas) in enumerate(PAGOS):
-        with cols[i % 3]:
+    def render_mes(col, mes, quincenas, es_actual):
+        borde = "#F97316" if es_actual else "var(--color-border-tertiary)"
+        fondo = "#FFF7ED" if es_actual else "var(--color-background-primary)"
+        col.markdown(f"<div style='border:2px solid {borde};border-radius:12px;padding:12px;margin-bottom:12px;background:{fondo}'>", unsafe_allow_html=True)
+        col.markdown(f"**{'🟠 ' if es_actual else ''}{mes.upper()}**")
+        for fecha, qna, conceptos in quincenas:
+            col.markdown(f"📅 **{fecha}**{'  ·  ' + qna if qna else ''}")
+            for concepto, cats in conceptos:
+                col.caption(f"{cats}  {concepto}" if cats else concepto)
+        col.markdown("</div>", unsafe_allow_html=True)
+
+    for fila in range(0, len(PAGOS), 3):
+        grupo = PAGOS[fila:fila+3]
+        cols = st.columns(3)
+        for j, (mes, quincenas) in enumerate(grupo):
             es_actual = MESES_NUM.get(mes, 0) == mes_actual
-            borde = "#F97316" if es_actual else "var(--color-border-tertiary)"
-            fondo = "#FFF7ED" if es_actual else "var(--color-background-primary)"
-            st.markdown(f"<div style='border:2px solid {borde};border-radius:12px;padding:12px;margin-bottom:12px;background:{fondo}'>", unsafe_allow_html=True)
-            st.markdown(f"**{'🟠 ' if es_actual else ''}{mes.upper()}**")
-            for fecha, qna, conceptos in quincenas:
-                st.markdown(f"📅 **{fecha}**{'  ·  ' + qna if qna else ''}")
-                for concepto, cats in conceptos:
-                    st.caption(f"{cats}  {concepto}" if cats else concepto)
-            st.markdown("</div>", unsafe_allow_html=True)
+            render_mes(cols[j], mes, quincenas, es_actual)
 
     st.divider()
     try:
@@ -2020,8 +2024,17 @@ def vista_calendario():
 
 
 def vista_nomina():
-    st.link_button("🔗 Abrir mis comprobantes de nómina", "https://miscomprobantesnomina.jalisco.gob.mx/login", type="primary", use_container_width=True)
-    st.caption("Se abrirá en una nueva pestaña. Inicia sesión con tus credenciales institucionales.")
+    st.markdown("## 💰 Mis comprobantes de nómina")
+    with st.container(border=True):
+        st.markdown("### 📋 ¿Cómo consultar tus recibos de nómina?")
+        st.markdown("""
+**Paso 1** — Haz clic en el botón de abajo  
+**Paso 2** — Se abrirá el portal del Gobierno de Jalisco en una nueva pestaña  
+**Paso 3** — Inicia sesión con tu **RFC** y tu **contraseña institucional**  
+**Paso 4** — Selecciona el período que quieres consultar o descargar
+        """)
+        st.info("⚠️ El portal requiere que inicies sesión directamente en tu navegador. Si no carga, cópialo y pégalo en tu navegador: **miscomprobantesnomina.jalisco.gob.mx/login**")
+        st.link_button("🔗 Ir al portal de comprobantes de nómina", "https://miscomprobantesnomina.jalisco.gob.mx/login", type="primary", use_container_width=True)
 
 
 def vista_directorio():
