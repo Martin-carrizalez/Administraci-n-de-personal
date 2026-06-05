@@ -1846,6 +1846,89 @@ def vista_admin():
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
+def vista_directorio():
+    import pytz
+
+    @st.cache_data(ttl=300)
+    def cargar_directorio():
+        client = get_client()
+        sh = client.open_by_key(st.secrets["sheet_checador_id"])
+        ws = sh.worksheet("Directorio")
+        data = ws.get_all_records(numericise_ignore=["all"])
+        return pd.DataFrame(data).fillna("")
+
+    st.markdown("## 📞 Directorio interno DFC 2026")
+    st.caption("Toca un área para ver su equipo · Busca por nombre, extensión o correo")
+
+    df = cargar_directorio()
+    if df.empty:
+        st.warning("No se pudo cargar el directorio.")
+        return
+
+    busq = st.text_input("", placeholder="🔍 Busca por nombre, extensión o correo...", label_visibility="collapsed")
+
+    COLORES = {
+        "Dirección General":        ("#E1F5EE", "#0F6E56"),
+        "Dir. Gestión y Evaluación": ("#EEEDFE", "#534AB7"),
+        "Dir. Desarrollo Académico": ("#E6F1FB", "#185FA5"),
+    }
+
+    def color(area):
+        for k, v in COLORES.items():
+            if k in area:
+                return v
+        return ("#F4F6F9", "#444")
+
+    def tarjeta(row):
+        bg, tc = color(row["AREA"])
+        ini = (str(row["NOMBRE"])[0] + (str(row["NOMBRE"]).split()[1][0] if len(str(row["NOMBRE"]).split()) > 1 else "")).upper()
+        ext_html = f"📞 **{row['EXTENSION']}**" if row["EXTENSION"] else ""
+        email_html = f"" if row["CORREO"] else ""
+        dept_html = f" · *{row['DEPARTAMENTO']}*" if row["DEPARTAMENTO"] else ""
+
+        col1, col2 = st.columns([3,1])
+        with col1:
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:10px;padding:4px 0'>"
+                f"<div style='width:34px;height:34px;border-radius:50%;background:{bg};color:{tc};"
+                f"display:flex;align-items:center;justify-content:center;font-weight:600;font-size:12px;flex-shrink:0'>{ini}</div>"
+                f"<div><div style='font-size:14px;font-weight:500'>{row['NOMBRE']}</div>"
+                f"<div style='font-size:12px;color:gray'>{row['AREA']}{dept_html}</div></div></div>",
+                unsafe_allow_html=True
+            )
+        with col2:
+            if ext_html: st.markdown(ext_html)
+            if email_html: st.caption(row["CORREO"])
+        st.divider()
+
+    if busq:
+        q = busq.lower().strip()
+        resultados = df[
+            df["NOMBRE"].str.lower().str.contains(q) |
+            df["EXTENSION"].astype(str).str.contains(q) |
+            df["CORREO"].str.lower().str.contains(q)
+        ]
+        if resultados.empty:
+            st.info("Sin resultados.")
+        else:
+            st.caption(f"{len(resultados)} resultado(s)")
+            for _, row in resultados.iterrows():
+                tarjeta(row)
+    else:
+        areas = df["AREA"].unique()
+        for area in areas:
+            sub = df[df["AREA"] == area]
+            depts = sub["DEPARTAMENTO"].unique()
+            bg, tc = color(area)
+            with st.expander(f"{area}  ·  {len(sub)} personas"):
+                for dept in depts:
+                    personas = sub[sub["DEPARTAMENTO"] == dept]
+                    if dept:
+                        st.markdown(f"<p style='font-size:11px;font-weight:600;color:gray;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px'>{dept}</p>", unsafe_allow_html=True)
+                    for _, row in personas.iterrows():
+                        tarjeta(row)
+
+
 def main():
     st.set_page_config(page_title="Incidencias DFC · RH", page_icon="📋", layout="wide")
 
@@ -1912,12 +1995,21 @@ def main():
             if st.button("🔄 Limpiar caché"):
                 st.cache_data.clear()
                 st.success("Caché limpiado.")
+        if st.button("📞 Directorio DFC"):
+            st.session_state["vista"] = "directorio"
+            st.rerun()
+        if st.button("🏠 Inicio"):
+            st.session_state["vista"] = "inicio"
+            st.rerun()
         if st.button("Cerrar sesión"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
 
-    if st.session_state["rol"] == "admin":
+    vista = st.session_state.get("vista", "inicio")
+    if vista == "directorio":
+        vista_directorio()
+    elif st.session_state["rol"] == "admin":
         vista_admin()
     else:
         vista_empleado()
