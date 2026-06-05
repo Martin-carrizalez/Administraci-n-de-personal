@@ -855,7 +855,7 @@ def render_checador():
         except:
             return pd.DataFrame()
 
-    def build_justificantes_rfc(economicos, incapacidades, incidencias_df, fi, ff):
+    def build_justificantes_rfc(economicos, incapacidades, incidencias_df, fi, ff, eventos_inst=None):
         """
         Retorna dict: {RFC_upper -> {date -> tipo_justificante}}
         Incluye: días económicos, incapacidades, comisiones, pases de entrada
@@ -926,6 +926,15 @@ def render_checador():
                         d += timedelta(days=1)
                 except: pass
 
+        # Eventos institucionales — aplican a TODOS los empleados
+        if eventos_inst:
+            from gspread import Client  # solo para verificar que tenemos clientes cargados
+            for ev in eventos_inst:
+                fecha_ev = ev["fecha"] if isinstance(ev["fecha"], type(fi)) else ev["fecha"]
+                if fi <= fecha_ev <= ff:
+                    # Agregar a todos los empleados activos
+                    for rfc_emp in set(list(resultado.keys()) + ["__GLOBAL__"]):
+                        resultado.setdefault("__GLOBAL__", {})[fecha_ev] = ev["motivo"]
         return resultado
 
     def get_horario_fecha(emp_row, fecha, historial_df):
@@ -1003,7 +1012,9 @@ def render_checador():
             rfc    = str(emp_row.get("RFC","")).upper().strip()
             dias_prog = asistidos = faltas = retardos = retardos_min = justif = 0
             uid_ch     = checadas.get(uid, {})
-            just_emp   = just_rfc.get(rfc, {})
+            just_emp_personal = just_rfc.get(rfc, {})
+            just_emp_global   = just_rfc.get("__GLOBAL__", {})
+            just_emp = {**just_emp_global, **just_emp_personal}
             dias_falta = []
             dias_just  = []
             det_retardos_emp = []
@@ -1271,6 +1282,33 @@ def render_checador():
     with col_tol:
         umbral_r = st.number_input("Tolerancia retardo (min)", min_value=1, max_value=30, value=10)
 
+    # ── Días justificados por evento institucional ──────────────────────
+    with st.expander("📋 Agregar días justificados por evento institucional"):
+        st.caption("Agrega fechas donde todos los empleados tienen autorizado faltar o salir temprano por evento oficial (ej: Juegos Magisteriales, Comida del Maestro).")
+        col_f, col_m = st.columns([1,2])
+        with col_f:
+            fecha_evento = st.date_input("Fecha del evento", value=date.today(), key="fecha_evento_inst")
+        with col_m:
+            motivo_evento = st.text_input("Motivo / Nombre del evento", placeholder="Ej: Juegos Magisteriales", key="motivo_evento_inst")
+        if st.button("➕ Agregar fecha justificada", key="btn_add_evento"):
+            if motivo_evento:
+                if "eventos_institucionales" not in st.session_state:
+                    st.session_state["eventos_institucionales"] = []
+                st.session_state["eventos_institucionales"].append({"fecha": fecha_evento, "motivo": motivo_evento})
+                st.success(f"✅ {fecha_evento.strftime('%d/%m/%Y')} — {motivo_evento} agregado.")
+            else:
+                st.error("Escribe el motivo del evento.")
+
+        if st.session_state.get("eventos_institucionales"):
+            st.markdown("**Fechas justificadas para este reporte:**")
+            for j, ev in enumerate(st.session_state["eventos_institucionales"]):
+                c1, c2, c3 = st.columns([1,2,1])
+                c1.write(ev["fecha"].strftime("%d/%m/%Y"))
+                c2.write(ev["motivo"])
+                if c3.button("🗑️", key=f"del_ev_{j}"):
+                    st.session_state["eventos_institucionales"].pop(j)
+                    st.rerun()
+
     if uploaded_xls:
         # Pre-leer período
         try:
@@ -1298,7 +1336,8 @@ def render_checador():
 
             fi = datetime.strptime(_fi_str, "%Y-%m-%d").date()
             ff = datetime.strptime(_ff_str, "%Y-%m-%d").date()
-            just_rfc = build_justificantes_rfc(economicos, incapacidades, incidencias_p, fi, ff)
+            eventos_inst = st.session_state.get("eventos_institucionales", [])
+            just_rfc = build_justificantes_rfc(economicos, incapacidades, incidencias_p, fi, ff, eventos_inst)
 
         try:
             df_res, df_ret, periodo, fecha_ini, fecha_fin = parse_report_ch(
@@ -1848,35 +1887,94 @@ def vista_admin():
 # ─────────────────────────────────────────────
 def vista_calendario():
     st.markdown("## 📅 Calendario de Pagos y Prestaciones 2026")
-    st.caption("SNTE Sección 47 · Jalisco")
+    st.caption("Dirección de Formación Continua · SEJ")
 
+    # Leyenda de categorías
+    st.markdown("""
+    <div style='display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;font-size:12px'>
+        <span>🟡 Docentes Básica</span>
+        <span>🟣 Docentes Nivel Superior</span>
+        <span>🟢 Personal de Apoyo Básica</span>
+        <span>🔵 Personal de Apoyo y No Docente Nivel Superior</span>
+    </div>""", unsafe_allow_html=True)
+
+    # cada quincena: (fecha, qna, [(concepto, categorias)])
+    # categorias: DB=Docente Básica, DNS=Docente Nivel Superior, PAB=Personal Apoyo Básica, PANS=Personal Apoyo No Docente Superior
     PAGOS = [
-        ("Enero",     [("14 Ene", "Q-01", "Estímulo puntualidad y asistencia (2ª parte) · Prima Dominical"),
-                       ("29 Ene", "Q-02", "Compensación Nacional Única 1ª Parte")]),
-        ("Febrero",   [("12 Feb", "Q-03", ""), ("26 Feb", "Q-04", "")]),
-        ("Marzo",     [("12 Mar", "Q-05", ""), ("26 Mar", "Q-06", "1ª Parte Aguinaldo")]),
-        ("Abril",     [("14 Abr", "Q-07", ""), ("29 Abr", "Q-08", "")]),
-        ("Mayo",      [("14 May", "Q-09", "1ª Parte Aguinaldo · Gratificación Día del Maestro · Reconocimiento Docentes · Ayuda Libros"),
-                       ("28 May", "Q-10", "")]),
-        ("Junio",     [("12 Jun", "Q-11", "Estímulo puntualidad y asistencia (1ª parte)"),
-                       ("29 Jun", "Q-12", "Reconocimiento a Directores")]),
-        ("Julio",     [("14 Jul", "Q-13", ""), ("30 Jul", "Q-14", "Gratificación por el trabajo")]),
-        ("Agosto",    [("13 Ago", "Q-15", "Organización Escolar · Ayuda gastos escolares"),
-                       ("28 Ago", "Q-16", "Compensación Nacional Única 2ª Parte · Medida Económica Única")]),
-        ("Septiembre",[("14 Sep", "Q-17", "Estímulo Actividad Docente · Estímulo a Directores · Gratificación Única 1ª Parte"),
-                       ("29 Sep", "Q-18", "Gratificación Fortalecimiento Académico · Bono Extraordinario superación académica 1ª Parte")]),
-        ("Octubre",   [("14 Oct", "Q-19", ""),
-                       ("29 Oct", "Q-20", "Fortalecimiento CC y CT según ajustes salariales")]),
-        ("Noviembre", [("12 Nov", "Q-21", ""),
-                       ("27 Nov", "Q-22", "Bono anual 24 días inicial · Apoyo integración educativa especial")]),
-        ("Diciembre", [("Por definir", "", "Fecha de pago por definir")]),
+        ("Enero", [
+            ("14 Ene", "Q-01", [("Estímulo puntualidad y asistencia 2ª parte", "🟡🟢"), ("Prima Dominical", "🟣🔵")]),
+            ("29 Ene", "Q-02", [("Compensación Nacional Única 1ª Parte", "🟢")]),
+        ]),
+        ("Febrero", [
+            ("12 Feb", "Q-03", []),
+            ("26 Feb", "Q-04", []),
+        ]),
+        ("Marzo", [
+            ("12 Mar", "Q-05", []),
+            ("26 Mar", "Q-06", [("1ª Parte Aguinaldo", "🟡🟣🟢🔵")]),
+        ]),
+        ("Abril", [
+            ("14 Abr", "Q-07", []),
+            ("29 Abr", "Q-08", []),
+        ]),
+        ("Mayo", [
+            ("14 May", "Q-09", [
+                ("1ª Parte Aguinaldo", "🟡🟢"),
+                ("Gratificación Día del Maestro", "🟡🟣🟢🔵"),
+                ("Reconocimiento Docentes Nivel Superior", "🟣"),
+                ("Ayuda para Libros Docentes Nivel Superior", "🟣"),
+            ]),
+            ("28 May", "Q-10", []),
+        ]),
+        ("Junio", [
+            ("12 Jun", "Q-11", [("Estímulo puntualidad y asistencia 1ª parte", "🟡🟢")]),
+            ("29 Jun", "Q-12", [("Reconocimiento a Directores", "🟣")]),
+        ]),
+        ("Julio", [
+            ("14 Jul", "Q-13", []),
+            ("30 Jul", "Q-14", [("Gratificación por el trabajo", "🟢")]),
+        ]),
+        ("Agosto", [
+            ("13 Ago", "Q-15", [("Organización Escolar", "🟢"), ("Ayuda para gastos escolares", "🟢")]),
+            ("28 Ago", "Q-16", [
+                ("Compensación Nacional Única 2ª Parte", "🟢"),
+                ("Medida Económica Única para Maestras y Maestros", "🟡🟣"),
+            ]),
+        ]),
+        ("Septiembre", [
+            ("14 Sep", "Q-17", [
+                ("Estímulo a la Actividad Docente", "🟡🟢"),
+                ("Estímulo a Directores", "🟣"),
+                ("Gratificación Única 1ª Parte", "🔵"),
+            ]),
+            ("29 Sep", "Q-18", [
+                ("Gratificación Fortalecimiento Académico", "🟡🟣"),
+                ("Bono Extraordinario superación académica 1ª Parte", "🟡🟣"),
+            ]),
+        ]),
+        ("Octubre", [
+            ("14 Oct", "Q-19", []),
+            ("29 Oct", "Q-20", [
+                ("Fortalecimiento CC según ajustes salariales", "🟡🟢"),
+                ("Fortalecimiento CT según ajustes salariales", "🟣🔵"),
+            ]),
+        ]),
+        ("Noviembre", [
+            ("12 Nov", "Q-21", []),
+            ("27 Nov", "Q-22", [
+                ("Bono anual 24 días inicial", "🟡🟣"),
+                ("Apoyo a la integración educativa especial", "🟢"),
+            ]),
+        ]),
+        ("Diciembre", [
+            ("Por definir", "", [("Fecha de pago por definir", "")]),
+        ]),
     ]
 
     import pytz
     from datetime import datetime
     tz_mx = pytz.timezone("America/Mexico_City")
     mes_actual = datetime.now(tz_mx).month
-
     MESES_NUM = {"Enero":1,"Febrero":2,"Marzo":3,"Abril":4,"Mayo":5,"Junio":6,
                  "Julio":7,"Agosto":8,"Septiembre":9,"Octubre":10,"Noviembre":11,"Diciembre":12}
 
@@ -1884,41 +1982,62 @@ def vista_calendario():
     for i, (mes, quincenas) in enumerate(PAGOS):
         with cols[i % 3]:
             es_actual = MESES_NUM.get(mes, 0) == mes_actual
-            border_color = "#F97316" if es_actual else "#E5E7EB"
-            st.markdown(
-                f"<div style='border:2px solid {border_color};border-radius:12px;padding:12px;margin-bottom:12px;background:{'#FFF7ED' if es_actual else 'var(--color-background-primary)'}'>",
-                unsafe_allow_html=True
-            )
+            borde = "#F97316" if es_actual else "var(--color-border-tertiary)"
+            fondo = "#FFF7ED" if es_actual else "var(--color-background-primary)"
+            st.markdown(f"<div style='border:2px solid {borde};border-radius:12px;padding:12px;margin-bottom:12px;background:{fondo}'>", unsafe_allow_html=True)
             st.markdown(f"**{'🟠 ' if es_actual else ''}{mes.upper()}**")
-            for fecha, qna, detalle in quincenas:
-                st.markdown(f"📅 **{fecha}** {'· ' + qna if qna else ''}")
-                if detalle:
-                    st.caption(detalle)
+            for fecha, qna, conceptos in quincenas:
+                st.markdown(f"📅 **{fecha}**{'  ·  ' + qna if qna else ''}")
+                for concepto, cats in conceptos:
+                    st.caption(f"{cats}  {concepto}" if cats else concepto)
             st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
-    # Descarga del archivo .ics
     try:
-        with open("calendario_pagos_est_2026.ics", "rb") as f:
-            ics_bytes = f.read()
+        with open("calendario_pagos_est_2026.ics", "rb") as f_ics:
+            ics_bytes = f_ics.read()
         st.download_button(
-            "⬇️ Agregar al calendario (Google/iPhone/Outlook)",
+            "⬇️ Descargar calendario (.ics)",
             data=ics_bytes,
             file_name="calendario_pagos_2026.ics",
-            mime="text/calendar"
+            mime="text/calendar",
+            use_container_width=True,
+            type="primary"
         )
     except:
-        st.info("Sube el archivo .ics al repo para habilitar la descarga al calendario.")
+        st.info("Sube el archivo .ics al repo para habilitar la descarga.")
 
-    st.image("calendario_pagos_est_2026.jpg", caption="Calendario oficial SNTE Sección 47", use_container_width=True)
+    st.markdown("### 📲 ¿Cómo agregar este calendario a tu dispositivo?")
+    with st.expander("📱 iPhone / iPad"):
+        st.markdown("""
+1. Descarga el archivo **.ics** con el botón de arriba
+2. Abre la app **Archivos** en tu iPhone
+3. Toca el archivo descargado
+4. Aparecerá una pantalla para **Agregar todos** los eventos — confirma
+5. Los pagos aparecerán en tu app **Calendario** con recordatorio
+        """)
+    with st.expander("🤖 Android / Google Calendar"):
+        st.markdown("""
+1. Descarga el archivo **.ics**
+2. Ve a [calendar.google.com](https://calendar.google.com) desde tu navegador
+3. En la barra lateral izquierda toca **Otros calendarios** → **+** → **Importar**
+4. Selecciona el archivo **.ics** descargado
+5. Elige en qué calendario importar y confirma
+        """)
+    with st.expander("💻 Outlook (PC o Mac)"):
+        st.markdown("""
+1. Descarga el archivo **.ics**
+2. Abre **Outlook**
+3. Ve a **Archivo** → **Abrir y exportar** → **Importar o exportar**
+4. Selecciona **Importar un archivo iCalendar (.ics)**
+5. Busca el archivo descargado y confirma
+        """)
 
 
 def vista_nomina():
-    st.markdown("## 💰 Mis comprobantes de nómina")
-    st.caption("Gobierno del Estado de Jalisco")
-    st.info("Haz clic en el botón para ir al portal de comprobantes de nómina. Inicia sesión con tus credenciales institucionales.")
-    st.link_button("🔗 Ir a mis comprobantes de nómina", "https://miscomprobantesnomina.jalisco.gob.mx/login", type="primary", use_container_width=True)
-    st.caption("Portal: miscomprobantesnomina.jalisco.gob.mx")
+    import webbrowser
+    st.markdown("<meta http-equiv='refresh' content='0; url=https://miscomprobantesnomina.jalisco.gob.mx/login'>", unsafe_allow_html=True)
+    st.link_button("🔗 Abrir mis comprobantes de nómina", "https://miscomprobantesnomina.jalisco.gob.mx/login", type="primary", use_container_width=True)
 
 
 def vista_directorio():
