@@ -2109,17 +2109,17 @@ def main():
             st.rerun()
 
     vista = st.session_state.get("vista", "inicio")
+    vista = st.session_state.get("vista", "inicio")
     if vista == "directorio":
-        vista_directorio()
         vista_directorio()
     elif vista == "calendario":
         vista_calendario()
     elif vista == "nomina":
         vista_nomina()
+    elif st.session_state["rol"] == "admin":
         vista_admin()
     else:
         vista_empleado()
-
 
 if __name__ == "__main__":
     main()
