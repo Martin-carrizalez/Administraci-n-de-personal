@@ -1846,6 +1846,81 @@ def vista_admin():
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
+def vista_calendario():
+    st.markdown("## 📅 Calendario de Pagos y Prestaciones 2026")
+    st.caption("SNTE Sección 47 · Jalisco")
+
+    PAGOS = [
+        ("Enero",     [("14 Ene", "Q-01", "Estímulo puntualidad y asistencia (2ª parte) · Prima Dominical"),
+                       ("29 Ene", "Q-02", "Compensación Nacional Única 1ª Parte")]),
+        ("Febrero",   [("12 Feb", "Q-03", ""), ("26 Feb", "Q-04", "")]),
+        ("Marzo",     [("12 Mar", "Q-05", ""), ("26 Mar", "Q-06", "1ª Parte Aguinaldo")]),
+        ("Abril",     [("14 Abr", "Q-07", ""), ("29 Abr", "Q-08", "")]),
+        ("Mayo",      [("14 May", "Q-09", "1ª Parte Aguinaldo · Gratificación Día del Maestro · Reconocimiento Docentes · Ayuda Libros"),
+                       ("28 May", "Q-10", "")]),
+        ("Junio",     [("12 Jun", "Q-11", "Estímulo puntualidad y asistencia (1ª parte)"),
+                       ("29 Jun", "Q-12", "Reconocimiento a Directores")]),
+        ("Julio",     [("14 Jul", "Q-13", ""), ("30 Jul", "Q-14", "Gratificación por el trabajo")]),
+        ("Agosto",    [("13 Ago", "Q-15", "Organización Escolar · Ayuda gastos escolares"),
+                       ("28 Ago", "Q-16", "Compensación Nacional Única 2ª Parte · Medida Económica Única")]),
+        ("Septiembre",[("14 Sep", "Q-17", "Estímulo Actividad Docente · Estímulo a Directores · Gratificación Única 1ª Parte"),
+                       ("29 Sep", "Q-18", "Gratificación Fortalecimiento Académico · Bono Extraordinario superación académica 1ª Parte")]),
+        ("Octubre",   [("14 Oct", "Q-19", ""),
+                       ("29 Oct", "Q-20", "Fortalecimiento CC y CT según ajustes salariales")]),
+        ("Noviembre", [("12 Nov", "Q-21", ""),
+                       ("27 Nov", "Q-22", "Bono anual 24 días inicial · Apoyo integración educativa especial")]),
+        ("Diciembre", [("Por definir", "", "Fecha de pago por definir")]),
+    ]
+
+    import pytz
+    from datetime import datetime
+    tz_mx = pytz.timezone("America/Mexico_City")
+    mes_actual = datetime.now(tz_mx).month
+
+    MESES_NUM = {"Enero":1,"Febrero":2,"Marzo":3,"Abril":4,"Mayo":5,"Junio":6,
+                 "Julio":7,"Agosto":8,"Septiembre":9,"Octubre":10,"Noviembre":11,"Diciembre":12}
+
+    cols = st.columns(3)
+    for i, (mes, quincenas) in enumerate(PAGOS):
+        with cols[i % 3]:
+            es_actual = MESES_NUM.get(mes, 0) == mes_actual
+            border_color = "#F97316" if es_actual else "#E5E7EB"
+            st.markdown(
+                f"<div style='border:2px solid {border_color};border-radius:12px;padding:12px;margin-bottom:12px;background:{'#FFF7ED' if es_actual else 'var(--color-background-primary)'}'>",
+                unsafe_allow_html=True
+            )
+            st.markdown(f"**{'🟠 ' if es_actual else ''}{mes.upper()}**")
+            for fecha, qna, detalle in quincenas:
+                st.markdown(f"📅 **{fecha}** {'· ' + qna if qna else ''}")
+                if detalle:
+                    st.caption(detalle)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    st.divider()
+    # Descarga del archivo .ics
+    try:
+        with open("calendario_pagos_est_2026.ics", "rb") as f:
+            ics_bytes = f.read()
+        st.download_button(
+            "⬇️ Agregar al calendario (Google/iPhone/Outlook)",
+            data=ics_bytes,
+            file_name="calendario_pagos_2026.ics",
+            mime="text/calendar"
+        )
+    except:
+        st.info("Sube el archivo .ics al repo para habilitar la descarga al calendario.")
+
+    st.image("calendario_pagos_est_2026.jpg", caption="Calendario oficial SNTE Sección 47", use_container_width=True)
+
+
+def vista_nomina():
+    st.markdown("## 💰 Mis comprobantes de nómina")
+    st.caption("Gobierno del Estado de Jalisco")
+    st.info("Haz clic en el botón para ir al portal de comprobantes de nómina. Inicia sesión con tus credenciales institucionales.")
+    st.link_button("🔗 Ir a mis comprobantes de nómina", "https://miscomprobantesnomina.jalisco.gob.mx/login", type="primary", use_container_width=True)
+    st.caption("Portal: miscomprobantesnomina.jalisco.gob.mx")
+
+
 def vista_directorio():
     import pytz
 
@@ -2016,6 +2091,12 @@ def main():
             if st.button("🔄 Limpiar caché"):
                 st.cache_data.clear()
                 st.success("Caché limpiado.")
+        if st.button("📅 Calendario de pagos"):
+            st.session_state["vista"] = "calendario"
+            st.rerun()
+        if st.button("💰 Mis comprobantes de nómina"):
+            st.session_state["vista"] = "nomina"
+            st.rerun()
         if st.button("📞 Directorio DFC"):
             st.session_state["vista"] = "directorio"
             st.rerun()
@@ -2030,7 +2111,11 @@ def main():
     vista = st.session_state.get("vista", "inicio")
     if vista == "directorio":
         vista_directorio()
-    elif st.session_state["rol"] == "admin":
+        vista_directorio()
+    elif vista == "calendario":
+        vista_calendario()
+    elif vista == "nomina":
+        vista_nomina()
         vista_admin()
     else:
         vista_empleado()
