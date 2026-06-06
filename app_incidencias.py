@@ -30,7 +30,9 @@ SCOPES = [
 
 TIPO_LABELS = {
     "ECO": "Día económico",
-    "PSE": "Pase de salida / entrada",
+    "PSE": "Pase de salida sin retorno",
+    "PSR": "Pase de salida con retorno",
+    "PEN": "Pase de entrada",
     "COM": "Comisión",
     "CHO": "Cambio de horario",
 }
@@ -216,7 +218,7 @@ def horas_pases_mes(rfc: str, incidencias_df: pd.DataFrame) -> float:
     ahora = datetime.now(pytz.utc).astimezone(tz_mx)
     df = incidencias_df[
         (incidencias_df["RFC"].astype(str).str.upper() == rfc.upper()) &
-        (incidencias_df["TIPO"] == "PSE") &
+        (incidencias_df["TIPO"].isin(["PSE","PSR","PEN"])) &
         (incidencias_df["ESTADO"].astype(str).str.contains("AUTORIZADO"))
     ].copy()
     if df.empty:
@@ -476,6 +478,12 @@ def guardar_dia_economico(datos: dict):
             emp_id = match.iloc[0].get("ID", "")
     except Exception:
         pass
+    link_anexo = ""
+    if datos.get("tiene_anexo") and datos.get("archivo_anexo"):
+        try:
+            link_anexo = subir_anexo_drive(datos["archivo_anexo"], datos["folio"])
+        except Exception as e:
+            st.warning(f"No se pudo subir el anexo: {e}")
     fila = [
         nuevo_id,                    # ID
         emp_id,                      # EmpleadoID
@@ -490,8 +498,10 @@ def guardar_dia_economico(datos: dict):
         "",                          # Aprobado Por
         datos["nombre"],              # Registrado Por
         datos["folio"],               # FOLIO
+        link_anexo,                  # LINK_ANEXO
     ]
     ws.append_row(fila, value_input_option="USER_ENTERED")
+    cargar_solicitudes_eco.clear()
 
 def guardar_incidencia(datos: dict):
     client = get_client()
@@ -1603,7 +1613,8 @@ def vista_empleado():
             ff_final = max(fechas_seleccionadas) if fechas_seleccionadas else date.today()
 
         motivo = st.text_area("Motivo (opcional)", max_chars=300)
-        st.caption("El día económico no requiere anexo digital. Trae el formato físico original.")
+        archivo_eco = st.file_uploader("Adjuntar documento de soporte (opcional)", type=["pdf","png","jpg","jpeg"], key="eco_anexo")
+        tiene_anexo_eco = archivo_eco is not None
 
         # Construir motivo con fechas exactas
         if fechas_seleccionadas:
@@ -1615,24 +1626,25 @@ def vista_empleado():
         if dias_hab == 0:
             st.warning("Selecciona al menos un día.")
             return
-        enviar_solicitud(rfc, nombre, tipo, fi_final, ff_final, dias_hab, 0.0, motivo_final, False, incidencias, jefe_inmediato=jefe_pdf)
+        enviar_solicitud(rfc, nombre, tipo, fi_final, ff_final, dias_hab, 0.0, motivo_final, tiene_anexo_eco, incidencias, archivo_eco, jefe_inmediato=jefe_pdf)
 
-    # ── PASE DE SALIDA / ENTRADA ────────────────
-    elif tipo == "PSE":
-        subtipo = st.radio("Subtipo", ["Pase de salida sin retorno", "Pase de entrada", "Pase de salida"])
+    # ── PASES ────────────────────────────────────
+    elif tipo in ["PSE", "PSR", "PEN"]:
+        # El tipo ya define el subtipo
+        subtipo = TIPO_LABELS[tipo]
         fecha   = st.date_input("Fecha del pase", value=date.today())
 
         col1, col2 = st.columns(2)
         hora_salida = hora_entrada = hora_retorno = None
         with col1:
-            if subtipo in ["Pase de salida sin retorno", "Pase de salida"]:
+            if tipo in ["PSE", "PSR"]:
                 hora_salida = st.text_input("Hora de salida (HH:MM)", placeholder="08:37", max_chars=5)
                 hora_salida = hora_salida.strip() if hora_salida else None
         with col2:
-            if subtipo == "Pase de entrada":
+            if tipo == "PEN":
                 hora_entrada = st.text_input("Hora de entrada (HH:MM)", placeholder="08:37", max_chars=5)
                 hora_entrada = hora_entrada.strip() if hora_entrada else None
-            elif subtipo == "Pase de salida":
+            elif tipo == "PSR":
                 hora_retorno = st.text_input("Hora estimada de retorno (HH:MM)", placeholder="10:30", max_chars=5)
                 hora_retorno = hora_retorno.strip() if hora_retorno else None
 
