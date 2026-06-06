@@ -864,21 +864,40 @@ def render_checador():
 
         # Días económicos aprobados
         if not economicos.empty:
-            col_rfc = next((c for c in economicos.columns if "RFC" in c.upper()), None)
-            col_fi  = next((c for c in economicos.columns if "INICIO" in c.upper()), None)
-            col_ff  = next((c for c in economicos.columns if "FIN" in c.upper() and "INICIO" not in c.upper()), None)
-            if col_rfc and col_fi and col_ff:
+            col_rfc    = next((c for c in economicos.columns if "RFC" in c.upper()), None)
+            col_motivo = next((c for c in economicos.columns if "MOTIVO" in c.upper() or "Motivo" in c), None)
+            col_fi     = next((c for c in economicos.columns if "INICIO" in c.upper()), None)
+            col_ff     = next((c for c in economicos.columns if "FIN" in c.upper() and "INICIO" not in c.upper()), None)
+            if col_rfc:
                 for _, r in economicos.iterrows():
                     rfc = str(r.get(col_rfc,"")).strip().upper()
                     if not rfc: continue
-                    try:
-                        d = r[col_fi]
-                        f = r[col_ff]
-                        while d <= f:
-                            if fi <= d.date() <= ff:
-                                resultado.setdefault(rfc, {})[d.date()] = "Día económico"
-                            d += timedelta(days=1)
-                    except: pass
+                    fechas_just = []
+                    # Intentar leer fechas exactas del motivo
+                    motivo = str(r.get(col_motivo, "")) if col_motivo else ""
+                    if "Fechas:" in motivo:
+                        try:
+                            parte = motivo.split("Fechas:")[1].strip()
+                            for f_str in parte.split(","):
+                                f_str = f_str.strip()
+                                for fmt in ["%d/%m/%Y", "%Y-%m-%d"]:
+                                    try:
+                                        fechas_just.append(datetime.strptime(f_str, fmt).date())
+                                        break
+                                    except: pass
+                        except: pass
+                    # Si no hay fechas en motivo, usar rango
+                    if not fechas_just and col_fi and col_ff:
+                        try:
+                            d = r[col_fi]
+                            f = r[col_ff]
+                            while d <= f:
+                                fechas_just.append(d.date())
+                                d += timedelta(days=1)
+                        except: pass
+                    for fecha_eco in fechas_just:
+                        if fi <= fecha_eco <= ff:
+                            resultado.setdefault(rfc, {})[fecha_eco] = "Día económico"
 
         # Incapacidades
         if not incapacidades.empty:
@@ -1531,23 +1550,72 @@ def vista_empleado():
         if dias_disponibles <= 0:
             st.warning("No tienes días económicos disponibles.")
             return
-        col1, col2 = st.columns(2)
-        with col1:
-            fi = st.date_input("Fecha inicio", value=date.today())
-        with col2:
-            ff = st.date_input("Fecha fin",    value=date.today())
-        if ff < fi:
-            st.error("La fecha fin no puede ser anterior a la fecha inicio.")
-            return
+        # Modo de selección: rango o días sueltos
+        modo = st.radio("Selección de fechas", ["Rango continuo", "Días sueltos"], horizontal=True)
         festivos = cargar_festivos()
-        dias_hab = dias_habiles_entre(fi, ff, festivos)
-        st.caption(f"Días hábiles solicitados: **{dias_hab}**")
-        if dias_hab > dias_disponibles:
-            st.error(f"Excedes tus días disponibles ({dias_disponibles}).")
-            return
+
+        if modo == "Rango continuo":
+            col1, col2 = st.columns(2)
+            with col1:
+                fi = st.date_input("Fecha inicio", value=date.today())
+            with col2:
+                ff = st.date_input("Fecha fin",    value=date.today())
+            if ff < fi:
+                st.error("La fecha fin no puede ser anterior a la fecha inicio.")
+                return
+            dias_hab = dias_habiles_entre(fi, ff, festivos)
+            st.caption(f"Días hábiles solicitados: **{dias_hab}**")
+            if dias_hab > dias_disponibles:
+                st.error(f"Excedes tus días disponibles ({dias_disponibles}).")
+                return
+            fechas_seleccionadas = []
+            d = fi
+            while d <= ff:
+                if d.weekday() < 5 and d not in festivos:
+                    fechas_seleccionadas.append(d)
+                d += timedelta(days=1)
+            fi_final, ff_final = fi, ff
+        else:
+            st.caption("Selecciona cada día económico que necesitas tomar.")
+            # Mostrar checkboxes para los próximos 60 días hábiles
+            from datetime import timedelta as _td
+            dias_opciones = []
+            d = date.today()
+            while len(dias_opciones) < 60:
+                if d.weekday() < 5 and d not in festivos:
+                    dias_opciones.append(d)
+                d += _td(days=1)
+            NOMBRES_DIA = ["Lun","Mar","Mié","Jue","Vie"]
+            MESES = ["","Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"]
+            fechas_seleccionadas = []
+            cols_sel = st.columns(5)
+            for idx, dia in enumerate(dias_opciones):
+                label = f"{NOMBRES_DIA[dia.weekday()]} {dia.day}/{MESES[dia.month]}"
+                if cols_sel[idx % 5].checkbox(label, key=f"eco_dia_{dia}"):
+                    fechas_seleccionadas.append(dia)
+            dias_hab = len(fechas_seleccionadas)
+            if dias_hab > 0:
+                st.caption(f"Días seleccionados: **{dias_hab}**")
+            if dias_hab > dias_disponibles:
+                st.error(f"Excedes tus días disponibles ({dias_disponibles}).")
+                return
+            fi_final = min(fechas_seleccionadas) if fechas_seleccionadas else date.today()
+            ff_final = max(fechas_seleccionadas) if fechas_seleccionadas else date.today()
+
         motivo = st.text_area("Motivo (opcional)", max_chars=300)
         st.caption("El día económico no requiere anexo digital. Trae el formato físico original.")
-        enviar_solicitud(rfc, nombre, tipo, fi, ff, dias_hab, 0.0, motivo, False, incidencias, jefe_inmediato=jefe_pdf)
+
+        # Construir motivo con fechas exactas
+        if fechas_seleccionadas:
+            fechas_str = ", ".join([f.strftime("%d/%m/%Y") for f in sorted(fechas_seleccionadas)])
+            motivo_final = f"{motivo} | Fechas: {fechas_str}".strip(" |")
+        else:
+            motivo_final = motivo
+
+        if dias_hab == 0:
+            st.warning("Selecciona al menos un día.")
+            return
+        enviar_solicitud(rfc, nombre, tipo, fi_final, ff_final, dias_hab, 0.0, motivo_final, False, incidencias, jefe_inmediato=jefe_pdf)
 
     # ── PASE DE SALIDA / ENTRADA ────────────────
     elif tipo == "PSE":
@@ -1595,6 +1663,24 @@ def vista_empleado():
             except:
                 horas_pase = 0.0
                 st.warning("No se pudo calcular automáticamente.")
+        elif hora_entrada:
+            # Pase de entrada: horas ausentes = desde hora programada hasta hora real de llegada
+            try:
+                horarios_df_pse = cargar_horarios()
+                emp_hor_pse = horarios_df_pse[horarios_df_pse["RFC"].astype(str).str.upper().str.strip() == rfc.upper().strip()]
+                nd_pse = ["LUN","MAR","MIE","JUE","VIE","SAB","DOM"][fecha.weekday()]
+                entrada_prog = str(emp_hor_pse.iloc[0].get(f"ENTRADA_{nd_pse}","")).strip() if not emp_hor_pse.empty else ""
+                if entrada_prog:
+                    prog_dt  = datetime.combine(fecha, datetime.strptime(entrada_prog, "%H:%M").time())
+                    real_dt  = datetime.combine(fecha, datetime.strptime(hora_entrada.strip(), "%H:%M").time())
+                    horas_pase = round(max((real_dt - prog_dt).total_seconds() / 3600, 0), 2)
+                    st.caption(f"Horas de ausencia (desde {entrada_prog} hasta {hora_entrada}): **{horas_pase}h** · Acumulado mes: **{horas_pases + horas_pase}h**")
+                else:
+                    horas_pase = 0.0
+            except:
+                horas_pase = 0.0
+                st.warning("No se pudo calcular automáticamente.")
+
 
         motivo = st.text_area("Motivo", max_chars=300)
         archivo_anexo = st.file_uploader("Adjuntar justificante (opcional)", type=["pdf","png","jpg","jpeg"])
