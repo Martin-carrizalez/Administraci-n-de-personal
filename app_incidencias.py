@@ -1958,23 +1958,42 @@ def vista_admin():
             match_eco = sol_eco[sol_eco[col_f].astype(str).str.upper() == folio_buscar] if col_f else pd.DataFrame()
             if not match_inc.empty:
                 row = match_inc.iloc[0]
+                # Detectar subtipo real desde el motivo para registros viejos PSE
+                motivo_str = str(row["MOTIVO"])
+                tipo_real  = row["TIPO"]
+                if tipo_real == "PSE":
+                    if "Pase de entrada" in motivo_str:
+                        tipo_real = "PEN"
+                    elif "sin retorno" in motivo_str.lower() or "Salida" in motivo_str:
+                        tipo_real = "PSE"
+                    elif "Retorno" in motivo_str:
+                        tipo_real = "PSR"
+                # Buscar jefe inmediato del empleado en tab Usuarios
+                jefe_pdf_regen = ""
+                try:
+                    usuarios_df = cargar_usuarios()
+                    match_usr = usuarios_df[usuarios_df["RFC"].astype(str).str.upper().str.strip() == str(row["RFC"]).upper().strip()]
+                    if not match_usr.empty:
+                        jefe_col = match_usr.iloc[0].get("JEFE_INMEDIATO", "")
+                        jefe_pdf_regen = DICT_JEFES.get(str(jefe_col).strip(), str(jefe_col).strip())
+                except: pass
                 datos_pdf = {
                     "folio":          row["FOLIO"],
                     "rfc":            row["RFC"],
                     "nombre":         row["NOMBRE"],
-                    "tipo":           row["TIPO"],
-                    "tipo_label":     TIPO_LABELS.get(row["TIPO"], row["TIPO"]),
-                    "subtipo_label":  TIPO_LABELS.get(row["TIPO"], row["TIPO"]),
+                    "tipo":           tipo_real,
+                    "tipo_label":     TIPO_LABELS.get(tipo_real, tipo_real),
+                    "subtipo_label":  TIPO_LABELS.get(tipo_real, tipo_real),
                     "fecha_solicitud":str(row["FECHA_SOLICITUD"]),
                     "fecha_inicio":   str(row["FECHA_INICIO"]),
                     "fecha_fin":      str(row["FECHA_FIN"]),
                     "dias":           row["DIAS"],
                     "horas_pase":     row.get("HORAS_PASE", 0),
-                    "motivo":         str(row["MOTIVO"]),
+                    "motivo":         motivo_str,
                     "tiene_anexo":    row.get("TIENE_ANEXO", "NO") == "SÍ",
                     "link_anexo":     row.get("LINK_ANEXO", ""),
                     "estado":         str(row["ESTADO"]),
-                    "jefe_inmediato": str(row.get("AUTORIZADO_POR", "")),
+                    "jefe_inmediato": jefe_pdf_regen,
                 }
                 st.success(f"Folio encontrado: {folio_buscar}")
                 pdf_bytes = generar_comprobante_pdf(datos_pdf)
