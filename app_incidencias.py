@@ -1945,6 +1945,68 @@ def vista_admin():
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
         st.download_button("⬇️ Exportar CSV", data=df_hist.to_csv(index=False).encode("utf-8"),
                            file_name="incidencias.csv", mime="text/csv")
+        st.divider()
+        st.markdown("#### 🔍 Regenerar PDF por folio")
+        folio_buscar = st.text_input("Ingresa el folio", placeholder="ECO-2026-0001 / PSE-2026-0001", key="folio_regen")
+        if folio_buscar:
+            folio_buscar = folio_buscar.strip().upper()
+            # Buscar en Incidencias
+            match_inc = incidencias[incidencias["FOLIO"].astype(str).str.upper() == folio_buscar]
+            # Buscar en Solicitudes ECO
+            sol_eco = cargar_solicitudes_eco()
+            col_f = next((c for c in sol_eco.columns if "FOLIO" in c.upper()), None)
+            match_eco = sol_eco[sol_eco[col_f].astype(str).str.upper() == folio_buscar] if col_f else pd.DataFrame()
+            if not match_inc.empty:
+                row = match_inc.iloc[0]
+                datos_pdf = {
+                    "folio":          row["FOLIO"],
+                    "rfc":            row["RFC"],
+                    "nombre":         row["NOMBRE"],
+                    "tipo":           row["TIPO"],
+                    "tipo_label":     TIPO_LABELS.get(row["TIPO"], row["TIPO"]),
+                    "subtipo_label":  TIPO_LABELS.get(row["TIPO"], row["TIPO"]),
+                    "fecha_solicitud":str(row["FECHA_SOLICITUD"]),
+                    "fecha_inicio":   str(row["FECHA_INICIO"]),
+                    "fecha_fin":      str(row["FECHA_FIN"]),
+                    "dias":           row["DIAS"],
+                    "horas_pase":     row.get("HORAS_PASE", 0),
+                    "motivo":         str(row["MOTIVO"]),
+                    "tiene_anexo":    row.get("TIENE_ANEXO", "NO") == "SÍ",
+                    "link_anexo":     row.get("LINK_ANEXO", ""),
+                    "estado":         str(row["ESTADO"]),
+                    "jefe_inmediato": str(row.get("AUTORIZADO_POR", "")),
+                }
+                st.success(f"Folio encontrado: {folio_buscar}")
+                pdf_bytes = generar_comprobante_pdf(datos_pdf)
+                st.download_button("⬇️ Descargar PDF", data=pdf_bytes,
+                    file_name=f"Comprobante_{folio_buscar}.pdf", mime="application/pdf", type="primary")
+            elif not match_eco.empty:
+                row = match_eco.iloc[0]
+                datos_pdf = {
+                    "folio":          str(row.get(col_f, folio_buscar)),
+                    "rfc":            str(row.get("RFC", "")),
+                    "nombre":         str(row.get("Nombre Completo", "")),
+                    "tipo":           "ECO",
+                    "tipo_label":     "Día económico",
+                    "subtipo_label":  "Día económico",
+                    "fecha_solicitud":str(row.get("Fecha Registro", "")),
+                    "fecha_inicio":   str(row.get("Fecha Inicio", "")),
+                    "fecha_fin":      str(row.get("Fecha Fin", "")),
+                    "dias":           row.get("Dias Solicitados", 0),
+                    "horas_pase":     0,
+                    "motivo":         str(row.get("Motivo", "")),
+                    "tiene_anexo":    False,
+                    "link_anexo":     str(row.get("LINK_ANEXO", "")),
+                    "estado":         "AUTORIZADO" if str(row.get("Aprobado Por","")).strip() else "PENDIENTE",
+                    "jefe_inmediato": str(row.get("Aprobado Por", "")),
+                }
+                st.success(f"Folio encontrado: {folio_buscar}")
+                pdf_bytes = generar_comprobante_pdf(datos_pdf)
+                st.download_button("⬇️ Descargar PDF", data=pdf_bytes,
+                    file_name=f"Comprobante_{folio_buscar}.pdf", mime="application/pdf", type="primary")
+            else:
+                st.error(f"Folio {folio_buscar} no encontrado.")
+
 
     with tab4:
         render_checador()
