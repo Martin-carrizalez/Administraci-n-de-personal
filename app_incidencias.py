@@ -1512,11 +1512,14 @@ def vista_empleado():
         sol_hist["ESTADO"]             = sol_hist["AUTORIZADO_POR"].apply(
             lambda x: "🔴 RECHAZADO" if str(x).strip().upper().startswith("RECHAZADO") else ("✅ AUTORIZADO" if str(x).strip() != "" else "🟡 PENDIENTE")
         )
-
+        # Observaciones: texto después del — en Aprobado Por para rechazos
+        sol_hist["OBSERVACIONES"] = sol_hist["AUTORIZADO_POR"].apply(
+            lambda x: str(x).split("—",1)[1].strip() if str(x).upper().startswith("RECHAZADO") and "—" in str(x) else ""
+        )
     if not mis_inc.empty:
         mis_inc["ESTADO"] = mis_inc["ESTADO"].apply(mapear_emojis_estado)
 
-        cols_mostrar = ["FOLIO", "TIPO", "FECHA_INICIO", "FECHA_FIN", "DIAS", "HORAS_PASE", "ESTADO", "FECHA_AUTORIZACION", "OBSERVACIONES"]
+    cols_mostrar = ["FOLIO", "TIPO", "FECHA_INICIO", "FECHA_FIN", "DIAS", "HORAS_PASE", "ESTADO", "FECHA_AUTORIZACION", "OBSERVACIONES"]
     frames = []
     if not sol_hist.empty:
         frames.append(sol_hist[[c for c in cols_mostrar if c in sol_hist.columns]])
