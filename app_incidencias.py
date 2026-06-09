@@ -1977,7 +1977,6 @@ def vista_admin():
         if filtro_tipo   != "TODOS": df_hist = df_hist[df_hist["TIPO"]   == filtro_tipo]
         if filtro_estado != "TODOS": df_hist = df_hist[df_hist["ESTADO"] == filtro_estado]
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
-        st.dataframe(df_hist, use_container_width=True, hide_index=True)
 
         # ── Export Excel padrón mensual ──────────────
         import pytz as _pytz
@@ -2136,12 +2135,12 @@ def vista_admin():
         # ── Alerta días económicos por agotarse ──────
         st.markdown("#### ⚠️ Empleados con 5 días económicos o menos")
         try:
-            usuarios_df = cargar_usuarios()
+            empleados_df = cargar_horarios()
             sol_eco     = cargar_solicitudes_eco()
             alertas = []
-            for _, emp in usuarios_df.iterrows():
+            for _, emp in empleados_df.iterrows():
                 rfc_emp  = str(emp.get("RFC","")).upper().strip()
-                nombre_emp = str(emp.get("NOMBRE",""))
+                nombre_emp = str(emp.get("NOMBRE", "")).strip()
                 if not rfc_emp: continue
                 # Días usados del año actual
                 import pytz as _ptz
@@ -2363,7 +2362,7 @@ def vista_nomina():
 
     with col2:
         with st.container(border=True):
-            st.markdown("### Personal Federalizado")
+            st.markdown("### 🇲🇽 Personal Federalizado")
             st.markdown("""
 **Paso 1** — Haz clic en el botón de abajo  
 **Paso 2** — Se abrirá el portal de la SEP Federal en nueva pestaña  
