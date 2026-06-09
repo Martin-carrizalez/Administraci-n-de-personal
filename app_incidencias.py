@@ -1466,67 +1466,67 @@ def vista_empleado():
             st.caption("No se encontró tu horario en el sistema.")
 
     # ── Mis solicitudes ──────────────────────────
-    with st.expander("📋 Mis solicitudes registradas (último mes)", expanded=False):
-        import pytz
-        tz_mx  = pytz.timezone("America/Mexico_City")
-        ahora  = datetime.now(pytz.utc).astimezone(tz_mx)
-        # Solo incidencias del mes actual
-        mis_inc_all = incidencias[incidencias["RFC"].astype(str).str.upper() == rfc].copy()
-        if not mis_inc_all.empty:
-            mis_inc_all["FECHA_DT"] = pd.to_datetime(mis_inc_all["FECHA_INICIO"], errors="coerce")
-            mis_inc = mis_inc_all[(mis_inc_all["FECHA_DT"].dt.year == ahora.year) & (mis_inc_all["FECHA_DT"].dt.month == ahora.month)].copy()
-        else:
-            mis_inc = mis_inc_all
-        # Solo días económicos del mes actual
-        sol_hist_all = solicitudes[solicitudes["RFC"].astype(str).str.upper().str.strip() == rfc.upper().strip()].copy() if "RFC" in solicitudes.columns else pd.DataFrame()
-        if not sol_hist_all.empty:
-            col_fi_eco = next((c for c in sol_hist_all.columns if "Inicio" in c or "INICIO" in c), None)
-            if col_fi_eco:
-                sol_hist_all["FECHA_DT"] = pd.to_datetime(sol_hist_all[col_fi_eco], errors="coerce")
-                sol_hist = sol_hist_all[
-                    (sol_hist_all["FECHA_DT"].dt.year == ahora.year) &
-                    (sol_hist_all["FECHA_DT"].dt.month == ahora.month)
-                ].copy()
-                if sol_hist.empty:
-                    sol_hist = sol_hist_all  # si falla el filtro mostrar todo
-            else:
-                sol_hist = sol_hist_all
+    st.markdown("#### 📋 Mis solicitudes este mes")
+    import pytz
+    tz_mx  = pytz.timezone("America/Mexico_City")
+    ahora  = datetime.now(pytz.utc).astimezone(tz_mx)
+    # Solo incidencias del mes actual
+    mis_inc_all = incidencias[incidencias["RFC"].astype(str).str.upper() == rfc].copy()
+    if not mis_inc_all.empty:
+        mis_inc_all["FECHA_DT"] = pd.to_datetime(mis_inc_all["FECHA_INICIO"], errors="coerce")
+        mis_inc = mis_inc_all[(mis_inc_all["FECHA_DT"].dt.year == ahora.year) & (mis_inc_all["FECHA_DT"].dt.month == ahora.month)].copy()
+    else:
+        mis_inc = mis_inc_all
+    # Solo días económicos del mes actual
+    sol_hist_all = solicitudes[solicitudes["RFC"].astype(str).str.upper().str.strip() == rfc.upper().strip()].copy() if "RFC" in solicitudes.columns else pd.DataFrame()
+    if not sol_hist_all.empty:
+        col_fi_eco = next((c for c in sol_hist_all.columns if "Inicio" in c or "INICIO" in c), None)
+        if col_fi_eco:
+            sol_hist_all["FECHA_DT"] = pd.to_datetime(sol_hist_all[col_fi_eco], errors="coerce")
+            sol_hist = sol_hist_all[
+                (sol_hist_all["FECHA_DT"].dt.year == ahora.year) &
+                (sol_hist_all["FECHA_DT"].dt.month == ahora.month)
+            ].copy()
+            if sol_hist.empty:
+                sol_hist = sol_hist_all  # si falla el filtro mostrar todo
         else:
             sol_hist = sol_hist_all
+    else:
+        sol_hist = sol_hist_all
 
-        if not sol_hist.empty:
-            sol_hist = sol_hist.rename(columns={
-                "Tipo Permiso":     "TIPO",
-                "Fecha Inicio":     "FECHA_INICIO",
-                "Fecha Fin":        "FECHA_FIN",
-                "Dias Solicitados": "DIAS",
-                "Aprobado Por":     "AUTORIZADO_POR",
-                "Fecha Registro":   "FECHA_SOLICITUD",
-            })
-            col_folio_sol = next((c for c in sol_hist.columns if "FOLIO" in c.upper()), None)
-            if col_folio_sol and col_folio_sol != "FOLIO":
-                sol_hist["FOLIO"] = sol_hist[col_folio_sol]
-            elif "FOLIO" not in sol_hist.columns:
-                sol_hist["FOLIO"] = "HISTÓRICO"
-            sol_hist["HORAS_PASE"]         = ""
-            sol_hist["ESTADO"]             = sol_hist["AUTORIZADO_POR"].apply(
-                lambda x: "🔴 RECHAZADO" if str(x).strip().upper().startswith("RECHAZADO") else ("✅ AUTORIZADO" if str(x).strip() != "" else "🟡 PENDIENTE")
-            )
+    if not sol_hist.empty:
+        sol_hist = sol_hist.rename(columns={
+            "Tipo Permiso":     "TIPO",
+            "Fecha Inicio":     "FECHA_INICIO",
+            "Fecha Fin":        "FECHA_FIN",
+            "Dias Solicitados": "DIAS",
+            "Aprobado Por":     "AUTORIZADO_POR",
+            "Fecha Registro":   "FECHA_SOLICITUD",
+        })
+        col_folio_sol = next((c for c in sol_hist.columns if "FOLIO" in c.upper()), None)
+        if col_folio_sol and col_folio_sol != "FOLIO":
+            sol_hist["FOLIO"] = sol_hist[col_folio_sol]
+        elif "FOLIO" not in sol_hist.columns:
+            sol_hist["FOLIO"] = "HISTÓRICO"
+        sol_hist["HORAS_PASE"]         = ""
+        sol_hist["ESTADO"]             = sol_hist["AUTORIZADO_POR"].apply(
+            lambda x: "🔴 RECHAZADO" if str(x).strip().upper().startswith("RECHAZADO") else ("✅ AUTORIZADO" if str(x).strip() != "" else "🟡 PENDIENTE")
+        )
 
-        if not mis_inc.empty:
-            mis_inc["ESTADO"] = mis_inc["ESTADO"].apply(mapear_emojis_estado)
+    if not mis_inc.empty:
+        mis_inc["ESTADO"] = mis_inc["ESTADO"].apply(mapear_emojis_estado)
 
-        cols_mostrar = ["FOLIO", "TIPO", "FECHA_INICIO", "FECHA_FIN", "DIAS", "HORAS_PASE", "ESTADO", "FECHA_AUTORIZACION"]
-        frames = []
-        if not sol_hist.empty:
-            frames.append(sol_hist[[c for c in cols_mostrar if c in sol_hist.columns]])
-        if not mis_inc.empty:
-            frames.append(mis_inc[[c for c in cols_mostrar if c in mis_inc.columns]])
+    cols_mostrar = ["FOLIO", "TIPO", "FECHA_INICIO", "FECHA_FIN", "DIAS", "HORAS_PASE", "ESTADO", "FECHA_AUTORIZACION"]
+    frames = []
+    if not sol_hist.empty:
+        frames.append(sol_hist[[c for c in cols_mostrar if c in sol_hist.columns]])
+    if not mis_inc.empty:
+        frames.append(mis_inc[[c for c in cols_mostrar if c in mis_inc.columns]])
 
-        if not frames:
-            st.info("Aún no tienes solicitudes registradas.")
-        else:
-            st.dataframe(pd.concat(frames, ignore_index=True), use_container_width=True, hide_index=True)
+    if not frames:
+        st.info("Aún no tienes solicitudes registradas.")
+    else:
+        st.dataframe(pd.concat(frames, ignore_index=True), use_container_width=True, hide_index=True)
 
     st.divider()
 
@@ -1773,6 +1773,38 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
         if st.session_state.get(f"registrado_{key_btn}"):
             st.warning("Esta solicitud ya fue registrada.")
             return
+
+        # Validar duplicado: mismo tipo y misma fecha
+        if not incidencias_df.empty:
+            dup = incidencias_df[
+                (incidencias_df["RFC"].astype(str).str.upper() == rfc.upper()) &
+                (incidencias_df["TIPO"].astype(str) == tipo) &
+                (incidencias_df["FECHA_INICIO"].astype(str) == str(fi))
+            ]
+            if not dup.empty:
+                folio_dup = dup.iloc[0]["FOLIO"]
+                tipo_label_dup = TIPO_LABELS.get(tipo, tipo)
+                st.error(f"⚠️ Ya tienes una solicitud **{folio_dup}** de **{tipo_label_dup}** registrada para el **{fi.strftime('%d/%m/%Y')}**. No puedes registrar dos solicitudes del mismo tipo en la misma fecha.")
+                return
+        # Validar duplicado en ECO
+        if tipo == "ECO":
+            try:
+                sol_eco = cargar_solicitudes_eco()
+                if not sol_eco.empty:
+                    col_rfc_eco = next((c for c in sol_eco.columns if c.upper() == "RFC"), None)
+                    col_fi_eco  = next((c for c in sol_eco.columns if "INICIO" in c.upper()), None)
+                    if col_rfc_eco and col_fi_eco:
+                        sol_eco["_FDT"] = pd.to_datetime(sol_eco[col_fi_eco], errors="coerce")
+                        dup_eco = sol_eco[
+                            (sol_eco[col_rfc_eco].astype(str).str.upper() == rfc.upper()) &
+                            (sol_eco["_FDT"].dt.date == fi)
+                        ]
+                        if not dup_eco.empty:
+                            col_f = next((c for c in sol_eco.columns if "FOLIO" in c.upper()), None)
+                            folio_dup = str(dup_eco.iloc[0].get(col_f, "ECO")) if col_f else "ECO"
+                            st.error(f"⚠️ Ya tienes una solicitud **{folio_dup}** de **Día económico** registrada para el **{fi.strftime('%d/%m/%Y')}**. No puedes registrar dos días económicos para la misma fecha.")
+                            return
+            except: pass
         st.session_state[f"registrado_{key_btn}"] = True
         folio     = generar_folio(tipo, incidencias_df)
         import pytz
@@ -1945,8 +1977,76 @@ def vista_admin():
         if filtro_tipo   != "TODOS": df_hist = df_hist[df_hist["TIPO"]   == filtro_tipo]
         if filtro_estado != "TODOS": df_hist = df_hist[df_hist["ESTADO"] == filtro_estado]
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
-        st.download_button("⬇️ Exportar CSV", data=df_hist.to_csv(index=False).encode("utf-8"),
-                           file_name="incidencias.csv", mime="text/csv")
+        st.dataframe(df_hist, use_container_width=True, hide_index=True)
+
+        # ── Export Excel padrón mensual ──────────────
+        import pytz as _pytz
+        _tz = _pytz.timezone("America/Mexico_City")
+        _ahora = datetime.now(_pytz.utc).astimezone(_tz)
+        mes_sel = st.selectbox("📅 Mes para exportar padrón", 
+            options=list(range(1,13)),
+            format_func=lambda m: ["","Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][m],
+            index=_ahora.month-1)
+
+        if st.button("📊 Generar padrón Excel del mes", type="primary"):
+            import io as _io
+            from openpyxl import Workbook as _WB
+            from openpyxl.styles import Font as _Font, PatternFill as _Fill, Alignment as _Align
+            sol_eco = cargar_solicitudes_eco()
+            # Filtrar incidencias del mes
+            df_mes = incidencias.copy()
+            df_mes["_FDT"] = pd.to_datetime(df_mes["FECHA_INICIO"], errors="coerce")
+            df_mes = df_mes[(df_mes["_FDT"].dt.year == _ahora.year) & (df_mes["_FDT"].dt.month == mes_sel)]
+            # Filtrar ECO del mes
+            df_eco = sol_eco.copy() if not sol_eco.empty else pd.DataFrame()
+            if not df_eco.empty:
+                col_fi = next((c for c in df_eco.columns if "Inicio" in c or "INICIO" in c), None)
+                if col_fi:
+                    df_eco["_FDT"] = pd.to_datetime(df_eco[col_fi], errors="coerce")
+                    df_eco = df_eco[(df_eco["_FDT"].dt.year == _ahora.year) & (df_eco["_FDT"].dt.month == mes_sel)]
+                    df_eco = df_eco.rename(columns={
+                        "Tipo Permiso":"TIPO","Fecha Inicio":"FECHA_INICIO","Fecha Fin":"FECHA_FIN",
+                        "Dias Solicitados":"DIAS","Aprobado Por":"AUTORIZADO_POR",
+                        "Nombre Completo":"NOMBRE","Fecha Registro":"FECHA_SOLICITUD"
+                    })
+                    col_f = next((c for c in df_eco.columns if "FOLIO" in c.upper()), None)
+                    if col_f: df_eco["FOLIO"] = df_eco[col_f]
+            # Unir
+            cols_exp = ["FOLIO","NOMBRE","RFC","TIPO","FECHA_INICIO","FECHA_FIN","DIAS","HORAS_PASE","MOTIVO","ESTADO","AUTORIZADO_POR","FECHA_AUTORIZACION"]
+            frames_exp = []
+            if not df_mes.empty: frames_exp.append(df_mes[[c for c in cols_exp if c in df_mes.columns]])
+            if not df_eco.empty: frames_exp.append(df_eco[[c for c in cols_exp if c in df_eco.columns]])
+            if frames_exp:
+                df_export = pd.concat(frames_exp, ignore_index=True)
+                df_export["TIPO"] = df_export["TIPO"].apply(lambda x: "ECO" if str(x).lower() in ["economico","económico"] else x)
+                df_export["TIPO"] = df_export["TIPO"].map(TIPO_LABELS).fillna(df_export["TIPO"])
+                df_export = df_export.sort_values("NOMBRE")
+                wb = _WB()
+                ws = wb.active
+                ws.title = "Padrón Solicitudes"
+                mes_nombre = ["","Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][mes_sel]
+                ws.merge_cells("A1:L1")
+                ws["A1"] = f"PADRÓN DE SOLICITUDES — {mes_nombre.upper()} {_ahora.year} · DFC · SEJ"
+                ws["A1"].font = _Font(bold=True, size=12, color="002F6C")
+                ws["A1"].alignment = _Align(horizontal="center")
+                hdrs = ["Folio","Nombre","RFC","Tipo","Fecha Inicio","Fecha Fin","Días","Horas Pase","Motivo","Estado","Autorizado Por","Fecha Autorización"]
+                ws.append(hdrs)
+                for cell in ws[2]: cell.font = _Font(bold=True, color="FFFFFF"); cell.fill = _Fill("solid", fgColor="002F6C")
+                for _, row in df_export.iterrows():
+                    ws.append([str(row.get(c,"")) for c in ["FOLIO","NOMBRE","RFC","TIPO","FECHA_INICIO","FECHA_FIN","DIAS","HORAS_PASE","MOTIVO","ESTADO","AUTORIZADO_POR","FECHA_AUTORIZACION"]])
+                ws.column_dimensions["A"].width = 18
+                ws.column_dimensions["B"].width = 35
+                ws.column_dimensions["I"].width = 40
+                buf_xl = _io.BytesIO()
+                wb.save(buf_xl)
+                st.download_button(f"⬇️ Descargar padrón {mes_nombre} {_ahora.year}",
+                    data=buf_xl.getvalue(),
+                    file_name=f"Padron_Solicitudes_{mes_nombre}_{_ahora.year}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary")
+            else:
+                st.info(f"No hay solicitudes registradas para ese mes.")
+
         st.divider()
         st.markdown("#### 🔍 Regenerar PDF por folio")
         folio_buscar = st.text_input("Ingresa el folio", placeholder="ECO-2026-0001 / PSE-2026-0001", key="folio_regen")
@@ -2033,6 +2133,45 @@ def vista_admin():
         render_checador()
 
     with tab3:
+        # ── Alerta días económicos por agotarse ──────
+        st.markdown("#### ⚠️ Empleados con 5 días económicos o menos")
+        try:
+            usuarios_df = cargar_usuarios()
+            sol_eco     = cargar_solicitudes_eco()
+            alertas = []
+            for _, emp in usuarios_df.iterrows():
+                rfc_emp  = str(emp.get("RFC","")).upper().strip()
+                nombre_emp = str(emp.get("NOMBRE",""))
+                if not rfc_emp: continue
+                # Días usados del año actual
+                import pytz as _ptz
+                _tz = _ptz.timezone("America/Mexico_City")
+                _anio = datetime.now(_ptz.utc).astimezone(_tz).year
+                usados = 0
+                if not sol_eco.empty:
+                    col_rfc_e = next((c for c in sol_eco.columns if c.upper()=="RFC"), None)
+                    col_fi_e  = next((c for c in sol_eco.columns if "INICIO" in c.upper()), None)
+                    col_apr_e = next((c for c in sol_eco.columns if "APROBADO" in c.upper()), None)
+                    col_dias_e= next((c for c in sol_eco.columns if "DIAS" in c.upper() or "SOLICIT" in c.upper()), None)
+                    if col_rfc_e and col_fi_e and col_apr_e and col_dias_e:
+                        sub = sol_eco[sol_eco[col_rfc_e].astype(str).str.upper().str.strip() == rfc_emp]
+                        sub = sub[~sub[col_apr_e].astype(str).str.strip().str.upper().str.startswith("RECHAZADO")]
+                        sub["_FDT"] = pd.to_datetime(sub[col_fi_e], errors="coerce")
+                        sub = sub[sub["_FDT"].dt.year == _anio]
+                        for _, r in sub.iterrows():
+                            try: usados += int(r[col_dias_e])
+                            except: pass
+                disponibles = max(9 - usados, 0)
+                if disponibles <= 5:
+                    alertas.append({"Empleado": nombre_emp, "Usados": usados, "Disponibles": disponibles})
+            if alertas:
+                df_alertas = pd.DataFrame(alertas).sort_values("Disponibles")
+                st.dataframe(df_alertas, use_container_width=True, hide_index=True)
+            else:
+                st.success("Ningún empleado tiene 5 días o menos disponibles.")
+        except Exception as e:
+            st.warning(f"No se pudo calcular: {e}")
+        st.divider()
         st.markdown("Reporte consolidado para la directora.")
         anio_rep = st.number_input("Año",  value=datetime.now().year, step=1)
         mes_rep  = st.selectbox("Mes", range(1, 13), index=datetime.now().month - 1,
@@ -2206,16 +2345,33 @@ def vista_calendario():
 
 def vista_nomina():
     st.markdown("## 💰 Mis comprobantes de nómina")
-    with st.container(border=True):
-        st.markdown("### 📋 ¿Cómo consultar tus recibos de nómina?")
-        st.markdown("""
+    st.caption("Selecciona el portal según tu tipo de plaza.")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        with st.container(border=True):
+            st.markdown("### 🏛️ Personal Estatal")
+            st.markdown("""
 **Paso 1** — Haz clic en el botón de abajo  
-**Paso 2** — Se abrirá el portal del Gobierno de Jalisco en una nueva pestaña  
-**Paso 3** — Inicia sesión con tu **RFC** y tu **contraseña institucional**  
-**Paso 4** — Selecciona el período que quieres consultar o descargar
-        """)
-        st.info("⚠️ El portal requiere que inicies sesión directamente en tu navegador. Si no carga, cópialo y pégalo en tu navegador: **miscomprobantesnomina.jalisco.gob.mx/login**")
-        st.link_button("🔗 Ir al portal de comprobantes de nómina", "https://miscomprobantesnomina.jalisco.gob.mx/login", type="primary", use_container_width=True)
+**Paso 2** — Se abrirá el portal del Gobierno de Jalisco en nueva pestaña  
+**Paso 3** — Inicia sesión con tu **RFC** y contraseña institucional  
+**Paso 4** — Selecciona el período a consultar
+            """)
+            st.info("⚠️ Si no carga, cópialo en tu navegador: **miscomprobantesnomina.jalisco.gob.mx/login**")
+            st.link_button("🔗 Portal Estatal", "https://miscomprobantesnomina.jalisco.gob.mx/login", type="primary", use_container_width=True)
+
+    with col2:
+        with st.container(border=True):
+            st.markdown("### 🇲🇽 Personal Federalizado")
+            st.markdown("""
+**Paso 1** — Haz clic en el botón de abajo  
+**Paso 2** — Se abrirá el portal de la SEP Federal en nueva pestaña  
+**Paso 3** — Inicia sesión con tus credenciales federales  
+**Paso 4** — Selecciona el período a consultar
+            """)
+            st.info("⚠️ Si no carga, accede desde **miportal.fone.sep.gob.mx**")
+            st.link_button("🔗 Portal Federal SEP", "https://miportal.fone.sep.gob.mx", type="primary", use_container_width=True)
 
 
 def vista_directorio():
