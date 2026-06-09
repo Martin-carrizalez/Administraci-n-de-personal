@@ -1971,11 +1971,31 @@ def vista_admin():
                             st.rerun()
 
     with tab2:
+        sol_eco_hist = cargar_solicitudes_eco()
+        # Normalizar ECO para unir con incidencias
+        df_eco_hist = pd.DataFrame()
+        if not sol_eco_hist.empty:
+            df_eco_hist = sol_eco_hist.rename(columns={
+                "Tipo Permiso":"TIPO","Fecha Inicio":"FECHA_INICIO","Fecha Fin":"FECHA_FIN",
+                "Dias Solicitados":"DIAS","Aprobado Por":"AUTORIZADO_POR",
+                "Nombre Completo":"NOMBRE","Fecha Registro":"FECHA_SOLICITUD"
+            }).copy()
+            col_f = next((c for c in df_eco_hist.columns if "FOLIO" in c.upper()), None)
+            if col_f and col_f != "FOLIO": df_eco_hist["FOLIO"] = df_eco_hist[col_f]
+            df_eco_hist["TIPO"] = "ECO"
+            df_eco_hist["ESTADO"] = df_eco_hist["AUTORIZADO_POR"].apply(
+                lambda x: "🔴 RECHAZADO" if str(x).strip().upper().startswith("RECHAZADO") else ("✅ AUTORIZADO" if str(x).strip() else "🟡 PENDIENTE")
+            )
+            df_eco_hist["ID"] = ""
+            df_eco_hist["HORAS_PASE"] = ""
+
+        df_hist_completo = pd.concat([incidencias, df_eco_hist[[c for c in incidencias.columns if c in df_eco_hist.columns]]], ignore_index=True) if not df_eco_hist.empty else incidencias.copy()
+
         filtro_tipo   = st.selectbox("Filtrar por tipo",   ["TODOS"] + list(TIPO_LABELS.keys()))
         filtro_estado = st.selectbox("Filtrar por estado", ["TODOS", "PENDIENTE", "AUTORIZADO", "RECHAZADO"])
-        df_hist = incidencias.copy()
-        if filtro_tipo   != "TODOS": df_hist = df_hist[df_hist["TIPO"]   == filtro_tipo]
-        if filtro_estado != "TODOS": df_hist = df_hist[df_hist["ESTADO"] == filtro_estado]
+        df_hist = df_hist_completo.copy()
+        if filtro_tipo   != "TODOS": df_hist = df_hist[df_hist["TIPO"] == filtro_tipo]
+        if filtro_estado != "TODOS": df_hist = df_hist[df_hist["ESTADO"].astype(str).str.contains(filtro_estado, case=False)]
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
 
         # ── Export Excel padrón mensual ──────────────
@@ -2135,39 +2155,41 @@ def vista_admin():
         # ── Alerta días económicos por agotarse ──────
         st.markdown("#### ⚠️ Empleados con 5 días económicos o menos")
         try:
-            empleados_df = cargar_horarios()
-            sol_eco     = cargar_solicitudes_eco()
-            alertas = []
-            for _, emp in empleados_df.iterrows():
-                rfc_emp  = str(emp.get("RFC","")).upper().strip()
-                nombre_emp = str(emp.get("NOMBRE", "")).strip()
-                if not rfc_emp: continue
-                # Días usados del año actual
-                import pytz as _ptz
-                _tz = _ptz.timezone("America/Mexico_City")
-                _anio = datetime.now(_ptz.utc).astimezone(_tz).year
-                usados = 0
-                if not sol_eco.empty:
-                    col_rfc_e = next((c for c in sol_eco.columns if c.upper()=="RFC"), None)
-                    col_fi_e  = next((c for c in sol_eco.columns if "INICIO" in c.upper()), None)
-                    col_apr_e = next((c for c in sol_eco.columns if "APROBADO" in c.upper()), None)
-                    col_dias_e= next((c for c in sol_eco.columns if "DIAS" in c.upper() or "SOLICIT" in c.upper()), None)
-                    if col_rfc_e and col_fi_e and col_apr_e and col_dias_e:
-                        sub = sol_eco[sol_eco[col_rfc_e].astype(str).str.upper().str.strip() == rfc_emp]
-                        sub = sub[~sub[col_apr_e].astype(str).str.strip().str.upper().str.startswith("RECHAZADO")]
-                        sub["_FDT"] = pd.to_datetime(sub[col_fi_e], errors="coerce")
-                        sub = sub[sub["_FDT"].dt.year == _anio]
-                        for _, r in sub.iterrows():
-                            try: usados += int(r[col_dias_e])
-                            except: pass
-                disponibles = max(9 - usados, 0)
-                if disponibles <= 5:
-                    alertas.append({"Empleado": nombre_emp, "Usados": usados, "Disponibles": disponibles})
-            if alertas:
-                df_alertas = pd.DataFrame(alertas).sort_values("Disponibles")
-                st.dataframe(df_alertas, use_container_width=True, hide_index=True)
+            import pytz as _ptz
+            _tz   = _ptz.timezone("America/Mexico_City")
+            _anio = datetime.now(_ptz.utc).astimezone(_tz).year
+            sol_eco = cargar_solicitudes_eco()
+            if sol_eco.empty:
+                st.info("No hay solicitudes registradas.")
             else:
-                st.success("Ningún empleado tiene 5 días o menos disponibles.")
+                col_rfc  = next((c for c in sol_eco.columns if c.upper() == "RFC"), None)
+                col_nom  = next((c for c in sol_eco.columns if "NOMBRE" in c.upper()), None)
+                col_dias = next((c for c in sol_eco.columns if "DIAS" in c.upper() or "SOLICIT" in c.upper()), None)
+                col_apr  = next((c for c in sol_eco.columns if "APROBADO" in c.upper()), None)
+                col_fi   = next((c for c in sol_eco.columns if "INICIO" in c.upper()), None)
+                if col_rfc and col_dias and col_fi:
+                    sol_eco["_FDT"] = pd.to_datetime(sol_eco[col_fi], errors="coerce")
+                    sol_anio = sol_eco[sol_eco["_FDT"].dt.year == _anio].copy()
+                    # Excluir rechazados
+                    if col_apr:
+                        sol_anio = sol_anio[~sol_anio[col_apr].astype(str).str.strip().str.upper().str.startswith("RECHAZADO")]
+                    sol_anio["_DIAS"] = pd.to_numeric(sol_anio[col_dias], errors="coerce").fillna(0).astype(int)
+                    resumen = sol_anio.groupby(col_rfc).agg(
+                        Usados=("_DIAS", "sum")
+                    ).reset_index()
+                    resumen.rename(columns={col_rfc: "RFC"}, inplace=True)
+                    if col_nom:
+                        nombres = sol_anio.groupby(col_rfc)[col_nom].first().reset_index()
+                        nombres.rename(columns={col_rfc:"RFC", col_nom:"Nombre"}, inplace=True)
+                        resumen = resumen.merge(nombres, on="RFC", how="left")
+                    resumen["Disponibles"] = (9 - resumen["Usados"]).clip(lower=0)
+                    alertas = resumen[resumen["Disponibles"] <= 5].sort_values("Disponibles")
+                    cols_show = ["Nombre","Usados","Disponibles"] if col_nom else ["RFC","Usados","Disponibles"]
+                    if alertas.empty:
+                        st.success("Ningún empleado tiene 5 días o menos disponibles.")
+                    else:
+                        st.dataframe(alertas[[c for c in cols_show if c in alertas.columns]], use_container_width=True, hide_index=True)
+                    st.warning("No se encontraron las columnas necesarias en Solicitudes.")
         except Exception as e:
             st.warning(f"No se pudo calcular: {e}")
         st.divider()
