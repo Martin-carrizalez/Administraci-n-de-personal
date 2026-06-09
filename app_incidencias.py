@@ -1516,7 +1516,7 @@ def vista_empleado():
     if not mis_inc.empty:
         mis_inc["ESTADO"] = mis_inc["ESTADO"].apply(mapear_emojis_estado)
 
-    cols_mostrar = ["FOLIO", "TIPO", "FECHA_INICIO", "FECHA_FIN", "DIAS", "HORAS_PASE", "ESTADO", "FECHA_AUTORIZACION"]
+        cols_mostrar = ["FOLIO", "TIPO", "FECHA_INICIO", "FECHA_FIN", "DIAS", "HORAS_PASE", "ESTADO", "FECHA_AUTORIZACION", "OBSERVACIONES"]
     frames = []
     if not sol_hist.empty:
         frames.append(sol_hist[[c for c in cols_mostrar if c in sol_hist.columns]])
@@ -1540,17 +1540,6 @@ def vista_empleado():
                            "Para que tu solicitud sea procesada debes **entregar el comprobante PDF firmado** "
                            "en el Área de Recursos Humanos (Administración de Personal DFC). "
                            "Si ya lo entregaste, espera a que el área lo valide.")
-            # Rechazados con observaciones
-            rechazados_emp = df_consolidado[df_consolidado[col_estado].astype(str).str.contains("RECHAZADO", case=False)]
-            for _, row_r in rechazados_emp.iterrows():
-                obs = str(row_r.get("OBSERVACIONES", "") or row_r.get("AUTORIZADO_POR", "")).strip()
-                if obs.upper().startswith("RECHAZADO"):
-                    obs = obs[obs.upper().find("—")+1:].strip() if "—" in obs else obs[9:].strip()
-                folio_r = str(row_r.get("FOLIO",""))
-                tipo_r  = TIPO_LABELS.get(str(row_r.get("TIPO","")), str(row_r.get("TIPO","")))
-                st.error(f"🔴 Tu solicitud **{folio_r}** ({tipo_r}) fue **rechazada**."
-                         + (f" Motivo: *{obs}*" if obs else " Consulta con el Área de Recursos Humanos."))
-
     st.divider()
 
     # ── Faltas informativas ──────────────────────
