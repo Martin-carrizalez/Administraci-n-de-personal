@@ -603,6 +603,10 @@ def aprobar_dia_economico(row_idx: int, nombre_admin: str):
         col_fecha    = headers.index("FECHA REGISTRO") + 1 if "FECHA REGISTRO" in headers else None
         if col_aprobado:
             ws.update_cell(row_idx, col_aprobado, nombre_admin)
+        # Guardar fecha de autorización
+        col_fecha_aut = next((j+1 for j, h in enumerate([h.upper().strip() for h in ws.row_values(1)]) if "FECHA" in h and "AUTORIZACION" in h), None)
+        if col_fecha_aut:
+            ws.update_cell(row_idx, col_fecha_aut, ahora)
         if col_fecha:
             ws.update_cell(row_idx, col_fecha, ahora)
         cargar_solicitudes_eco.clear()
@@ -1437,10 +1441,9 @@ def vista_empleado():
     horas_pases      = horas_pases_mes(rfc, incidencias)
 
     # ── Tablero de saldos ────────────────────────
-    col1, col2, col3 = st.columns(3)
+    col1, col3 = st.columns(2)
     col1.metric("📅 Días económicos disponibles", dias_disponibles, delta=f"-{dias_usados} ejercidos")
-    col2.metric("⏱️ Horas de pases este mes",     f"{horas_pases}h")
-    col3.metric("🚨 Retardos este mes",            0)
+    col3.metric("🚨 Retardos este mes", 0)
 
     st.divider()
 
@@ -1507,9 +1510,8 @@ def vista_empleado():
                 sol_hist["FOLIO"] = "HISTÓRICO"
             sol_hist["HORAS_PASE"]         = ""
             sol_hist["ESTADO"]             = sol_hist["AUTORIZADO_POR"].apply(
-                lambda x: mapear_emojis_estado("AUTORIZADO" if str(x).strip() != "" else "PENDIENTE")
+                lambda x: "🔴 RECHAZADO" if str(x).strip().upper().startswith("RECHAZADO") else ("✅ AUTORIZADO" if str(x).strip() != "" else "🟡 PENDIENTE")
             )
-            sol_hist["FECHA_AUTORIZACION"] = ""
 
         if not mis_inc.empty:
             mis_inc["ESTADO"] = mis_inc["ESTADO"].apply(mapear_emojis_estado)
@@ -1656,7 +1658,7 @@ def vista_empleado():
                 ret  = datetime.combine(fecha, datetime.strptime(hora_retorno.strip(), "%H:%M").time())
                 diff = (ret - sal).total_seconds() / 3600
                 horas_pase = round(max(diff, 0), 2)
-                st.caption(f"Horas de ausencia: **{horas_pase}h** · Acumulado mes: **{horas_pases + horas_pase}h**")
+                st.caption(f"Horas de ausencia: **{horas_pase}h**")
             except:
                 st.warning("Formato inválido. Usa HH:MM (ej: 08:37)")
         elif hora_salida:
@@ -1669,7 +1671,7 @@ def vista_empleado():
                     sal_dt = datetime.combine(fecha, datetime.strptime(hora_salida.strip(), "%H:%M").time())
                     fin_dt = datetime.combine(fecha, datetime.strptime(salida_prog, "%H:%M").time())
                     horas_pase = round(max((fin_dt - sal_dt).total_seconds() / 3600, 0), 2)
-                    st.caption(f"Horas de ausencia (hasta fin de jornada {salida_prog}): **{horas_pase}h** · Acumulado mes: **{horas_pases + horas_pase}h**")
+                    st.caption(f"Horas de ausencia (hasta fin de jornada {salida_prog}): **{horas_pase}h**")
                 else:
                     horas_pase = 0.0
             except:
@@ -1686,7 +1688,7 @@ def vista_empleado():
                     prog_dt  = datetime.combine(fecha, datetime.strptime(entrada_prog, "%H:%M").time())
                     real_dt  = datetime.combine(fecha, datetime.strptime(hora_entrada.strip(), "%H:%M").time())
                     horas_pase = round(max((real_dt - prog_dt).total_seconds() / 3600, 0), 2)
-                    st.caption(f"Horas de ausencia (desde {entrada_prog} hasta {hora_entrada}): **{horas_pase}h** · Acumulado mes: **{horas_pases + horas_pase}h**")
+                    st.caption(f"Horas de ausencia (desde {entrada_prog} hasta {hora_entrada}): **{horas_pase}h**")
                 else:
                     horas_pase = 0.0
             except:
