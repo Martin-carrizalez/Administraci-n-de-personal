@@ -2363,7 +2363,7 @@ def vista_nomina():
 
     with col2:
         with st.container(border=True):
-            st.markdown("### 🇲🇽 Personal Federalizado")
+            st.markdown("### Personal Federalizado")
             st.markdown("""
 **Paso 1** — Haz clic en el botón de abajo  
 **Paso 2** — Se abrirá el portal de la SEP Federal en nueva pestaña  
