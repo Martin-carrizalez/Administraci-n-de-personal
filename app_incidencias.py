@@ -1526,7 +1526,30 @@ def vista_empleado():
     if not frames:
         st.info("Aún no tienes solicitudes registradas.")
     else:
-        st.dataframe(pd.concat(frames, ignore_index=True), use_container_width=True, hide_index=True)
+        df_consolidado = pd.concat(frames, ignore_index=True)
+        st.dataframe(df_consolidado, use_container_width=True, hide_index=True)
+
+        # ── Alertas de pendientes y rechazos ──────────
+        # Pendientes
+        col_estado = "ESTADO" if "ESTADO" in df_consolidado.columns else None
+        if col_estado:
+            pendientes_emp = df_consolidado[df_consolidado[col_estado].astype(str).str.contains("PENDIENTE", case=False)]
+            if not pendientes_emp.empty:
+                folios_pend = ", ".join(pendientes_emp["FOLIO"].astype(str).tolist())
+                st.warning(f"⏳ Tienes {len(pendientes_emp)} solicitud(es) pendiente(s): **{folios_pend}**\n\n"
+                           "Para que tu solicitud sea procesada debes **entregar el comprobante PDF firmado** "
+                           "en el Área de Recursos Humanos (Administración de Personal DFC). "
+                           "Si ya lo entregaste, espera a que el área lo valide.")
+            # Rechazados con observaciones
+            rechazados_emp = df_consolidado[df_consolidado[col_estado].astype(str).str.contains("RECHAZADO", case=False)]
+            for _, row_r in rechazados_emp.iterrows():
+                obs = str(row_r.get("OBSERVACIONES", "") or row_r.get("AUTORIZADO_POR", "")).strip()
+                if obs.upper().startswith("RECHAZADO"):
+                    obs = obs[obs.upper().find("—")+1:].strip() if "—" in obs else obs[9:].strip()
+                folio_r = str(row_r.get("FOLIO",""))
+                tipo_r  = TIPO_LABELS.get(str(row_r.get("TIPO","")), str(row_r.get("TIPO","")))
+                st.error(f"🔴 Tu solicitud **{folio_r}** ({tipo_r}) fue **rechazada**."
+                         + (f" Motivo: *{obs}*" if obs else " Consulta con el Área de Recursos Humanos."))
 
     st.divider()
 
@@ -1991,7 +2014,7 @@ def vista_admin():
 
         df_hist_completo = pd.concat([incidencias, df_eco_hist[[c for c in incidencias.columns if c in df_eco_hist.columns]]], ignore_index=True) if not df_eco_hist.empty else incidencias.copy()
 
-        filtro_tipo   = st.selectbox("Filtrar por tipo",   ["TODOS"] + list(TIPO_LABELS.keys()))
+        filtro_tipo   = st.selectbox("Filtrar por tipo", ["TODOS"] + list(TIPO_LABELS.keys()))
         filtro_estado = st.selectbox("Filtrar por estado", ["TODOS", "PENDIENTE", "AUTORIZADO", "RECHAZADO"])
         df_hist = df_hist_completo.copy()
         if filtro_tipo   != "TODOS": df_hist = df_hist[df_hist["TIPO"] == filtro_tipo]
