@@ -2447,7 +2447,7 @@ def vista_directorio():
         bg, tc = color(row["AREA"])
         ini = (str(row["NOMBRE"])[0] + (str(row["NOMBRE"]).split()[1][0] if len(str(row["NOMBRE"]).split()) > 1 else "")).upper()
         ext_html = f"📞 **{row['EXTENSION']}**" if row["EXTENSION"] else ""
-        email_html = f"" if row["CORREO"] else ""
+        email_html = row["CORREO"] if row["CORREO"] else ""
         dept_html = f" · *{row['DEPARTAMENTO']}*" if row["DEPARTAMENTO"] else ""
 
         col1, col2 = st.columns([3,1])
