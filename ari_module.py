@@ -47,9 +47,7 @@ DIAS_INHABILES_2026 = [
     ("Viernes", "01 de mayo de 2026",       "Día del Trabajo"),
     ("Martes",  "05 de mayo de 2026",       "Día de la Batalla de Puebla"),
     ("Viernes",  "15 de mayo de 2026",       "Día del Maestro"),
-    ("Lunes",   "15 de junio de 2026",      "Día del Estado Libre y Soberano de Jalisco"),
     ("Miércoles","16 de septiembre de 2026","Día de la Independencia de México"),
-    ("Lunes",   "28 de septiembre de 2026", "Día del Servidor Público"),
     ("Lunes",   "12 de octubre de 2026",    "Día de la Raza"),
     ("Lunes",   "02 de noviembre de 2026",  "Día de los Fieles Difuntos / Día de Muertos"),
     ("Lunes",   "16 de noviembre de 2026",  "Día de la Revolución Mexicana"),
@@ -69,6 +67,34 @@ def get_calendario_texto():
 
 def get_inhabiles_texto():
     return "\n".join([f"- {d[0]} {d[1]}: {d[2]}" for d in DIAS_INHABILES_2026])
+
+
+# ─── Registro de preguntas para analítica (anónimo y fail-safe) ──
+ARI_LOG_TAB = "ARI_Preguntas"
+
+def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
+    """Registra la pregunta en una tab de Google Sheets para analítica de RH.
+    Anónimo: NO guarda nombre ni RFC. Si algo falla, no interrumpe el chat."""
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sheet_id = st.secrets.get("ari_log_sheet_id") or st.secrets.get("sheet_checador_id")
+        if not sheet_id or "gcp_service_account" not in st.secrets:
+            return
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
+        sh = gspread.authorize(creds).open_by_key(sheet_id)
+        try:
+            ws = sh.worksheet(ARI_LOG_TAB)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(ARI_LOG_TAB, rows=2, cols=4)
+            ws.append_row(["FECHA_HORA", "ORIGEN", "ROL", "PREGUNTA"])
+        ahora = datetime.now(pytz.timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M:%S")
+        ws.append_row([ahora, origen, rol, str(pregunta)[:500]], value_input_option="RAW")
+    except Exception:
+        pass
 
 # ── System Prompt completo ─────────────────────────────────────
 def build_system_prompt():
@@ -173,23 +199,61 @@ VIII. DÍAS ECONÓMICOS
 - Cantidad: 9 días por año (3 días en 3 ocasiones distintas, separadas cuando menos por un mes).
 - Base legal: Art. 86 Fracción XI, Condiciones Generales de Trabajo SEJ.
 - IMPORTANTE: Los días económicos SÍ cuentan para el pago de incentivos y estímulos por asistencia y puntualidad. Para preservar el derecho al estímulo se recomienda no exceder las inasistencias permitidas.
-- Procedimiento: el trabajador debe solicitarlo por escrito usando el Formato de Justificación de Incidencias (C.A.1) disponible en el portal. El jefe inmediato autoriza y el titular del área da el Vo.Bo.
+- Procedimiento: se solicita EN LÍNEA a través del Portal de Gestión de Incidencias de la DFC (ver sección SISTEMA DE INCIDENCIAS EN LÍNEA). Ya NO se usa el formato en papel para días económicos.
 - IMPORTANTE: Durante guardias del periodo vacacional NO se pueden otorgar días económicos.
 
 IX. COMISIÓN (trabajo fuera del lugar de adscripción)
 - Se otorga por necesidades del servicio, mediante orden escrita del superior jerárquico.
 - La Secretaría cubre viáticos.
-- Formato: Justificación de Incidencias (C.A.1), marcando el tipo "COMISIÓN".
+- Se registra EN LÍNEA en el Portal de Gestión de Incidencias de la DFC, tipo "Comisión".
+
+
+═══════════════════════════════════════════════════════
+SISTEMA DE INCIDENCIAS EN LÍNEA (Portal de Gestión de Incidencias DFC)
+═══════════════════════════════════════════════════════
+
+Los trámites de días económicos, pases, comisiones y cambios de horario se hacen EN LÍNEA, ya no en papel. Entras desde este mismo portal donde estás chateando conmigo: tu sesión ya está iniciada.
+
+FLUJO GENERAL (aplica a todos los tipos):
+1. Inicia sesión con tu correo electrónico institucional y tu RFC.
+2. Elige el tipo de incidencia, captura las fechas (y horas si aplica) y el motivo.
+3. Adjunta tu justificante si lo tienes (PDF o imagen). Queda guardado de forma segura y vinculado a tu solicitud.
+4. Envía la solicitud: el sistema genera un FOLIO automático (ej. ECO-2026-0012) y queda en estado 🟡 PENDIENTE.
+5. RH revisa y la marca como ✅ AUTORIZADA o 🔴 RECHAZADA (con observaciones). Puedes consultar el estado en tu historial dentro del portal.
+6. Una vez autorizada, descarga tu comprobante PDF oficial con folio y código QR. Cualquier persona puede escanear el QR para verificar que el documento es auténtico.
+
+POR TIPO DE INCIDENCIA:
+
+📅 DÍA ECONÓMICO (ECO)
+- El portal te muestra tu saldo de días disponibles del año en tiempo real.
+- Captura fecha de inicio y fin; el sistema calcula los días hábiles descontando fines de semana y días inhábiles oficiales.
+- Recuerda: 9 días por año (3 días en 3 ocasiones, separadas al menos por un mes) y vencen el 31 de diciembre.
+
+🚪 PASES (entrada y salida)
+- Pase de salida SIN retorno (PSE): sales y ya no regresas ese día.
+- Pase de salida CON retorno (PSR): indicas también tu hora de retorno.
+- Pase de entrada (PEN): para llegar después de tu hora de entrada.
+- El portal acumula y te muestra las horas de pases autorizados que llevas en el mes.
+
+🧳 COMISIÓN (COM)
+- Registra el periodo y el motivo de la comisión (trabajo fuera de tu lugar de adscripción).
+- Debe existir la orden del superior jerárquico; los viáticos se cubren según la normativa.
+
+🕐 CAMBIO DE HORARIO (CHO)
+- Propones tu nuevo horario por día de la semana y desde qué fecha aplica.
+- Al autorizarse, tu horario oficial se actualiza automáticamente en el sistema de asistencia y el anterior queda respaldado en el historial.
+
+Si una solicitud te aparece RECHAZADA, revisa las observaciones de RH en tu historial y, si procede, captura una nueva solicitud corregida.
 
 ═══════════════════════════════════════════════════════
 FORMATO DE JUSTIFICACIÓN DE INCIDENCIAS (C.A.1)
 ═══════════════════════════════════════════════════════
 
-Este formato oficial (Folio C.A.1) se usa para justificar:
-- Omisión de entrada o salida (máximo 2 días por quincena; si excede se rechaza).
+IMPORTANTE: Los días económicos, pases de entrada/salida, comisiones y cambios de horario YA NO se tramitan con este formato en papel — ahora se registran en el Portal de Gestión de Incidencias de la DFC (ver sección SISTEMA DE INCIDENCIAS EN LÍNEA).
+
+El formato sigue vigente ÚNICAMENTE para:
+- Omisión de entrada o salida en el checador de plana baja (máximo 2 días por quincena; si excede se rechaza).
 - Retardos (máximo 2 retardos justificados por quincena).
-- Comisiones fuera del lugar de adscripción.
-- Licencias con goce de sueldo (días económicos, cambio de domicilio, etc.).
 - Laborar por necesidades del servicio.
 - Guardias y reposición de guardias.
 
@@ -546,6 +610,7 @@ def render_ari(contexto_usuario: str = ""):
         with st.chat_message("user"):
             st.markdown(pregunta)
         st.session_state.ari_messages.append({"role": "user", "content": pregunta})
+        _registrar_pregunta(pregunta, "portal_incidencias", st.session_state.get("rol", ""))
         with st.chat_message("assistant"):
             with st.spinner("ARI está pensando..."):
                 try:
