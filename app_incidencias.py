@@ -240,7 +240,8 @@ def rfc_a_fecha_nacimiento(rfc: str):
         anio = int(rfc[4:6])
         mes  = int(rfc[6:8])
         dia  = int(rfc[8:10])
-        anio_completo = 2000 + anio if anio <= 25 else 1900 + anio
+        pivote = datetime.now().year % 100
+        anio_completo = 2000 + anio if anio <= pivote else 1900 + anio
         return date(anio_completo, mes, dia)
     except Exception:
         return None
@@ -450,15 +451,8 @@ def subir_anexo_drive(archivo, folio: str, rfc: str) -> str:
         ).execute()
 
         file_id = archivo_drive.get("id")
-        try:
-            service.permissions().create(
-                fileId=file_id,
-                body={"type": "anyone", "role": "reader"},
-                supportsAllDrives=True
-            ).execute()
-        except Exception:
-            pass  # En Shared Drive los permisos los maneja el admin
-
+        # NOTA: sin permiso "anyone" — el acceso se hereda de la membresía
+        # de la unidad compartida (solo RH y la service account).
         return f"https://drive.google.com/file/d/{file_id}/view"
     except Exception as e:
         return f"ERROR: {e}"
@@ -481,7 +475,7 @@ def guardar_dia_economico(datos: dict):
     link_anexo = ""
     if datos.get("tiene_anexo") and datos.get("archivo_anexo"):
         try:
-            link_anexo = subir_anexo_drive(datos["archivo_anexo"], datos["folio"])
+            link_anexo = subir_anexo_drive(datos["archivo_anexo"], datos["folio"], datos["rfc"])
         except Exception as e:
             st.warning(f"No se pudo subir el anexo: {e}")
     fila = [
@@ -542,13 +536,17 @@ def autorizar_incidencia(folio: str, obs: str = ""):
         if "ESTADO" not in headers:
             st.error("No se encontró columna ESTADO en el Sheet.")
             return
+        from gspread.cell import Cell
         for i, row in enumerate(data, start=2):
             if str(row.get("FOLIO", "")) == folio:
-                ws.update_cell(i, headers.index("ESTADO") + 1,             "AUTORIZADO")
-                ws.update_cell(i, headers.index("AUTORIZADO_POR") + 1,     "admin")
-                ws.update_cell(i, headers.index("FECHA_AUTORIZACION") + 1, ahora)
+                celdas = [
+                    Cell(i, headers.index("ESTADO") + 1,             "AUTORIZADO"),
+                    Cell(i, headers.index("AUTORIZADO_POR") + 1,     st.session_state.get("nombre", "admin")),
+                    Cell(i, headers.index("FECHA_AUTORIZACION") + 1, ahora),
+                ]
                 if obs and "OBSERVACIONES" in headers:
-                    ws.update_cell(i, headers.index("OBSERVACIONES") + 1, obs)
+                    celdas.append(Cell(i, headers.index("OBSERVACIONES") + 1, obs))
+                ws.update_cells(celdas, value_input_option="USER_ENTERED")
                 break
         cargar_incidencias.clear()
     except gspread.exceptions.APIError:
@@ -562,12 +560,16 @@ def rechazar_incidencia(folio: str, obs: str):
     ws = sh.worksheet("Incidencias")
     headers = ws.row_values(1)
     data = ws.get_all_records(numericise_ignore=["all"])
+    from gspread.cell import Cell
+    ahora = datetime.now(pytz.utc).astimezone(pytz.timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M")
     for i, row in enumerate(data, start=2):
         if str(row.get("FOLIO", "")) == folio:
-            ws.update_cell(i, headers.index("ESTADO") + 1,             "RECHAZADO")
-            ws.update_cell(i, headers.index("AUTORIZADO_POR") + 1,     "admin")
-            ws.update_cell(i, headers.index("FECHA_AUTORIZACION") + 1, datetime.now(__import__("pytz").utc).astimezone(__import__("pytz").timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M"))
-            ws.update_cell(i, headers.index("OBSERVACIONES") + 1,      obs)
+            ws.update_cells([
+                Cell(i, headers.index("ESTADO") + 1,             "RECHAZADO"),
+                Cell(i, headers.index("AUTORIZADO_POR") + 1,     st.session_state.get("nombre", "admin")),
+                Cell(i, headers.index("FECHA_AUTORIZACION") + 1, ahora),
+                Cell(i, headers.index("OBSERVACIONES") + 1,      obs),
+            ], value_input_option="USER_ENTERED")
             break
     cargar_incidencias.clear()
 
@@ -658,21 +660,29 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha
                 st.warning(f"No se pudo guardar historial: {e}")
 
             # Sobrescribir horario actual en tab empleados
+            from gspread.cell import Cell
+            celdas_horario = []
             for dia, (col_e, col_s) in COLUMNAS_HORARIO.items():
                 if dia in horario_nuevo:
                     if col_e in headers:
-                        ws_emp.update_cell(i, headers.index(col_e) + 1, horario_nuevo[dia]["entrada"])
+                        celdas_horario.append(Cell(i, headers.index(col_e) + 1, horario_nuevo[dia]["entrada"]))
                     if col_s in headers:
-                        ws_emp.update_cell(i, headers.index(col_s) + 1, horario_nuevo[dia]["salida"])
+                        celdas_horario.append(Cell(i, headers.index(col_s) + 1, horario_nuevo[dia]["salida"]))
+            if celdas_horario:
+                ws_emp.update_cells(celdas_horario, value_input_option="USER_ENTERED")
             break
     ws_inc = sh.worksheet("Incidencias")
     inc_h  = ws_inc.row_values(1)
     inc_d  = ws_inc.get_all_records(numericise_ignore=["all"])
+    from gspread.cell import Cell
+    ahora_inc = datetime.now(pytz.utc).astimezone(pytz.timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M")
     for i, row in enumerate(inc_d, start=2):
         if str(row.get("FOLIO", "")) == folio:
-            ws_inc.update_cell(i, inc_h.index("ESTADO") + 1,             "AUTORIZADO")
-            ws_inc.update_cell(i, inc_h.index("AUTORIZADO_POR") + 1,     "admin")
-            ws_inc.update_cell(i, inc_h.index("FECHA_AUTORIZACION") + 1, datetime.now(__import__("pytz").utc).astimezone(__import__("pytz").timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M"))
+            ws_inc.update_cells([
+                Cell(i, inc_h.index("ESTADO") + 1,             "AUTORIZADO"),
+                Cell(i, inc_h.index("AUTORIZADO_POR") + 1,     st.session_state.get("nombre", "admin")),
+                Cell(i, inc_h.index("FECHA_AUTORIZACION") + 1, ahora_inc),
+            ], value_input_option="USER_ENTERED")
             break
     st.cache_data.clear()
 
