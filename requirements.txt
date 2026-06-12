@@ -9,3 +9,4 @@ xlrd
 plotly
 openpyxl
 pytz
+google-generativeai

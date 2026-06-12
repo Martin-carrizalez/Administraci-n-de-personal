@@ -2524,6 +2524,46 @@ def vista_directorio():
                     tarjeta(row)
 
 
+def vista_ari():
+    """ARI embebida: chat de dudas de RH con contexto del usuario autenticado."""
+    try:
+        import ari_module
+    except ImportError:
+        st.error("El módulo de ARI (ari_module.py) no está en el proyecto.")
+        return
+    if "GEMINI_API_KEY" not in st.secrets:
+        st.warning("Falta GEMINI_API_KEY en los secrets para habilitar a ARI.")
+        return
+
+    contexto = ""
+    if st.session_state.get("rol") == "empleado":
+        rfc    = st.session_state.get("rfc", "")
+        nombre = st.session_state.get("nombre", "")
+        partes = [f"Nombre: {nombre}"]
+        try:
+            empleados   = cargar_empleados()
+            solicitudes = cargar_solicitudes_eco()
+            incidencias = cargar_incidencias()
+            emp_row = empleados[empleados["RFC"].astype(str).str.upper() == rfc]
+            if not emp_row.empty:
+                dias_totales = int(emp_row["DIAS TOTALES"].iloc[0])
+                usados       = dias_economicos_usados(rfc, solicitudes)
+                partes.append(f"Días económicos: {dias_totales - usados} disponibles de {dias_totales} este año")
+            if not incidencias.empty and "RFC" in incidencias.columns:
+                propias = incidencias[incidencias["RFC"].astype(str).str.upper() == rfc]
+                pend = propias[propias["ESTADO"].astype(str).str.contains("PENDIENTE", na=False)]
+                if not pend.empty:
+                    folios = ", ".join(pend["FOLIO"].astype(str).tolist()[:5])
+                    partes.append(f"Solicitudes pendientes de autorización: {folios}")
+        except Exception:
+            pass
+        contexto = "\n".join(partes)
+    elif st.session_state.get("rol") == "admin":
+        contexto = "El usuario actual es el administrador de RH de la DFC."
+
+    ari_module.render_ari(contexto)
+
+
 def main():
     st.set_page_config(page_title="Incidencias DFC · RH", page_icon="📋", layout="wide")
 
@@ -2599,6 +2639,9 @@ def main():
         if st.button("📞 Directorio DFC"):
             st.session_state["vista"] = "directorio"
             st.rerun()
+        if st.button("🤖 Pregúntale a ARI"):
+            st.session_state["vista"] = "ari"
+            st.rerun()
         if st.button("🏠 Inicio"):
             st.session_state["vista"] = "inicio"
             st.rerun()
@@ -2609,7 +2652,9 @@ def main():
 
     vista = st.session_state.get("vista", "inicio")
     vista = st.session_state.get("vista", "inicio")
-    if vista == "directorio":
+    if vista == "ari":
+        vista_ari()
+    elif vista == "directorio":
         vista_directorio()
     elif vista == "calendario":
         vista_calendario()
