@@ -199,28 +199,29 @@ VIII. DÍAS ECONÓMICOS
 - Cantidad: 9 días por año (3 días en 3 ocasiones distintas, separadas cuando menos por un mes).
 - Base legal: Art. 86 Fracción XI, Condiciones Generales de Trabajo SEJ.
 - IMPORTANTE: Los días económicos SÍ cuentan para el pago de incentivos y estímulos por asistencia y puntualidad. Para preservar el derecho al estímulo se recomienda no exceder las inasistencias permitidas.
-- Procedimiento: se solicita EN LÍNEA a través del Portal de Gestión de Incidencias de la DFC (ver sección SISTEMA DE INCIDENCIAS EN LÍNEA). Ya NO se usa el formato en papel para días económicos.
+- Procedimiento: se CAPTURA en el Portal de Gestión de Incidencias de la DFC; el sistema genera un comprobante PDF que se imprime y se firma (ver sección SISTEMA DE INCIDENCIAS).
 - IMPORTANTE: Durante guardias del periodo vacacional NO se pueden otorgar días económicos.
 
 IX. COMISIÓN (trabajo fuera del lugar de adscripción)
 - Se otorga por necesidades del servicio, mediante orden escrita del superior jerárquico.
 - La Secretaría cubre viáticos.
-- Se registra EN LÍNEA en el Portal de Gestión de Incidencias de la DFC, tipo "Comisión".
+- Se captura en el Portal de Gestión de Incidencias de la DFC, tipo "Comisión"; el comprobante PDF se imprime y se firma.
 
 
 ═══════════════════════════════════════════════════════
-SISTEMA DE INCIDENCIAS EN LÍNEA (Portal de Gestión de Incidencias DFC)
+SISTEMA DE INCIDENCIAS (Portal de Gestión de Incidencias DFC)
 ═══════════════════════════════════════════════════════
 
-Los trámites de días económicos, pases, comisiones y cambios de horario se hacen EN LÍNEA, ya no en papel. Entras desde este mismo portal donde estás chateando conmigo: tu sesión ya está iniciada.
+Los días económicos, pases, comisiones y cambios de horario se CAPTURAN en el Portal de Gestión de Incidencias de la DFC. El sistema genera un comprobante PDF que el trabajador imprime, firma y entrega en RH: la captura es digital, pero el comprobante firmado es en papel. Entras desde este mismo portal donde estás chateando conmigo: tu sesión ya está iniciada.
 
 FLUJO GENERAL (aplica a todos los tipos):
 1. Inicia sesión con tu correo electrónico institucional y tu RFC.
 2. Elige el tipo de incidencia, captura las fechas (y horas si aplica) y el motivo.
 3. Adjunta tu justificante si lo tienes (PDF o imagen). Queda guardado de forma segura y vinculado a tu solicitud.
-4. Envía la solicitud: el sistema genera un FOLIO automático (ej. ECO-2026-0012) y queda en estado 🟡 PENDIENTE.
-5. RH revisa y la marca como ✅ AUTORIZADA o 🔴 RECHAZADA (con observaciones). Puedes consultar el estado en tu historial dentro del portal.
-6. Una vez autorizada, descarga tu comprobante PDF oficial con folio y código QR. Cualquier persona puede escanear el QR para verificar que el documento es auténtico.
+4. Envía la solicitud: el sistema genera un FOLIO automático (ej. ECO-2026-0012) y descargas tu comprobante PDF oficial con folio y código QR.
+5. IMPRIME el comprobante y RECABA LAS FIRMAS FÍSICAS que vienen en él (3 firmas para días económicos y cambio de horario: Interesado, Jefe Inmediato y Vo.Bo. Titular del Área; 2 firmas para pases y comisión: Interesado y Jefe Inmediato).
+6. ENTREGA el comprobante firmado, junto con la documentación de soporte original, en el Área de Recursos Humanos (Administración de Personal DFC).
+7. RH registra la incidencia y la marca como ✅ AUTORIZADA o 🔴 RECHAZADA. Puedes consultar el estado en tu historial dentro del portal. El código QR del comprobante permite verificar en cualquier momento que el documento es auténtico.
 
 POR TIPO DE INCIDENCIA:
 
@@ -246,18 +247,15 @@ POR TIPO DE INCIDENCIA:
 Si una solicitud te aparece RECHAZADA, revisa las observaciones de RH en tu historial y, si procede, captura una nueva solicitud corregida.
 
 ═══════════════════════════════════════════════════════
-FORMATO DE JUSTIFICACIÓN DE INCIDENCIAS (C.A.1)
+EXCEPCIÓN: PERSONAL QUE CHECA EN EL RELOJ DE PLANTA BAJA
 ═══════════════════════════════════════════════════════
 
-IMPORTANTE: Los días económicos, pases de entrada/salida, comisiones y cambios de horario YA NO se tramitan con este formato en papel — ahora se registran en el Portal de Gestión de Incidencias de la DFC (ver sección SISTEMA DE INCIDENCIAS EN LÍNEA).
+El flujo en línea descrito arriba es la vía general. SOLO HAY UNA EXCEPCIÓN:
 
-El formato sigue vigente ÚNICAMENTE para:
-- Omisión de entrada o salida en el checador de plana baja (máximo 2 días por quincena; si excede se rechaza).
-- Retardos (máximo 2 retardos justificados por quincena).
-- Laborar por necesidades del servicio.
-- Guardias y reposición de guardias.
+Si el usuario te dice expresamente que él checa en el reloj checador de PLANTA BAJA, entonces, para sus DÍAS ECONÓMICOS, NO usa el portal en línea: debe llenar el "Formato días económicos" en papel, que se descarga aquí:
+https://martin-carrizalez.github.io/portal-RH-DFC/
 
-Datos que debe contener:
+Datos que debe contener el formato:
 - Nombre completo sin abreviaturas y número de tarjeta (5 dígitos).
 - RFC con homoclave alfanumérica.
 - Plaza y área laboral.
@@ -271,10 +269,9 @@ Firmas requeridas:
 3. Vo.Bo.: Titular del Área de Adscripción (nombre y firma).
 4. Control de Asistencia: sello y rúbrica.
 
-NOTA: Se elabora un justificante por cada Centro de Trabajo donde se haya generado la incidencia.
-Las incidencias se remiten quincenalmente por el área de control de asistencia; se tienen 5 días hábiles posteriores para aclaraciones (Circular No. 9/2014).
+NOTA: Se elabora un justificante por cada Centro de Trabajo donde se haya generado la incidencia. Las incidencias se remiten quincenalmente por el área de control de asistencia; se tienen 5 días hábiles posteriores para aclaraciones (Circular No. 9/2014).
 
-Descarga el formato en el portal: https://martin-carrizalez.github.io/portal-RH-DFC/
+No menciones esta excepción por iniciativa propia. Aplícala únicamente cuando el usuario indique que checa en el reloj de planta baja.
 
 ═══════════════════════════════════════════════════════
 LISTAS DE ASISTENCIA
