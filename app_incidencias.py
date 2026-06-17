@@ -144,6 +144,45 @@ def cargar_festivos():
     data = ws.get_all_records(numericise_ignore=["all"])
     return pd.DataFrame(data) if data else pd.DataFrame()
 
+ASISTENCIA_TAB = "Asistencia_Mes"
+ASISTENCIA_HEADERS = ["RFC", "NOMBRE", "PERIODO", "FALTAS", "JUSTIFICADAS",
+                      "NO_JUSTIFICADAS", "RETARDOS", "DIAS_FALTA", "AVISAR", "FECHA_PROCESO"]
+
+def _ws_asistencia():
+    client = get_client()
+    sh = client.open_by_key(st.secrets["sheet_checador_id"])
+    try:
+        return sh.worksheet(ASISTENCIA_TAB)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(ASISTENCIA_TAB, rows=2, cols=len(ASISTENCIA_HEADERS))
+        ws.append_row(ASISTENCIA_HEADERS)
+        return ws
+
+def guardar_asistencia_mes(filas: list[dict], periodo: str):
+    """Reemplaza el contenido de Asistencia_Mes con el último reporte procesado."""
+    ws = _ws_asistencia()
+    ws.clear()
+    rows = [ASISTENCIA_HEADERS]
+    ahora = datetime.now(pytz.timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M")
+    for f in filas:
+        rows.append([
+            f.get("RFC",""), f.get("NOMBRE",""), periodo,
+            f.get("FALTAS",0), f.get("JUSTIFICADAS",0), f.get("NO_JUSTIFICADAS",0),
+            f.get("RETARDOS",0), f.get("DIAS_FALTA",""), f.get("AVISAR",""), ahora
+        ])
+    ws.update(rows, value_input_option="USER_ENTERED")
+    cargar_asistencia_mes.clear()
+
+@st.cache_data(ttl=300)
+def cargar_asistencia_mes():
+    try:
+        ws = _ws_asistencia()
+        data = ws.get_all_records(numericise_ignore=["all"])
+        return pd.DataFrame(data) if data else pd.DataFrame(columns=ASISTENCIA_HEADERS)
+    except Exception:
+        return pd.DataFrame(columns=ASISTENCIA_HEADERS)
+
+
 # ─────────────────────────────────────────────
 # UTILIDADES
 # ─────────────────────────────────────────────
@@ -180,7 +219,8 @@ def generar_folio(tipo: str, incidencias_df: pd.DataFrame) -> str:
             nums.append(int(partes[2]))
     return f"{prefijo}{str(max(nums) + 1 if nums else 1).zfill(4)}"
 
-def dias_habiles_entre(fecha_inicio: date, fecha_fin: date, festivos_df: pd.DataFrame) -> int:
+def festivos_a_set(festivos_df: pd.DataFrame) -> set:
+    """Expande los rangos de la tab festivos a un set de fechas individuales."""
     festivos_set = set()
     for _, row in festivos_df.iterrows():
         try:
@@ -192,6 +232,10 @@ def dias_habiles_entre(fecha_inicio: date, fecha_fin: date, festivos_df: pd.Data
                 d += timedelta(days=1)
         except Exception:
             pass
+    return festivos_set
+
+def dias_habiles_entre(fecha_inicio: date, fecha_fin: date, festivos_df: pd.DataFrame) -> int:
+    festivos_set = festivos_a_set(festivos_df)
     total = 0
     d = fecha_inicio
     while d <= fecha_fin:
@@ -957,6 +1001,18 @@ def render_checador():
                         if fi <= d.date() <= ff:
                             if tipo == "COM":
                                 resultado.setdefault(rfc, {})[d.date()] = "Comisión"
+                            elif tipo == "PEN":
+                                # Pase de entrada: justifica el retardo SOLO si trae motivo real.
+                                motivo_pen = str(r.get("MOTIVO",""))
+                                motivo_real = ""
+                                for linea in motivo_pen.split("\n"):
+                                    l = linea.strip()
+                                    if l and not l.lower().startswith("entrada") and not l.lower().startswith("pase de entrada"):
+                                        motivo_real = l
+                                        break
+                                if motivo_real:
+                                    resultado.setdefault(rfc, {}).setdefault(d.date(), f"Pase de entrada|motivo:{motivo_real}")
+                                # sin motivo: no se registra → el retardo cuenta normal
                             elif tipo == "PSE":
                                 motivo_pse = str(r.get("MOTIVO","")).lower()
                                 hora_ret   = str(r.get("HORA_RETORNO","")).strip()
@@ -1087,6 +1143,35 @@ def render_checador():
                 entrada_real, salida_real = ch
                 mins   = 0
                 estado = "Asistió"
+
+                # Bug B: si solo hay UNA checada, decidir si es entrada o salida
+                # comparándola con el horario programado (entrada vs salida).
+                solo_una = bool(entrada_real) and not salida_real
+                sp = str(hor.get(f"SALIDA_{nd}","")).strip()
+                if solo_una and ep and sp:
+                    try:
+                        marca_dt = datetime.strptime(entrada_real, "%H:%M")
+                        ent_dt   = datetime.strptime(ep, "%H:%M")
+                        sal_dt   = datetime.strptime(sp, "%H:%M")
+                        dist_ent = abs((marca_dt - ent_dt).total_seconds())
+                        dist_sal = abs((marca_dt - sal_dt).total_seconds())
+                        if dist_sal < dist_ent:
+                            # La única marca es la SALIDA → olvidó checar entrada.
+                            # No se inventa retardo: se señala para revisión manual.
+                            salida_real  = entrada_real
+                            entrada_real = ""
+                    except: pass
+
+                if not entrada_real:
+                    # Sin checada de entrada: asistió pero falta el dato; lo decides tú.
+                    detalle_faltas.append({
+                        "nombre": nombre, "fecha": dia_dt.date(), "nd": nd,
+                        "prog_entrada": ep, "checada_entrada": "",
+                        "checada_salida": salida_real, "retardo_min": 0,
+                        "estado": "Sin checada de entrada", "justificante": just_tipo or ""
+                    })
+                    continue
+
                 try:
                     ep_dt = datetime.strptime(ep, "%H:%M")
                     er_dt = datetime.strptime(entrada_real, "%H:%M")
@@ -1098,6 +1183,11 @@ def render_checador():
                             retardos += 1
                             retardos_min += mins
                             estado = "Retardo"
+                            _motivo_dia = ""
+                            if just_tipo and "motivo:" in str(just_tipo):
+                                _motivo_dia = str(just_tipo).split("motivo:")[1].strip()
+                            elif just_tipo:
+                                _motivo_dia = str(just_tipo).split("|")[0].strip()
                             det_retardos_emp.append({
                                 "Empleado": nombre,
                                 "Fecha": dia_dt.strftime("%d/%m/%Y"),
@@ -1105,7 +1195,8 @@ def render_checador():
                                 "Hora prog.": ep,
                                 "Hora real": entrada_real,
                                 "Minutos tarde": mins,
-                                "Observación": ""
+                                "Observación": "",
+                                "Motivo del día": _motivo_dia
                             })
                 except: pass
 
@@ -1126,7 +1217,8 @@ def render_checador():
                                 "Hora prog.": hora_ret_aut,
                                 "Hora real": salida_real,
                                 "Minutos tarde": mins_tarde,
-                                "Observación": "Regreso tardío de pase de salida"
+                                "Observación": "Regreso tardío de pase de salida",
+                                "Motivo del día": "Pase de salida con retorno"
                             })
                     except: pass
 
@@ -1141,6 +1233,7 @@ def render_checador():
 
             pct = round((asistidos+justif)/dias_prog*100) if dias_prog > 0 else 0
             resumen.append({
+                "RFC": rfc,
                 "Empleado": nombre,
                 "Días prog.": dias_prog,
                 "Asistidos": asistidos,
@@ -1283,13 +1376,13 @@ def render_checador():
 
         # ── Hoja 3: Detalle retardos ───────────────────────────────────────
         ws3 = wb.create_sheet("Detalle de retardos")
-        ws3.merge_cells("A1:G1")
+        ws3.merge_cells("A1:H1")
         ws3["A1"] = f"DETALLE DE RETARDOS — {mes_nombre.upper()} {fecha_ini.year}  (tolerancia {umbral} min)"
         ws3["A1"].font = Font(bold=True, size=11, name="Arial", color=AZUL)
         ws3["A1"].alignment = center()
         ws3.append([])
 
-        hdrs3 = ["Empleado","Fecha","Día","Hora prog.","Hora real","Minutos tarde","Observación"]
+        hdrs3 = ["Empleado","Fecha","Día","Hora prog.","Hora real","Minutos tarde","Observación","Motivo del día"]
         ws3.append(hdrs3)
         hrow3 = ws3.max_row
         for col, _ in enumerate(hdrs3, 1):
@@ -1298,9 +1391,9 @@ def render_checador():
 
         if not df_ret.empty:
             for _, r in df_ret.iterrows():
-                ws3.append([r["Empleado"],r["Fecha"],r["Día"],r["Hora prog."],r["Hora real"],r["Minutos tarde"],r.get("Observación","")])
+                ws3.append([r["Empleado"],r["Fecha"],r["Día"],r["Hora prog."],r["Hora real"],r["Minutos tarde"],r.get("Observación",""),r.get("Motivo del día","")])
                 drow = ws3.max_row
-                for col in range(1,8):
+                for col in range(1,9):
                     c = ws3.cell(drow, col)
                     c.border = border(); c.font = Font(size=9, name="Arial")
                     c.alignment = center() if col > 1 else left()
@@ -1312,6 +1405,7 @@ def render_checador():
         ws3.column_dimensions["A"].width = 35
         for col in ["B","C","D","E","F","G"]:
             ws3.column_dimensions[col].width = 14
+        ws3.column_dimensions["H"].width = 30
 
         buf = _io.BytesIO()
         wb.save(buf)
@@ -1408,6 +1502,44 @@ def render_checador():
                 with st.expander(f"📋 Detalle de retardos ({len(df_ret)} registros)"):
                     st.dataframe(df_ret, use_container_width=True, hide_index=True)
 
+            # ── Selector de avisos de faltas ────────────────────────────
+            con_faltas = df_res[df_res["Faltas"] > 0].copy()
+            st.markdown("### 📨 Avisos de faltas a empleados")
+            if con_faltas.empty:
+                st.success("No hay empleados con faltas en este período.")
+                avisar_set = set()
+            else:
+                st.caption("Marca a quién quieres mostrarle el aviso de falta en su portal. "
+                           "El empleado lo verá al iniciar sesión.")
+                avisar_set = set()
+                for _, r in con_faltas.iterrows():
+                    marcado = st.checkbox(
+                        f"**{r['Empleado']}** — {int(r['Faltas'])} falta(s): {r['Días que faltó']}",
+                        key=f"avisar_{r['RFC']}"
+                    )
+                    if marcado:
+                        avisar_set.add(str(r["RFC"]).upper())
+
+            if st.button("💾 Guardar reporte y avisos en el portal", type="primary"):
+                filas = []
+                for _, r in df_res.iterrows():
+                    rfc_e = str(r.get("RFC","")).upper()
+                    filas.append({
+                        "RFC": rfc_e,
+                        "NOMBRE": r["Empleado"],
+                        "FALTAS": int(r["Faltas"]),
+                        "JUSTIFICADAS": int(r["Justificadas"]),
+                        "NO_JUSTIFICADAS": int(r["Faltas"]),
+                        "RETARDOS": int(r["Retardos"]),
+                        "DIAS_FALTA": r["Días que faltó"] if r["Días que faltó"] != "—" else "",
+                        "AVISAR": "SI" if rfc_e in avisar_set else "NO",
+                    })
+                try:
+                    guardar_asistencia_mes(filas, periodo)
+                    st.success(f"Guardado. {len(avisar_set)} empleado(s) verán el aviso en su portal.")
+                except Exception as e:
+                    st.error(f"No se pudo guardar: {e}")
+
             excel_bytes = generar_excel_reporte(df_res, df_ret, periodo, fecha_ini, fecha_fin, umbral_r)
             st.download_button(
                 "⬇️ Descargar reporte Excel (3 hojas)",
@@ -1430,6 +1562,24 @@ def vista_empleado():
 
     st.markdown(f'### Sesión iniciada como: {nombre}')
     st.caption('Filiación: ' + rfc_oculto(rfc) + ' · ' + emp_data.get('PUESTO', ''))
+
+    # Alerta de falta no justificada (solo si RH marcó avisar a este empleado)
+    try:
+        _asis = cargar_asistencia_mes()
+        if not _asis.empty and "RFC" in _asis.columns:
+            _mi = _asis[_asis["RFC"].astype(str).str.upper() == str(rfc).upper()]
+            if not _mi.empty:
+                _f = _mi.iloc[0]
+                _nojust = int(_f.get("NO_JUSTIFICADAS", 0) or 0)
+                if str(_f.get("AVISAR","")).upper() == "SI" and _nojust > 0:
+                    _dias = _f.get("DIAS_FALTA","")
+                    st.error(
+                        f"⚠️ Tienes {_nojust} falta(s) sin justificar"
+                        + (f" ({_dias})" if _dias else "")
+                        + ". Acude a Recursos Humanos o presenta tu justificante."
+                    )
+    except Exception:
+        pass
 
     # Alerta días económicos vencen 31 dic
     hoy      = date.today()
@@ -1556,13 +1706,32 @@ def vista_empleado():
     st.divider()
 
     # ── Faltas informativas ──────────────────────
+    asis = cargar_asistencia_mes()
+    mi_asis = pd.DataFrame()
+    if not asis.empty and "RFC" in asis.columns:
+        mi_asis = asis[asis["RFC"].astype(str).str.upper() == str(rfc).upper()]
+
     with st.expander("📊 Mis faltas este mes", expanded=False):
         st.info("ℹ️ Este contador es informativo. Las faltas no justificadas las gestiona Recursos Humanos.")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Faltas totales",        0)
-        c2.metric("Faltas justificadas",   0)
-        c3.metric("Faltas no justificadas",0)
-        st.caption("La integración con el reloj checador estará disponible próximamente.")
+        if mi_asis.empty:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Faltas totales",        0)
+            c2.metric("Faltas justificadas",   0)
+            c3.metric("Faltas no justificadas",0)
+            st.caption("Aún no hay un reporte de asistencia procesado para ti.")
+        else:
+            fila = mi_asis.iloc[0]
+            faltas_tot = int(fila.get("FALTAS", 0) or 0)
+            justis     = int(fila.get("JUSTIFICADAS", 0) or 0)
+            nojust     = int(fila.get("NO_JUSTIFICADAS", 0) or 0)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Faltas totales",        faltas_tot)
+            c2.metric("Faltas justificadas",   justis)
+            c3.metric("Faltas no justificadas",nojust)
+            st.caption(f"Período: {fila.get('PERIODO','')} · Retardos: {int(fila.get('RETARDOS',0) or 0)}")
+            if fila.get("DIAS_FALTA"):
+                st.caption(f"Días que faltaste: {fila.get('DIAS_FALTA')}")
+
 
     st.divider()
     st.markdown("### Nueva solicitud")
@@ -1590,6 +1759,7 @@ def vista_empleado():
         # Modo de selección: rango o días sueltos
         modo = st.radio("Selección de fechas", ["Rango continuo", "Días sueltos"], horizontal=True)
         festivos = cargar_festivos()
+        festivos_set = festivos_a_set(festivos)
 
         if modo == "Rango continuo":
             col1, col2 = st.columns(2)
@@ -1608,7 +1778,7 @@ def vista_empleado():
             fechas_seleccionadas = []
             d = fi
             while d <= ff:
-                if d.weekday() < 5 and d not in festivos:
+                if d.weekday() < 5 and d not in festivos_set:
                     fechas_seleccionadas.append(d)
                 d += timedelta(days=1)
             fi_final, ff_final = fi, ff
@@ -1619,7 +1789,7 @@ def vista_empleado():
             dias_opciones = []
             d = date.today()
             while len(dias_opciones) < 60:
-                if d.weekday() < 5 and d not in festivos:
+                if d.weekday() < 5 and d not in festivos_set:
                     dias_opciones.append(d)
                 d += _td(days=1)
             NOMBRES_DIA = ["Lun","Mar","Mié","Jue","Vie"]
