@@ -963,9 +963,11 @@ def render_checador():
                                 fechas_just.append(d.date())
                                 d += timedelta(days=1)
                         except: pass
+                    col_mot_eco = next((c for c in economicos.columns if "MOTIVO" in c.upper()), None)
                     for fecha_eco in fechas_just:
                         if fi <= fecha_eco <= ff:
-                            resultado.setdefault(rfc, {})[fecha_eco] = "Día económico"
+                            mot_eco = str(r.get(col_mot_eco,"")).strip() if col_mot_eco else ""
+                            resultado.setdefault(rfc, {})[fecha_eco] = f"Día económico|motivo:{mot_eco}" if mot_eco else "Día económico"
 
         # Incapacidades
         if not incapacidades.empty:
@@ -1014,14 +1016,23 @@ def render_checador():
                                     resultado.setdefault(rfc, {}).setdefault(d.date(), f"Pase de entrada|motivo:{motivo_real}")
                                 # sin motivo: no se registra → el retardo cuenta normal
                             elif tipo == "PSE":
-                                motivo_pse = str(r.get("MOTIVO","")).lower()
+                                motivo_pse_raw = str(r.get("MOTIVO","")).strip()
+                                motivo_pse = motivo_pse_raw.lower()
                                 hora_ret   = str(r.get("HORA_RETORNO","")).strip()
+                                # texto real del empleado (sin la línea técnica "Salida: hh:mm")
+                                mot_real = ""
+                                for linea in motivo_pse_raw.split("\n"):
+                                    l = linea.strip()
+                                    if l and not l.lower().startswith("pase de salida") and not l.lower().startswith("salida"):
+                                        mot_real = l
+                                        break
+                                suf = f"|motivo:{mot_real}" if mot_real else ""
                                 if "sin retorno" in motivo_pse:
-                                    resultado.setdefault(rfc, {})[d.date()] = "Pase de salida sin retorno"
+                                    resultado.setdefault(rfc, {})[d.date()] = f"Pase de salida sin retorno{suf}"
                                 elif hora_ret:
-                                    resultado.setdefault(rfc, {})[d.date()] = f"Pase de salida|retorno:{hora_ret}"
+                                    resultado.setdefault(rfc, {})[d.date()] = f"Pase de salida|retorno:{hora_ret}{suf}"
                                 else:
-                                    resultado.setdefault(rfc, {}).setdefault(d.date(), "Pase de entrada")
+                                    resultado.setdefault(rfc, {}).setdefault(d.date(), f"Pase de salida{suf}")
                         d += timedelta(days=1)
                 except: pass
 
@@ -1103,13 +1114,13 @@ def render_checador():
             i += 1
 
         activos = empleados[empleados["ACTIVO"]=="SI"]
-        resumen, detalle_faltas, detalle_retardos = [], [], []
+        resumen, detalle_faltas, detalle_retardos, detalle_omisiones = [], [], [], []
 
         for _, emp_row in activos.iterrows():
             uid    = emp_row["ID"]
             nombre = emp_row["NOMBRE"]
             rfc    = str(emp_row.get("RFC","")).upper().strip()
-            dias_prog = asistidos = faltas = retardos = retardos_min = justif = 0
+            dias_prog = asistidos = faltas = retardos = retardos_min = justif = omisiones = 0
             uid_ch     = checadas.get(uid, {})
             just_emp_personal = just_rfc.get(rfc, {})
             just_emp_global   = just_rfc.get("__GLOBAL__", {})
@@ -1117,6 +1128,7 @@ def render_checador():
             dias_falta = []
             dias_just  = []
             det_retardos_emp = []
+            det_omisiones = []
 
             for dia_dt in dias:
                 if dia_dt.date() in festivos:
@@ -1163,7 +1175,16 @@ def render_checador():
                     except: pass
 
                 if not entrada_real:
-                    # Sin checada de entrada: asistió pero falta el dato; lo decides tú.
+                    # Sin checada de entrada: asistió pero falta el dato (no es retardo).
+                    omisiones += 1
+                    det_omisiones.append({
+                        "Empleado": nombre,
+                        "Fecha": dia_dt.strftime("%d/%m/%Y"),
+                        "Día": DIAS_NOMBRE.get(nd, nd),
+                        "Omitió": "Entrada",
+                        "Hora prog. entrada": ep,
+                        "Checada registrada": f"Salida {salida_real}" if salida_real else "—",
+                    })
                     detalle_faltas.append({
                         "nombre": nombre, "fecha": dia_dt.date(), "nd": nd,
                         "prog_entrada": ep, "checada_entrada": "",
@@ -1203,7 +1224,7 @@ def render_checador():
                 # Detectar regreso tardío en pase de salida con retorno
                 if just_tipo and "retorno:" in str(just_tipo) and salida_real:
                     try:
-                        hora_ret_aut = just_tipo.split("retorno:")[1].strip()
+                        hora_ret_aut = just_tipo.split("retorno:")[1].split("|")[0].strip()
                         ret_aut_dt   = datetime.strptime(hora_ret_aut, "%H:%M")
                         sal_real_dt  = datetime.strptime(salida_real,  "%H:%M")
                         mins_tarde   = (sal_real_dt.hour - ret_aut_dt.hour)*60 + (sal_real_dt.minute - ret_aut_dt.minute)
@@ -1222,6 +1243,18 @@ def render_checador():
                             })
                     except: pass
 
+                # Detectar salida omitida: checó entrada pero no salida
+                if entrada_real and not salida_real and sp:
+                    omisiones += 1
+                    det_omisiones.append({
+                        "Empleado": nombre,
+                        "Fecha": dia_dt.strftime("%d/%m/%Y"),
+                        "Día": DIAS_NOMBRE.get(nd, nd),
+                        "Omitió": "Salida",
+                        "Hora prog. entrada": ep,
+                        "Checada registrada": f"Entrada {entrada_real}",
+                    })
+
                 detalle_faltas.append({
                     "nombre": nombre, "fecha": dia_dt.date(), "nd": nd,
                     "prog_entrada": ep, "checada_entrada": entrada_real,
@@ -1230,6 +1263,8 @@ def render_checador():
                 })
                 detalle_retardos.extend(det_retardos_emp)
                 det_retardos_emp = []
+
+            detalle_omisiones.extend(det_omisiones)
 
             pct = round((asistidos+justif)/dias_prog*100) if dias_prog > 0 else 0
             resumen.append({
@@ -1240,14 +1275,15 @@ def render_checador():
                 "Faltas": faltas,
                 "Justificadas": justif,
                 "Retardos": retardos,
+                "Omisiones": omisiones,
                 "% Asistencia": f"{pct}%",
                 "Días que faltó": ", ".join(dias_falta) if dias_falta else "—",
                 "Días justificados": ", ".join(dias_just) if dias_just else "—",
             })
 
-        return pd.DataFrame(resumen), pd.DataFrame(detalle_retardos), periodo, fecha_ini, fecha_fin
+        return pd.DataFrame(resumen), pd.DataFrame(detalle_retardos), pd.DataFrame(detalle_omisiones), periodo, fecha_ini, fecha_fin
 
-    def generar_excel_reporte(df_res, df_ret, periodo, fecha_ini, fecha_fin, umbral):
+    def generar_excel_reporte(df_res, df_ret, df_omis, periodo, fecha_ini, fecha_fin, umbral):
         wb = Workbook()
         AZUL    = "002F6C"
         BLANCO  = "FFFFFF"
@@ -1407,6 +1443,33 @@ def render_checador():
             ws3.column_dimensions[col].width = 14
         ws3.column_dimensions["H"].width = 30
 
+        # ── Hoja 4: Entradas/Salidas omitidas ──
+        ws4 = wb.create_sheet("Checadas omitidas")
+        ws4.merge_cells("A1:F1")
+        ws4["A1"] = f"ENTRADAS / SALIDAS OMITIDAS — {mes_nombre.upper()} {fecha_ini.year}"
+        ws4["A1"].font = Font(bold=True, size=11, name="Arial", color=AZUL)
+        ws4["A1"].alignment = center()
+        ws4.append([])
+        ws4.append(["NOTA: estos casos NO son retardos. El empleado asistió pero olvidó una checada. Requieren tu revisión."])
+        hdrs4 = ["Empleado","Fecha","Día","Omitió","Hora prog. entrada","Checada registrada"]
+        ws4.append(hdrs4)
+        hrow4 = ws4.max_row
+        for col, _ in enumerate(hdrs4, 1):
+            c = ws4.cell(hrow4, col)
+            c.font = hdr_font(); c.fill = fill(AZUL); c.alignment = center(); c.border = border()
+        if df_omis is not None and not df_omis.empty:
+            for _, r in df_omis.iterrows():
+                ws4.append([r["Empleado"],r["Fecha"],r["Día"],r["Omitió"],r["Hora prog. entrada"],r["Checada registrada"]])
+                drow = ws4.max_row
+                for col in range(1,7):
+                    c = ws4.cell(drow, col)
+                    c.border = border(); c.font = Font(size=9, name="Arial")
+                    c.alignment = center() if col > 1 else left()
+                    c.fill = fill(AMARILLO)
+        ws4.column_dimensions["A"].width = 35
+        for col in ["B","C","D","E","F"]:
+            ws4.column_dimensions[col].width = 16
+
         buf = _io.BytesIO()
         wb.save(buf)
         return buf.getvalue()
@@ -1477,7 +1540,7 @@ def render_checador():
             just_rfc = build_justificantes_rfc(economicos, incapacidades, incidencias_p, fi, ff, eventos_inst)
 
         try:
-            df_res, df_ret, periodo, fecha_ini, fecha_fin = parse_report_ch(
+            df_res, df_ret, df_omis, periodo, fecha_ini, fecha_fin = parse_report_ch(
                 uploaded_xls.getvalue(), empleados_ch, festivos_ch,
                 historial_df, just_rfc, umbral_r)
 
@@ -1501,6 +1564,11 @@ def render_checador():
             if not df_ret.empty:
                 with st.expander(f"📋 Detalle de retardos ({len(df_ret)} registros)"):
                     st.dataframe(df_ret, use_container_width=True, hide_index=True)
+
+            if df_omis is not None and not df_omis.empty:
+                st.warning(f"⚠️ {len(df_omis)} entrada(s)/salida(s) omitida(s) — el empleado asistió pero olvidó checar. No son retardos; revísalas.")
+                with st.expander(f"📋 Checadas omitidas ({len(df_omis)} registros)"):
+                    st.dataframe(df_omis, use_container_width=True, hide_index=True)
 
             # ── Selector de avisos de faltas ────────────────────────────
             con_faltas = df_res[df_res["Faltas"] > 0].copy()
@@ -1540,7 +1608,7 @@ def render_checador():
                 except Exception as e:
                     st.error(f"No se pudo guardar: {e}")
 
-            excel_bytes = generar_excel_reporte(df_res, df_ret, periodo, fecha_ini, fecha_fin, umbral_r)
+            excel_bytes = generar_excel_reporte(df_res, df_ret, df_omis, periodo, fecha_ini, fecha_fin, umbral_r)
             st.download_button(
                 "⬇️ Descargar reporte Excel (3 hojas)",
                 data=excel_bytes,
@@ -1601,9 +1669,8 @@ def vista_empleado():
     horas_pases      = horas_pases_mes(rfc, incidencias)
 
     # ── Tablero de saldos ────────────────────────
-    col1, col3 = st.columns(2)
+    col1, _col2 = st.columns(2)
     col1.metric("📅 Días económicos disponibles", dias_disponibles, delta=f"-{dias_usados} ejercidos")
-    col3.metric("🚨 Retardos este mes", 0)
 
     st.divider()
 
