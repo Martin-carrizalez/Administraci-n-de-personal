@@ -1175,7 +1175,18 @@ def render_checador():
                     except: pass
 
                 if not entrada_real:
-                    # Sin checada de entrada: asistió pero falta el dato (no es retardo).
+                    # Si hay un pase de entrada justificado ese día, la entrada está cubierta:
+                    # no es omisión.
+                    if just_tipo and str(just_tipo).startswith("Pase de entrada"):
+                        estado = "Asistió"
+                        detalle_faltas.append({
+                            "nombre": nombre, "fecha": dia_dt.date(), "nd": nd,
+                            "prog_entrada": ep, "checada_entrada": "",
+                            "checada_salida": salida_real, "retardo_min": 0,
+                            "estado": "Justificado (pase de entrada)", "justificante": just_tipo
+                        })
+                        continue
+                    # Sin checada de entrada y sin justificante: asistió pero falta el dato.
                     omisiones += 1
                     det_omisiones.append({
                         "Empleado": nombre,
@@ -1310,22 +1321,22 @@ def render_checador():
         ws1.title = "Reporte Ejecutivo"
         mes_nombre = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][fecha_ini.month-1]
 
-        ws1.merge_cells("A1:I1")
+        ws1.merge_cells("A1:J1")
         ws1["A1"] = "SECRETARÍA DE EDUCACIÓN JALISCO"
         ws1["A1"].font = Font(bold=True, size=13, name="Arial", color=AZUL)
         ws1["A1"].alignment = center()
 
-        ws1.merge_cells("A2:I2")
+        ws1.merge_cells("A2:J2")
         ws1["A2"] = "DIRECCIÓN DE FORMACIÓN CONTINUA"
         ws1["A2"].font = Font(bold=True, size=12, name="Arial", color=AZUL)
         ws1["A2"].alignment = center()
 
-        ws1.merge_cells("A3:I3")
+        ws1.merge_cells("A3:J3")
         ws1["A3"] = f"REPORTE DE ASISTENCIA — {mes_nombre.upper()} {fecha_ini.year}"
         ws1["A3"].font = Font(bold=True, size=11, name="Arial")
         ws1["A3"].alignment = center()
 
-        ws1.merge_cells("A4:I4")
+        ws1.merge_cells("A4:J4")
         ws1["A4"] = (f"Período: {fecha_ini.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')}  |  "
                      f"Justificantes: días económicos, incapacidades, comisiones y pases aplicados  |  "
                      f"Tolerancia retardo: {umbral} min")
@@ -1335,7 +1346,7 @@ def render_checador():
 
         ws1.append([])
 
-        hdrs = ["Empleado","Días prog.","Asistidos","Faltas","Justificadas","Retardos","% Asistencia","Días que faltó","Días justificados"]
+        hdrs = ["Empleado","Días prog.","Asistidos","Faltas","Justificadas","Retardos","Omisiones","% Asistencia","Días que faltó","Días justificados"]
         ws1.append(hdrs)
         hrow = ws1.max_row
         for col, _ in enumerate(hdrs, 1):
@@ -1350,11 +1361,11 @@ def render_checador():
             pct    = int(str(r["% Asistencia"]).replace("%","") or 0)
             bg = ROJO if faltas >= 10 or pct < 75 else (AMARILLO if faltas >= 3 or pct < 90 else (VERDE if r["Justificadas"] > 0 else BLANCO))
             row_data = [r["Empleado"], r["Días prog."], r["Asistidos"], r["Faltas"],
-                        r["Justificadas"], r["Retardos"], r["% Asistencia"],
+                        r["Justificadas"], r["Retardos"], r.get("Omisiones", 0), r["% Asistencia"],
                         r["Días que faltó"], r["Días justificados"]]
             ws1.append(row_data)
             drow = ws1.max_row
-            for col in range(1, 10):
+            for col in range(1, 11):
                 c = ws1.cell(drow, col)
                 c.fill      = fill(bg)
                 c.border    = border()
@@ -1371,10 +1382,10 @@ def render_checador():
             c.alignment = center()
 
         ws1.column_dimensions["A"].width = 35
-        for col in ["B","C","D","E","F","G"]:
+        for col in ["B","C","D","E","F","G","H"]:
             ws1.column_dimensions[col].width = 12
-        ws1.column_dimensions["H"].width = 45
         ws1.column_dimensions["I"].width = 45
+        ws1.column_dimensions["J"].width = 45
 
         # ── Hoja 2: Detalle faltas ──────────────────────────────────────────
         ws2 = wb.create_sheet("Detalle faltas y justificantes")
@@ -1795,7 +1806,7 @@ def vista_empleado():
             c1.metric("Faltas totales",        faltas_tot)
             c2.metric("Faltas justificadas",   justis)
             c3.metric("Faltas no justificadas",nojust)
-            st.caption(f"Período: {fila.get('PERIODO','')} · Retardos: {int(fila.get('RETARDOS',0) or 0)}")
+            st.caption(f"Período: {fila.get('PERIODO','')}")
             if fila.get("DIAS_FALTA"):
                 st.caption(f"Días que faltaste: {fila.get('DIAS_FALTA')}")
 
@@ -2876,7 +2887,7 @@ def main():
         if st.button("📞 Directorio DFC"):
             st.session_state["vista"] = "directorio"
             st.rerun()
-        if st.button("🤖 Pregúntale a ARI"):
+        if st.button("🤖 Pregúntale a ARI la IA de RH"):
             st.session_state["vista"] = "ari"
             st.rerun()
         if st.button("🏠 Inicio"):
