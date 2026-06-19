@@ -35,6 +35,7 @@ TIPO_LABELS = {
     "PEN": "Pase de entrada",
     "COM": "Comisión",
     "CHO": "Cambio de horario",
+    "RGU": "Reposición de guardias",
 }
 if HABILITAR_CUMPLEANOS:
     TIPO_LABELS["CUM"] = "Día de cumpleaños"
@@ -181,6 +182,63 @@ def cargar_asistencia_mes():
         return pd.DataFrame(data) if data else pd.DataFrame(columns=ASISTENCIA_HEADERS)
     except Exception:
         return pd.DataFrame(columns=ASISTENCIA_HEADERS)
+
+# ── Observaciones de faltas: histórico permanente por RFC + fecha ──
+OBS_TAB = "Observaciones_Faltas"
+OBS_HEADERS = ["RFC", "NOMBRE", "FECHA_FALTA", "OBSERVACION", "FECHA_REGISTRO"]
+
+def _ws_observaciones():
+    client = get_client()
+    sh = client.open_by_key(st.secrets["sheet_checador_id"])
+    try:
+        return sh.worksheet(OBS_TAB)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(OBS_TAB, rows=2, cols=len(OBS_HEADERS))
+        ws.append_row(OBS_HEADERS)
+        return ws
+
+@st.cache_data(ttl=300)
+def cargar_observaciones():
+    try:
+        ws = _ws_observaciones()
+        data = ws.get_all_records(numericise_ignore=["all"])
+        return pd.DataFrame(data) if data else pd.DataFrame(columns=OBS_HEADERS)
+    except Exception:
+        return pd.DataFrame(columns=OBS_HEADERS)
+
+def guardar_observaciones(nuevas: list[dict]):
+    """Agrega/actualiza observaciones por RFC+fecha sin borrar el histórico.
+    nuevas: [{RFC, NOMBRE, FECHA_FALTA, OBSERVACION}, ...]"""
+    if not nuevas:
+        return
+    ws = _ws_observaciones()
+    existentes = ws.get_all_records(numericise_ignore=["all"])
+    # índice por (RFC, FECHA_FALTA) → número de fila (2-based)
+    idx = {}
+    for i, row in enumerate(existentes, start=2):
+        idx[(str(row.get("RFC","")).upper(), str(row.get("FECHA_FALTA","")))] = i
+    ahora = datetime.now(pytz.timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M")
+    from gspread.cell import Cell
+    actualizaciones, nuevas_filas = [], []
+    for n in nuevas:
+        rfc_n = str(n.get("RFC","")).upper()
+        fecha_n = str(n.get("FECHA_FALTA",""))
+        obs = str(n.get("OBSERVACION","")).strip()
+        if not obs:
+            continue
+        clave = (rfc_n, fecha_n)
+        if clave in idx:
+            fila = idx[clave]
+            actualizaciones.append(Cell(fila, 4, obs))           # col OBSERVACION
+            actualizaciones.append(Cell(fila, 5, ahora))         # col FECHA_REGISTRO
+        else:
+            nuevas_filas.append([rfc_n, n.get("NOMBRE",""), fecha_n, obs, ahora])
+    if actualizaciones:
+        ws.update_cells(actualizaciones, value_input_option="USER_ENTERED")
+    if nuevas_filas:
+        ws.append_rows(nuevas_filas, value_input_option="USER_ENTERED")
+    cargar_observaciones.clear()
+
 
 
 # ─────────────────────────────────────────────
@@ -409,7 +467,7 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
     firma_jefe        = Paragraph(f"<br/><br/>___________________________<br/><b>Autoriza Jefe(a) Inmediato</b><br/>{jefe_pdf_texto}", estilo_firma)
     firma_vob         = Paragraph(f"<br/><br/>___________________________<br/><b>Vo.Bo. Titular del Área</b><br/>{NOMBRE_DIRECTORA}", estilo_firma)
 
-    if datos["tipo"] in ["ECO", "CHO"]:
+    if datos["tipo"] in ["ECO", "CHO", "RGU"]:
         t_firmas = Table([[firma_interesado, firma_jefe, firma_vob]], colWidths=[5.3*cm, 5.3*cm, 5.4*cm])
     else:
         t_firmas = Table([[firma_interesado, firma_jefe]], colWidths=[8*cm, 8*cm])
@@ -1003,6 +1061,8 @@ def render_checador():
                         if fi <= d.date() <= ff:
                             if tipo == "COM":
                                 resultado.setdefault(rfc, {})[d.date()] = "Comisión"
+                            elif tipo == "RGU":
+                                resultado.setdefault(rfc, {})[d.date()] = "Reposición de guardias"
                             elif tipo == "PEN":
                                 # Pase de entrada: justifica el retardo SOLO si trae motivo real.
                                 motivo_pen = str(r.get("MOTIVO",""))
@@ -1294,7 +1354,7 @@ def render_checador():
 
         return pd.DataFrame(resumen), pd.DataFrame(detalle_retardos), pd.DataFrame(detalle_omisiones), periodo, fecha_ini, fecha_fin
 
-    def generar_excel_reporte(df_res, df_ret, df_omis, periodo, fecha_ini, fecha_fin, umbral):
+    def generar_excel_reporte(df_res, df_ret, df_omis, df_obs, periodo, fecha_ini, fecha_fin, umbral):
         wb = Workbook()
         AZUL    = "002F6C"
         BLANCO  = "FFFFFF"
@@ -1320,6 +1380,18 @@ def render_checador():
         ws1 = wb.active
         ws1.title = "Reporte Ejecutivo"
         mes_nombre = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][fecha_ini.month-1]
+
+        # Logo institucional (si existe el archivo)
+        try:
+            from openpyxl.drawing.image import Image as XLImage
+            if os.path.exists("logos_gris.png"):
+                logo_img = XLImage("logos_gris.png")
+                logo_img.width  = 220
+                logo_img.height = 55
+                ws1.add_image(logo_img, "A1")
+                ws1.row_dimensions[1].height = 45
+        except Exception:
+            pass
 
         ws1.merge_cells("A1:J1")
         ws1["A1"] = "SECRETARÍA DE EDUCACIÓN JALISCO"
@@ -1387,6 +1459,28 @@ def render_checador():
         ws1.column_dimensions["I"].width = 45
         ws1.column_dimensions["J"].width = 45
 
+        # ── Bloque de firma / Vo.Bo. (aval para archivo y auditoría) ──
+        ws1.append([]); ws1.append([]); ws1.append([])
+        frow = ws1.max_row
+        ws1.merge_cells(start_row=frow, start_column=4, end_row=frow, end_column=7)
+        cf = ws1.cell(frow, 4)
+        cf.value = "_______________________________________"
+        cf.alignment = center()
+        ws1.append([])
+        nrow = ws1.max_row
+        ws1.merge_cells(start_row=nrow, start_column=4, end_row=nrow, end_column=7)
+        cn = ws1.cell(nrow, 4)
+        cn.value = "Vo.Bo.  Mtra. Claudia Gisela Ramírez Monroy"
+        cn.font = Font(bold=True, size=10, name="Arial", color=AZUL)
+        cn.alignment = center()
+        ws1.append([])
+        crow = ws1.max_row
+        ws1.merge_cells(start_row=crow, start_column=4, end_row=crow, end_column=7)
+        cc = ws1.cell(crow, 4)
+        cc.value = "Encargada del Despacho de la Dirección de Formación Continua"
+        cc.font = Font(size=9, name="Arial", color="555555")
+        cc.alignment = center()
+
         # ── Hoja 2: Detalle faltas ──────────────────────────────────────────
         ws2 = wb.create_sheet("Detalle faltas y justificantes")
         ws2.merge_cells("A1:E1")
@@ -1395,7 +1489,7 @@ def render_checador():
         ws2["A1"].alignment = center()
         ws2.append([])
 
-        hdrs2 = ["Empleado","Días prog.","Faltas","Justificadas","Días que faltó / Justificante"]
+        hdrs2 = ["Empleado","Días prog.","Faltas","Justificadas","Días que faltó / Justificante","Observación de Dirección"]
         ws2.append(hdrs2)
         hrow2 = ws2.max_row
         for col, _ in enumerate(hdrs2, 1):
@@ -1409,9 +1503,20 @@ def render_checador():
                 detalle_txt += "FALTA: " + r["Días que faltó"]
             if r["Días justificados"] != "—":
                 detalle_txt += (" | " if detalle_txt else "") + "JUST: " + r["Días justificados"]
-            ws2.append([r["Empleado"], r["Días prog."], r["Faltas"], r["Justificadas"], detalle_txt])
+            # Observaciones del histórico, por cada fecha de falta
+            obs_txt = ""
+            if df_obs is not None and not df_obs.empty:
+                rfc_e = str(r.get("RFC","")).upper()
+                fechas_falta = [f.strip() for f in str(r["Días que faltó"]).split(",") if f.strip() and r["Días que faltó"] != "—"]
+                partes = []
+                for ff_ in fechas_falta:
+                    m = df_obs[(df_obs["RFC"].astype(str).str.upper()==rfc_e) & (df_obs["FECHA_FALTA"].astype(str)==ff_)]
+                    if not m.empty and str(m.iloc[0]["OBSERVACION"]).strip():
+                        partes.append(f"{ff_}: {m.iloc[0]['OBSERVACION']}")
+                obs_txt = " | ".join(partes)
+            ws2.append([r["Empleado"], r["Días prog."], r["Faltas"], r["Justificadas"], detalle_txt, obs_txt])
             drow = ws2.max_row
-            for col in range(1,6):
+            for col in range(1,7):
                 c = ws2.cell(drow, col)
                 c.border = border(); c.font = Font(size=9, name="Arial")
                 c.alignment = center() if col > 1 else left()
@@ -1419,7 +1524,8 @@ def render_checador():
         ws2.column_dimensions["A"].width = 35
         for col in ["B","C","D"]:
             ws2.column_dimensions[col].width = 12
-        ws2.column_dimensions["E"].width = 70
+        ws2.column_dimensions["E"].width = 50
+        ws2.column_dimensions["F"].width = 45
 
         # ── Hoja 3: Detalle retardos ───────────────────────────────────────
         ws3 = wb.create_sheet("Detalle de retardos")
@@ -1588,18 +1694,44 @@ def render_checador():
                 st.success("No hay empleados con faltas en este período.")
                 avisar_set = set()
             else:
-                st.caption("Marca a quién quieres mostrarle el aviso de falta en su portal. "
-                           "El empleado lo verá al iniciar sesión.")
+                st.caption("Marca a quién mostrarle el aviso de falta en su portal y, si quieres, "
+                           "escribe una observación (ej. 'Dirección autorizó', 'final juegos magisteriales'). "
+                           "Las observaciones se guardan por fecha y se conservan entre reportes.")
+                obs_hist = cargar_observaciones()
                 avisar_set = set()
+                obs_capturadas = []  # {RFC, NOMBRE, FECHA_FALTA, OBSERVACION}
                 for _, r in con_faltas.iterrows():
-                    marcado = st.checkbox(
-                        f"**{r['Empleado']}** — {int(r['Faltas'])} falta(s): {r['Días que faltó']}",
-                        key=f"avisar_{r['RFC']}"
-                    )
-                    if marcado:
-                        avisar_set.add(str(r["RFC"]).upper())
+                    rfc_e = str(r["RFC"]).upper()
+                    dias_falta_txt = r["Días que faltó"] if r["Días que faltó"] != "—" else ""
+                    st.markdown(f"**{r['Empleado']}** — {int(r['Faltas'])} falta(s): {dias_falta_txt}")
+                    ca, cb = st.columns([1, 3])
+                    with ca:
+                        if st.checkbox("Avisar en portal", key=f"avisar_{rfc_e}"):
+                            avisar_set.add(rfc_e)
+                    with cb:
+                        # Una observación por cada fecha de falta del empleado
+                        fechas_falta = [f.strip() for f in dias_falta_txt.split(",") if f.strip()]
+                        for ffalta in fechas_falta:
+                            prev = ""
+                            if not obs_hist.empty:
+                                m = obs_hist[
+                                    (obs_hist["RFC"].astype(str).str.upper() == rfc_e) &
+                                    (obs_hist["FECHA_FALTA"].astype(str) == ffalta)
+                                ]
+                                if not m.empty:
+                                    prev = str(m.iloc[0]["OBSERVACION"])
+                            val = st.text_input(
+                                f"Observación {ffalta}",
+                                value=prev,
+                                key=f"obs_{rfc_e}_{ffalta}"
+                            )
+                            obs_capturadas.append({
+                                "RFC": rfc_e, "NOMBRE": r["Empleado"],
+                                "FECHA_FALTA": ffalta, "OBSERVACION": val
+                            })
+                    st.divider()
 
-            if st.button("💾 Guardar reporte y avisos en el portal", type="primary"):
+            if st.button("💾 Guardar reporte, avisos y observaciones", type="primary"):
                 filas = []
                 for _, r in df_res.iterrows():
                     rfc_e = str(r.get("RFC","")).upper()
@@ -1615,13 +1747,14 @@ def render_checador():
                     })
                 try:
                     guardar_asistencia_mes(filas, periodo)
-                    st.success(f"Guardado. {len(avisar_set)} empleado(s) verán el aviso en su portal.")
+                    guardar_observaciones(obs_capturadas if not con_faltas.empty else [])
+                    st.success(f"Guardado. {len(avisar_set)} aviso(s) en portal · observaciones conservadas por fecha.")
                 except Exception as e:
                     st.error(f"No se pudo guardar: {e}")
 
-            excel_bytes = generar_excel_reporte(df_res, df_ret, df_omis, periodo, fecha_ini, fecha_fin, umbral_r)
+            excel_bytes = generar_excel_reporte(df_res, df_ret, df_omis, cargar_observaciones(), periodo, fecha_ini, fecha_fin, umbral_r)
             st.download_button(
-                "⬇️ Descargar reporte Excel (3 hojas)",
+                "⬇️ Descargar reporte Excel (4 hojas)",
                 data=excel_bytes,
                 file_name=f"Asistencia_{mes_nombre}_{fecha_ini.year}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1999,8 +2132,40 @@ def vista_empleado():
             st.caption("Recuerda que sin anexo tu solicitud puede quedar sin soporte documental.")
         enviar_solicitud(rfc, nombre, tipo, fi, ff, dias_hab, 0.0,
                          motivo, tiene_anexo, incidencias, archivo_anexo, jefe_inmediato=jefe_pdf)
-    # ── CAMBIO DE HORARIO ───────────────────────
-    elif tipo == "CHO":
+    # ── REPOSICIÓN DE GUARDIAS ──────────────────
+    elif tipo == "RGU":
+        st.info("Captura los días que repones a cambio de guardia(s) previamente realizada(s).")
+        col1, col2 = st.columns(2)
+        with col1:
+            fi = st.date_input("Fecha inicio reposición", value=date.today())
+        with col2:
+            ff = st.date_input("Fecha fin reposición", value=date.today())
+        dias_hab = 0
+        if ff < fi:
+            st.error("La fecha fin no puede ser anterior a la fecha inicio.")
+        else:
+            festivos = cargar_festivos()
+            dias_hab = dias_habiles_entre(fi, ff, festivos)
+            st.caption(f"Días a reponer: **{dias_hab}**")
+        fecha_guardia = st.text_input(
+            "Fecha(s) de la guardia que repones",
+            placeholder="27/04/2026",
+            help="Indica la fecha de la guardia realizada que compensas con estos días."
+        )
+        motivo = st.text_area("Observaciones (opcional)", max_chars=300)
+        archivo_anexo = st.file_uploader("Adjuntar formato de guardia / soporte (opcional)", type=["pdf","png","jpg","jpeg"])
+        tiene_anexo   = archivo_anexo is not None
+        motivo_rgu = f"Reposición de guardia | Guardia repuesta: {fecha_guardia}".strip()
+        if motivo:
+            motivo_rgu += f" | {motivo}"
+        if dias_hab == 0:
+            st.warning("Selecciona al menos un día hábil para reponer.")
+            return
+        if not fecha_guardia.strip():
+            st.warning("Indica la fecha de la guardia que estás reponiendo.")
+            return
+        enviar_solicitud(rfc, nombre, tipo, fi, ff, dias_hab, 0.0,
+                         motivo_rgu, tiene_anexo, incidencias, archivo_anexo, jefe_inmediato=jefe_pdf)
         fecha_inicio_cho = st.date_input("¿A partir de qué fecha aplica el cambio?", value=date.today())
         motivo      = st.text_area("Motivo del cambio de horario", max_chars=300)
         tiene_anexo = st.checkbox("¿Traerás documento de soporte (oficio, etc.)?")
