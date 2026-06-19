@@ -1067,9 +1067,14 @@ def render_checador():
                                 # Pase de entrada: justifica el retardo SOLO si trae motivo real.
                                 motivo_pen = str(r.get("MOTIVO",""))
                                 motivo_real = ""
-                                for linea in motivo_pen.split("\n"):
-                                    l = linea.strip()
-                                    if l and not l.lower().startswith("entrada") and not l.lower().startswith("pase de entrada"):
+                                # El motivo puede venir separado por saltos de línea o por " | "
+                                partes_mot = []
+                                for seg in motivo_pen.replace("|", "\n").split("\n"):
+                                    partes_mot.append(seg.strip())
+                                for l in partes_mot:
+                                    if (l and not l.lower().startswith("entrada")
+                                            and not l.lower().startswith("pase de entrada")
+                                            and not l.lower().startswith("salida")):
                                         motivo_real = l
                                         break
                                 if motivo_real:
@@ -1081,9 +1086,11 @@ def render_checador():
                                 hora_ret   = str(r.get("HORA_RETORNO","")).strip()
                                 # texto real del empleado (sin la línea técnica "Salida: hh:mm")
                                 mot_real = ""
-                                for linea in motivo_pse_raw.split("\n"):
-                                    l = linea.strip()
-                                    if l and not l.lower().startswith("pase de salida") and not l.lower().startswith("salida"):
+                                for seg in motivo_pse_raw.replace("|", "\n").split("\n"):
+                                    l = seg.strip()
+                                    if (l and not l.lower().startswith("pase de salida")
+                                            and not l.lower().startswith("salida")
+                                            and not l.lower().startswith("entrada")):
                                         mot_real = l
                                         break
                                 suf = f"|motivo:{mot_real}" if mot_real else ""
