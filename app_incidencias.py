@@ -43,16 +43,24 @@ if HABILITAR_CUMPLEANOS:
 
 DIAS_SEMANA = ["LUN", "MAR", "MIE", "JUE", "VIE"]
 
-DICT_JEFES = {
-    "Martín Ángel Carrizalez Piña":                         "Martín Ángel Carrizalez Piña",
-    "Maricela Esquivel Domínguez — Dir. Desarrollo Académico": "Maricela Esquivel Domínguez<br/>Directora de Desarrollo Académico",
-    "Ignacio Aguilar García — Dir. Gestión y Evaluación":    "Ignacio Aguilar García<br/>Director de Gestión y Evaluación de Profesionales de la Educación",
-    "Héctor Manuel Ramos Rico":                              "Héctor Manuel Ramos Rico",
-    "Hugo Verduzco Zuñiga":                                  "Hugo Verduzco Zuñiga",
-    "Erika Soledad Castillo Flores":                         "Erika Soledad Castillo Flores",
-}
+def formato_jefe_pdf(jefe_raw: str) -> str:
+    """Convierte el valor de la columna JEFE_INMEDIATO del Sheet Usuarios
+    (ej. 'Maricela Esquivel Domínguez — Dir. Desarrollo Académico')
+    al formato del PDF con salto de línea entre nombre y cargo.
+    El catálogo de jefes vive en el Sheet, no en el código."""
+    jefe_raw = str(jefe_raw or "").strip()
+    if not jefe_raw:
+        return ""
+    # Separa nombre y cargo por el guion largo (—) o el guion normal (-) con espacios
+    for sep in (" — ", " – ", " - "):
+        if sep in jefe_raw:
+            nombre, cargo = jefe_raw.split(sep, 1)
+            return f"{nombre.strip()}<br/>{cargo.strip()}"
+    return jefe_raw
 
-NOMBRE_DIRECTORA = "Claudia Gisela Ramírez Monroy<br/>Encargada del Despacho de la Dirección de Formación Continua"
+DIRECTORA_NOMBRE = "Claudia Gisela Ramírez Monroy"
+DIRECTORA_CARGO  = "Encargada del Despacho de la Dirección de Formación Continua"
+NOMBRE_DIRECTORA = f"{DIRECTORA_NOMBRE}<br/>{DIRECTORA_CARGO}"
 DRIVE_ANEXOS_FOLDER = "1LnQjrhjEKgKxFTJD8USLoiCpCKQHfOQC"
 
 COLUMNAS_HORARIO = {
@@ -277,6 +285,28 @@ def generar_folio(tipo: str, incidencias_df: pd.DataFrame) -> str:
         if len(partes) == 3 and partes[2].isdigit():
             nums.append(int(partes[2]))
     return f"{prefijo}{str(max(nums) + 1 if nums else 1).zfill(4)}"
+
+def festivos_en_periodo(festivos_df: pd.DataFrame, ini: date, fin: date) -> list:
+    """Devuelve [(fecha, descripcion), ...] de los festivos que caen dentro
+    del período [ini, fin], ordenados por fecha. Expande rangos."""
+    out = []
+    if festivos_df is None or festivos_df.empty:
+        return out
+    tiene_desc = any("DESCRIP" in str(c).upper() for c in festivos_df.columns)
+    col_desc = next((c for c in festivos_df.columns if "DESCRIP" in str(c).upper()), None)
+    for _, row in festivos_df.iterrows():
+        try:
+            fi = datetime.strptime(str(row["FECHA_INICIO"]), "%Y-%m-%d").date()
+            ff = datetime.strptime(str(row["FECHA_FIN"]), "%Y-%m-%d").date()
+            desc = str(row[col_desc]).strip() if col_desc else ""
+            d = fi
+            while d <= ff:
+                if ini <= d <= fin:
+                    out.append((d, desc))
+                d += timedelta(days=1)
+        except Exception:
+            pass
+    return sorted(out, key=lambda x: x[0])
 
 def festivos_a_set(festivos_df: pd.DataFrame) -> set:
     """Expande los rangos de la tab festivos a un set de fechas individuales."""
@@ -854,7 +884,7 @@ def login():
             emp_dict = {}
 
         jefe_auto = str(usr_row.get("JEFE_INMEDIATO", "")).strip()
-        jefe_pdf_auto = DICT_JEFES.get(jefe_auto, jefe_auto) if jefe_auto else ""
+        jefe_pdf_auto = formato_jefe_pdf(jefe_auto)
         st.session_state["rol"]             = "empleado"
         st.session_state["correo"]          = correo
         st.session_state["rfc"]             = rfc_input.upper()
@@ -1373,7 +1403,7 @@ def render_checador():
 
         return pd.DataFrame(resumen), pd.DataFrame(detalle_retardos), pd.DataFrame(detalle_omisiones), periodo, fecha_ini, fecha_fin
 
-    def generar_excel_reporte(df_res, df_ret, df_omis, df_obs, periodo, fecha_ini, fecha_fin, umbral):
+    def generar_excel_reporte(df_res, df_ret, df_omis, df_obs, periodo, fecha_ini, fecha_fin, umbral, fests_periodo=None):
         wb = Workbook()
         AZUL    = "002F6C"
         BLANCO  = "FFFFFF"
@@ -1479,25 +1509,37 @@ def render_checador():
         ws1.column_dimensions["J"].width = 45
         ws1.column_dimensions["K"].width = 45
 
+        # ── Días inhábiles / festivos del período ──
+        prox = lrow + 2
+        if fests_periodo:
+            ws1.merge_cells(start_row=prox, start_column=1, end_row=prox, end_column=4)
+            ct = ws1.cell(prox, 1)
+            ct.value = "DÍAS INHÁBILES / NO LABORABLES EN EL PERÍODO"
+            ct.font = Font(bold=True, size=9, name="Arial", color=AZUL)
+            MESES = {1:"enero",2:"febrero",3:"marzo",4:"abril",5:"mayo",6:"junio",7:"julio",8:"agosto",9:"septiembre",10:"octubre",11:"noviembre",12:"diciembre"}
+            for k, (fday, desc) in enumerate(fests_periodo, 1):
+                rr = prox + k
+                ws1.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=4)
+                cd = ws1.cell(rr, 1)
+                cd.value = f"• {fday.day} de {MESES[fday.month]}: {desc}"
+                cd.font = Font(size=8, name="Arial")
+            base = prox + len(fests_periodo) + 3
+        else:
+            base = prox + 3
+
         # ── Bloque de firma / Vo.Bo. (aval para archivo y auditoría) ──
-        ws1.append([]); ws1.append([]); ws1.append([])
-        frow = ws1.max_row
-        ws1.merge_cells(start_row=frow, start_column=4, end_row=frow, end_column=7)
-        cf = ws1.cell(frow, 4)
+        ws1.merge_cells(start_row=base, start_column=4, end_row=base, end_column=8)
+        cf = ws1.cell(base, 4)
         cf.value = "_______________________________________"
         cf.alignment = center()
-        ws1.append([])
-        nrow = ws1.max_row
-        ws1.merge_cells(start_row=nrow, start_column=4, end_row=nrow, end_column=7)
-        cn = ws1.cell(nrow, 4)
-        cn.value = "Vo.Bo.  Mtra. Claudia Gisela Ramírez Monroy"
+        ws1.merge_cells(start_row=base+1, start_column=4, end_row=base+1, end_column=8)
+        cn = ws1.cell(base+1, 4)
+        cn.value = f"Vo.Bo.  Mtra. {DIRECTORA_NOMBRE}"
         cn.font = Font(bold=True, size=10, name="Arial", color=AZUL)
         cn.alignment = center()
-        ws1.append([])
-        crow = ws1.max_row
-        ws1.merge_cells(start_row=crow, start_column=4, end_row=crow, end_column=7)
-        cc = ws1.cell(crow, 4)
-        cc.value = "Encargada del Despacho de la Dirección de Formación Continua"
+        ws1.merge_cells(start_row=base+2, start_column=4, end_row=base+2, end_column=8)
+        cc = ws1.cell(base+2, 4)
+        cc.value = DIRECTORA_CARGO
         cc.font = Font(size=9, name="Arial", color="555555")
         cc.alignment = center()
 
@@ -1611,13 +1653,13 @@ def render_checador():
         wb.save(buf)
         return buf.getvalue()
 
-    def generar_pdf_ejecutivo(df_res, periodo, fecha_ini, fecha_fin):
+    def generar_pdf_ejecutivo(df_res, periodo, fecha_ini, fecha_fin, fests_periodo=None):
         from reportlab.lib.pagesizes import landscape, letter as _letter
         mes_nombre = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][fecha_ini.month-1]
         AZUL = colors.HexColor("#002F6C")
         buf = _io.BytesIO()
         doc = SimpleDocTemplate(buf, pagesize=landscape(_letter),
-                                leftMargin=1*cm, rightMargin=1*cm, topMargin=1*cm, bottomMargin=1.5*cm)
+                                leftMargin=0.8*cm, rightMargin=0.8*cm, topMargin=0.8*cm, bottomMargin=1.2*cm)
         styles = getSampleStyleSheet()
         elems = []
 
@@ -1669,18 +1711,56 @@ def render_checador():
         t.setStyle(TableStyle(estilo))
         elems.append(t)
 
+        # Listado de días inhábiles / no laborables del período
+        if fests_periodo:
+            elems.append(Spacer(1, 0.5*cm))
+            MESES = {1:"enero",2:"febrero",3:"marzo",4:"abril",5:"mayo",6:"junio",7:"julio",8:"agosto",9:"septiembre",10:"octubre",11:"noviembre",12:"diciembre"}
+            st_fh = ParagraphStyle("fh", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Bold", textColor=AZUL)
+            st_fl = ParagraphStyle("fl", parent=styles["Normal"], fontSize=8)
+            elems.append(Paragraph("DÍAS INHÁBILES / NO LABORABLES EN EL PERÍODO", st_fh))
+            for fday, desc in fests_periodo:
+                elems.append(Paragraph(f"• {fday.day} de {MESES[fday.month]}: {desc}", st_fl))
+
         # Firma de Vo.Bo.
-        elems.append(Spacer(1, 1.5*cm))
+        elems.append(Spacer(1, 1.2*cm))
         st_fir = ParagraphStyle("fir", parent=styles["Normal"], fontSize=9, alignment=TA_CENTER)
         firma = Paragraph(
             "_______________________________________<br/>"
-            "<b>Vo.Bo.  Mtra. Claudia Gisela Ramírez Monroy</b><br/>"
-            "Encargada del Despacho de la Dirección de Formación Continua", st_fir)
+            f"<b>Vo.Bo.  Mtra. {DIRECTORA_NOMBRE}</b><br/>"
+            f"{DIRECTORA_CARGO}", st_fir)
         ft = Table([[firma]], colWidths=[24*cm])
         ft.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
         elems.append(ft)
 
-        doc.build(elems)
+        # Pie de página con numeración "Página X de Y" e identificación del reporte
+        pie_txt = f"Reporte de Asistencia — {mes_nombre} {fecha_ini.year} · DFC/SEJ"
+
+        from reportlab.pdfgen import canvas as _canvas
+
+        class NumberedCanvas(_canvas.Canvas):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._saved_states = []
+            def showPage(self):
+                self._saved_states.append(dict(self.__dict__))
+                self._startPage()
+            def save(self):
+                total = len(self._saved_states)
+                for state in self._saved_states:
+                    self.__dict__.update(state)
+                    self._draw_pie(total)
+                    super().showPage()
+                super().save()
+            def _draw_pie(self, total):
+                self.saveState()
+                self.setFont("Helvetica", 7)
+                self.setFillColor(colors.grey)
+                w, _h = landscape(_letter)
+                self.drawString(0.8*cm, 0.5*cm, pie_txt)
+                self.drawRightString(w - 0.8*cm, 0.5*cm, f"Página {self._pageNumber} de {total}")
+                self.restoreState()
+
+        doc.build(elems, canvasmaker=NumberedCanvas)
         return buf.getvalue()
 
     # ── UI ────────────────────────────────────────────────────────────────
@@ -1844,8 +1924,9 @@ def render_checador():
                 except Exception as e:
                     st.error(f"No se pudo guardar: {e}")
 
-            excel_bytes = generar_excel_reporte(df_res, df_ret, df_omis, cargar_observaciones(), periodo, fecha_ini, fecha_fin, umbral_r)
-            pdf_bytes   = generar_pdf_ejecutivo(df_res, periodo, fecha_ini, fecha_fin)
+            fests_periodo = festivos_en_periodo(festivos_ch, fecha_ini, fecha_fin)
+            excel_bytes = generar_excel_reporte(df_res, df_ret, df_omis, cargar_observaciones(), periodo, fecha_ini, fecha_fin, umbral_r, fests_periodo)
+            pdf_bytes   = generar_pdf_ejecutivo(df_res, periodo, fecha_ini, fecha_fin, fests_periodo)
             cdl1, cdl2 = st.columns(2)
             with cdl1:
                 st.download_button(
@@ -2054,8 +2135,20 @@ def vista_empleado():
         jefe_pdf = jefe_guardado
         st.caption(f"👤 Jefe inmediato: {jefe_guardado.split(chr(60))[0]}")
     else:
-        jefe_sel = st.selectbox("👤 Jefe inmediato que autoriza", options=list(DICT_JEFES.keys()))
-        jefe_pdf = DICT_JEFES[jefe_sel]
+        try:
+            usuarios_df = cargar_usuarios()
+            jefes_unicos = sorted({
+                str(j).strip() for j in usuarios_df.get("JEFE_INMEDIATO", [])
+                if str(j).strip()
+            })
+        except Exception:
+            jefes_unicos = []
+        if jefes_unicos:
+            jefe_sel = st.selectbox("👤 Jefe inmediato que autoriza", options=jefes_unicos)
+            jefe_pdf = formato_jefe_pdf(jefe_sel)
+        else:
+            jefe_manual = st.text_input("👤 Jefe inmediato que autoriza (nombre — cargo)")
+            jefe_pdf = formato_jefe_pdf(jefe_manual)
 
     tipo = st.selectbox(
         "Tipo de incidencia",
@@ -2638,7 +2731,7 @@ def vista_admin():
                     match_usr = usuarios_df[usuarios_df["RFC"].astype(str).str.upper().str.strip() == str(row["RFC"]).upper().strip()]
                     if not match_usr.empty:
                         jefe_col = match_usr.iloc[0].get("JEFE_INMEDIATO", "")
-                        jefe_pdf_regen = DICT_JEFES.get(str(jefe_col).strip(), str(jefe_col).strip())
+                        jefe_pdf_regen = formato_jefe_pdf(str(jefe_col).strip())
                 except: pass
                 datos_pdf = {
                     "folio":          row["FOLIO"],
