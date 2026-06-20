@@ -290,7 +290,7 @@ def festivos_en_periodo(festivos_df: pd.DataFrame, ini: date, fin: date) -> list
     """Devuelve [(fecha, descripcion), ...] de los festivos que caen dentro
     del período [ini, fin], ordenados por fecha. Expande rangos."""
     out = []
-    if festivos_df is None or festivos_df.empty:
+    if festivos_df is None or not hasattr(festivos_df, "empty") or festivos_df.empty:
         return out
     tiene_desc = any("DESCRIP" in str(c).upper() for c in festivos_df.columns)
     col_desc = next((c for c in festivos_df.columns if "DESCRIP" in str(c).upper()), None)
@@ -494,12 +494,24 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
     estilo_firma = ParagraphStyle("firmas", parent=styles["Normal"], fontSize=8, fontName="Helvetica", alignment=TA_CENTER)
     nombre_interesado = datos.get("nombre", "Servidor(a) Público(a)")
     jefe_pdf_texto    = datos.get("jefe_inmediato", "Nombre y Firma")
+    # Director(a) General: viene del Sheet (columna DIRECTOR_GENERAL); si no, usa la constante
+    director_pdf      = datos.get("director_general") or NOMBRE_DIRECTORA
+
+    # ¿El jefe inmediato es la misma persona que el/la director(a) general?
+    def _solo_nombre(txt):
+        return str(txt or "").split("<br/>")[0].split("—")[0].split(" - ")[0].strip().lower()
+    jefe_es_director = _solo_nombre(jefe_pdf_texto) and _solo_nombre(jefe_pdf_texto) == _solo_nombre(director_pdf)
+
     firma_interesado  = Paragraph(f"<br/><br/>___________________________<br/><b>Firma del Interesado</b><br/>{nombre_interesado}", estilo_firma)
     firma_jefe        = Paragraph(f"<br/><br/>___________________________<br/><b>Autoriza Jefe(a) Inmediato</b><br/>{jefe_pdf_texto}", estilo_firma)
-    firma_vob         = Paragraph(f"<br/><br/>___________________________<br/><b>Vo.Bo. Titular del Área</b><br/>{NOMBRE_DIRECTORA}", estilo_firma)
+    firma_vob         = Paragraph(f"<br/><br/>___________________________<br/><b>Vo.Bo. Titular del Área</b><br/>{director_pdf}", estilo_firma)
 
     if datos["tipo"] in ["ECO", "CHO", "RGU"]:
-        t_firmas = Table([[firma_interesado, firma_jefe, firma_vob]], colWidths=[5.3*cm, 5.3*cm, 5.4*cm])
+        if jefe_es_director:
+            # La titular es a su vez la jefa inmediata: solo se pone Vo.Bo. del titular.
+            t_firmas = Table([[firma_interesado, firma_vob]], colWidths=[8*cm, 8*cm])
+        else:
+            t_firmas = Table([[firma_interesado, firma_jefe, firma_vob]], colWidths=[5.3*cm, 5.3*cm, 5.4*cm])
     else:
         t_firmas = Table([[firma_interesado, firma_jefe]], colWidths=[8*cm, 8*cm])
 
@@ -885,6 +897,8 @@ def login():
 
         jefe_auto = str(usr_row.get("JEFE_INMEDIATO", "")).strip()
         jefe_pdf_auto = formato_jefe_pdf(jefe_auto)
+        director_auto = formato_jefe_pdf(str(usr_row.get("DIRECTOR_GENERAL", "")).strip())
+        st.session_state["director_general"] = director_auto
         st.session_state["rol"]             = "empleado"
         st.session_state["correo"]          = correo
         st.session_state["rfc"]             = rfc_input.upper()
@@ -1924,7 +1938,11 @@ def render_checador():
                 except Exception as e:
                     st.error(f"No se pudo guardar: {e}")
 
-            fests_periodo = festivos_en_periodo(festivos_ch, fecha_ini, fecha_fin)
+            try:
+                festivos_df_desc = cargar_festivos()
+            except Exception:
+                festivos_df_desc = pd.DataFrame()
+            fests_periodo = festivos_en_periodo(festivos_df_desc, fecha_ini, fecha_fin)
             excel_bytes = generar_excel_reporte(df_res, df_ret, df_omis, cargar_observaciones(), periodo, fecha_ini, fecha_fin, umbral_r, fests_periodo)
             pdf_bytes   = generar_pdf_ejecutivo(df_res, periodo, fecha_ini, fecha_fin, fests_periodo)
             cdl1, cdl2 = st.columns(2)
@@ -2465,6 +2483,7 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
             "link_anexo":      link_anexo,
             "subtipo_label":   subtipo_label if subtipo_label else TIPO_LABELS[tipo],
             "jefe_inmediato":   jefe_inmediato,
+            "director_general": st.session_state.get("director_general", ""),
             "hora_retorno":    hora_retorno,
         }
         if tipo == "ECO":
