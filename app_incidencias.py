@@ -1548,7 +1548,7 @@ def render_checador():
         cf.alignment = center()
         ws1.merge_cells(start_row=base+1, start_column=4, end_row=base+1, end_column=8)
         cn = ws1.cell(base+1, 4)
-        cn.value = f"Vo.Bo.  Mtra. {DIRECTORA_NOMBRE}"
+        cn.value = f"Vo.Bo.  {DIRECTORA_NOMBRE}"
         cn.font = Font(bold=True, size=10, name="Arial", color=AZUL)
         cn.alignment = center()
         ws1.merge_cells(start_row=base+2, start_column=4, end_row=base+2, end_column=8)
@@ -1740,7 +1740,7 @@ def render_checador():
         st_fir = ParagraphStyle("fir", parent=styles["Normal"], fontSize=9, alignment=TA_CENTER)
         firma = Paragraph(
             "_______________________________________<br/>"
-            f"<b>Vo.Bo.  Mtra. {DIRECTORA_NOMBRE}</b><br/>"
+            f"<b>Vo.Bo.  {DIRECTORA_NOMBRE}</b><br/>"
             f"{DIRECTORA_CARGO}", st_fir)
         ft = Table([[firma]], colWidths=[24*cm])
         ft.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
@@ -1940,9 +1940,15 @@ def render_checador():
 
             try:
                 festivos_df_desc = cargar_festivos()
-            except Exception:
+            except Exception as e:
                 festivos_df_desc = pd.DataFrame()
+                st.warning(f"No se pudieron cargar los días festivos para el listado: {e}")
             fests_periodo = festivos_en_periodo(festivos_df_desc, fecha_ini, fecha_fin)
+            if fests_periodo:
+                st.caption(f"🗓️ Días inhábiles en el período incluidos en el reporte: "
+                           + ", ".join(f"{d.day}/{d.month}" for d, _ in fests_periodo))
+            else:
+                st.caption("🗓️ No se detectaron días inhábiles dentro del período del reporte.")
             excel_bytes = generar_excel_reporte(df_res, df_ret, df_omis, cargar_observaciones(), periodo, fecha_ini, fecha_fin, umbral_r, fests_periodo)
             pdf_bytes   = generar_pdf_ejecutivo(df_res, periodo, fecha_ini, fecha_fin, fests_periodo)
             cdl1, cdl2 = st.columns(2)
