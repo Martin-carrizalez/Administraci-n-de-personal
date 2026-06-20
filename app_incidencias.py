@@ -981,6 +981,34 @@ def render_checador():
         except:
             return pd.DataFrame()
 
+    def extraer_motivo_usuario(motivo_raw: str) -> str:
+        """Extrae el texto que escribió el empleado, quitando solo las etiquetas
+        técnicas exactas. Si tras limpiar queda algo, lo devuelve; si no queda
+        nada pero el usuario sí escribió, devuelve el texto completo (fallback).
+        Nunca borra información del usuario."""
+        import re as _re
+        if not motivo_raw:
+            return ""
+        raw = str(motivo_raw).strip()
+        segmentos = [s.strip() for s in raw.replace("|", "\n").split("\n") if s.strip()]
+        utiles = []
+        for s in segmentos:
+            sl = s.lower()
+            # descartar SOLO etiquetas técnicas exactas
+            if sl in ("pase de entrada", "pase de salida", "pase de salida sin retorno",
+                      "pase de salida con retorno", "comisión", "comision"):
+                continue
+            # descartar "Entrada: 10:30" / "Salida: 14:00" / "Retorno: 15:00" (etiqueta + hora)
+            if _re.match(r'^(entrada|salida|retorno|hora)\s*:?\s*\d{1,2}[:.]\d{2}\s*$', sl):
+                continue
+            utiles.append(s)
+        if utiles:
+            return " ".join(utiles).strip()
+        # No quedó texto del usuario tras limpiar etiquetas técnicas → vacío.
+        # (No se devuelve el raw para no mostrar "Pase de entrada | Entrada: 10:30"
+        #  como si fuera un motivo escrito por el empleado.)
+        return ""
+
     def build_justificantes_rfc(economicos, incapacidades, incidencias_df, fi, ff, eventos_inst=None):
         """
         Retorna dict: {RFC_upper -> {date -> tipo_justificante}}
@@ -1064,35 +1092,17 @@ def render_checador():
                             elif tipo == "RGU":
                                 resultado.setdefault(rfc, {})[d.date()] = "Reposición de guardias"
                             elif tipo == "PEN":
-                                # Pase de entrada: justifica el retardo SOLO si trae motivo real.
-                                motivo_pen = str(r.get("MOTIVO",""))
-                                motivo_real = ""
-                                # El motivo puede venir separado por saltos de línea o por " | "
-                                partes_mot = []
-                                for seg in motivo_pen.replace("|", "\n").split("\n"):
-                                    partes_mot.append(seg.strip())
-                                for l in partes_mot:
-                                    if (l and not l.lower().startswith("entrada")
-                                            and not l.lower().startswith("pase de entrada")
-                                            and not l.lower().startswith("salida")):
-                                        motivo_real = l
-                                        break
+                                # Pase de entrada aprobado SIEMPRE justifica el retardo.
+                                # El motivo del empleado (si lo hay) es informativo.
+                                motivo_real = extraer_motivo_usuario(r.get("MOTIVO",""))
                                 if motivo_real:
                                     resultado.setdefault(rfc, {}).setdefault(d.date(), f"Pase de entrada|motivo:{motivo_real}")
-                                # sin motivo: no se registra → el retardo cuenta normal
+                                else:
+                                    resultado.setdefault(rfc, {}).setdefault(d.date(), "Pase de entrada")
                             elif tipo == "PSE":
-                                motivo_pse_raw = str(r.get("MOTIVO","")).strip()
-                                motivo_pse = motivo_pse_raw.lower()
+                                motivo_pse = str(r.get("MOTIVO","")).lower()
                                 hora_ret   = str(r.get("HORA_RETORNO","")).strip()
-                                # texto real del empleado (sin la línea técnica "Salida: hh:mm")
-                                mot_real = ""
-                                for seg in motivo_pse_raw.replace("|", "\n").split("\n"):
-                                    l = seg.strip()
-                                    if (l and not l.lower().startswith("pase de salida")
-                                            and not l.lower().startswith("salida")
-                                            and not l.lower().startswith("entrada")):
-                                        mot_real = l
-                                        break
+                                mot_real   = extraer_motivo_usuario(r.get("MOTIVO",""))
                                 suf = f"|motivo:{mot_real}" if mot_real else ""
                                 if "sin retorno" in motivo_pse:
                                     resultado.setdefault(rfc, {})[d.date()] = f"Pase de salida sin retorno{suf}"
@@ -1353,6 +1363,7 @@ def render_checador():
                 "Faltas": faltas,
                 "Justificadas": justif,
                 "Retardos": retardos,
+                "Min. retardo": retardos_min,
                 "Omisiones": omisiones,
                 "% Asistencia": f"{pct}%",
                 "Días que faltó": ", ".join(dias_falta) if dias_falta else "—",
@@ -1400,22 +1411,22 @@ def render_checador():
         except Exception:
             pass
 
-        ws1.merge_cells("A1:J1")
+        ws1.merge_cells("A1:K1")
         ws1["A1"] = "SECRETARÍA DE EDUCACIÓN JALISCO"
         ws1["A1"].font = Font(bold=True, size=13, name="Arial", color=AZUL)
         ws1["A1"].alignment = center()
 
-        ws1.merge_cells("A2:J2")
+        ws1.merge_cells("A2:K2")
         ws1["A2"] = "DIRECCIÓN DE FORMACIÓN CONTINUA"
         ws1["A2"].font = Font(bold=True, size=12, name="Arial", color=AZUL)
         ws1["A2"].alignment = center()
 
-        ws1.merge_cells("A3:J3")
+        ws1.merge_cells("A3:K3")
         ws1["A3"] = f"REPORTE DE ASISTENCIA — {mes_nombre.upper()} {fecha_ini.year}"
         ws1["A3"].font = Font(bold=True, size=11, name="Arial")
         ws1["A3"].alignment = center()
 
-        ws1.merge_cells("A4:J4")
+        ws1.merge_cells("A4:K4")
         ws1["A4"] = (f"Período: {fecha_ini.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')}  |  "
                      f"Justificantes: días económicos, incapacidades, comisiones y pases aplicados  |  "
                      f"Tolerancia retardo: {umbral} min")
@@ -1425,7 +1436,7 @@ def render_checador():
 
         ws1.append([])
 
-        hdrs = ["Empleado","Días prog.","Asistidos","Faltas","Justificadas","Retardos","Omisiones","% Asistencia","Días que faltó","Días justificados"]
+        hdrs = ["Empleado","Días prog.","Asistidos","Faltas","Justificadas","Retardos","Min. retardo","Omisiones","% Asistencia","Días que faltó","Días justificados"]
         ws1.append(hdrs)
         hrow = ws1.max_row
         for col, _ in enumerate(hdrs, 1):
@@ -1440,11 +1451,11 @@ def render_checador():
             pct    = int(str(r["% Asistencia"]).replace("%","") or 0)
             bg = ROJO if faltas >= 10 or pct < 75 else (AMARILLO if faltas >= 3 or pct < 90 else (VERDE if r["Justificadas"] > 0 else BLANCO))
             row_data = [r["Empleado"], r["Días prog."], r["Asistidos"], r["Faltas"],
-                        r["Justificadas"], r["Retardos"], r.get("Omisiones", 0), r["% Asistencia"],
+                        r["Justificadas"], r["Retardos"], r.get("Min. retardo", 0), r.get("Omisiones", 0), r["% Asistencia"],
                         r["Días que faltó"], r["Días justificados"]]
             ws1.append(row_data)
             drow = ws1.max_row
-            for col in range(1, 11):
+            for col in range(1, 12):
                 c = ws1.cell(drow, col)
                 c.fill      = fill(bg)
                 c.border    = border()
@@ -1463,8 +1474,9 @@ def render_checador():
         ws1.column_dimensions["A"].width = 35
         for col in ["B","C","D","E","F","G","H"]:
             ws1.column_dimensions[col].width = 12
-        ws1.column_dimensions["I"].width = 45
+        ws1.column_dimensions["I"].width = 12
         ws1.column_dimensions["J"].width = 45
+        ws1.column_dimensions["K"].width = 45
 
         # ── Bloque de firma / Vo.Bo. (aval para archivo y auditoría) ──
         ws1.append([]); ws1.append([]); ws1.append([])
@@ -1596,6 +1608,78 @@ def render_checador():
 
         buf = _io.BytesIO()
         wb.save(buf)
+        return buf.getvalue()
+
+    def generar_pdf_ejecutivo(df_res, periodo, fecha_ini, fecha_fin):
+        from reportlab.lib.pagesizes import landscape, letter as _letter
+        mes_nombre = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][fecha_ini.month-1]
+        AZUL = colors.HexColor("#002F6C")
+        buf = _io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=landscape(_letter),
+                                leftMargin=1*cm, rightMargin=1*cm, topMargin=1*cm, bottomMargin=1.5*cm)
+        styles = getSampleStyleSheet()
+        elems = []
+
+        # Encabezado con logo
+        st_tit = ParagraphStyle("tit", parent=styles["Normal"], fontSize=13, fontName="Helvetica-Bold",
+                                textColor=AZUL, alignment=TA_CENTER)
+        st_sub = ParagraphStyle("sub", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold",
+                                textColor=AZUL, alignment=TA_CENTER)
+        st_per = ParagraphStyle("per", parent=styles["Normal"], fontSize=8, alignment=TA_CENTER)
+        encab = Paragraph("SECRETARÍA DE EDUCACIÓN JALISCO<br/>DIRECCIÓN DE FORMACIÓN CONTINUA<br/>"
+                          f"<font size=11>REPORTE DE ASISTENCIA — {mes_nombre.upper()} {fecha_ini.year}</font>", st_tit)
+        if os.path.exists("logos_gris.png"):
+            logo_rl = RLImage("logos_gris.png", width=4.5*cm, height=1.2*cm)
+            head = Table([[logo_rl, encab]], colWidths=[5*cm, 19*cm])
+            head.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(0,0),(0,0),"LEFT")]))
+            elems.append(head)
+        else:
+            elems.append(encab)
+        elems.append(Spacer(1, 0.2*cm))
+        elems.append(Paragraph(f"Período: {fecha_ini.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')}", st_per))
+        elems.append(Spacer(1, 0.3*cm))
+
+        # Tabla
+        cols = ["Empleado","Días\nprog.","Asist.","Faltas","Justif.","Retardos","Min.\nretardo","Omis.","%"]
+        data = [cols]
+        for _, r in df_res.sort_values("Faltas", ascending=False).iterrows():
+            data.append([
+                r["Empleado"], r["Días prog."], r["Asistidos"], r["Faltas"],
+                r["Justificadas"], r["Retardos"], r.get("Min. retardo",0),
+                r.get("Omisiones",0), r["% Asistencia"]
+            ])
+        t = Table(data, colWidths=[7*cm,1.6*cm,1.5*cm,1.5*cm,1.6*cm,1.8*cm,1.8*cm,1.5*cm,1.5*cm], repeatRows=1)
+        estilo = [
+            ("BACKGROUND",(0,0),(-1,0), AZUL),
+            ("TEXTCOLOR",(0,0),(-1,0), colors.white),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("FONTSIZE",(0,0),(-1,-1),7),
+            ("ALIGN",(1,0),(-1,-1),"CENTER"),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("GRID",(0,0),(-1,-1),0.4, colors.grey),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, colors.HexColor("#F4F6F9")]),
+        ]
+        for i, (_, r) in enumerate(df_res.sort_values("Faltas", ascending=False).iterrows(), start=1):
+            pct = int(str(r["% Asistencia"]).replace("%","") or 0)
+            if r["Faltas"] >= 10 or pct < 75:
+                estilo.append(("BACKGROUND",(0,i),(-1,i), colors.HexColor("#F8D7DA")))
+            elif r["Faltas"] >= 3 or pct < 90:
+                estilo.append(("BACKGROUND",(0,i),(-1,i), colors.HexColor("#FFF3CD")))
+        t.setStyle(TableStyle(estilo))
+        elems.append(t)
+
+        # Firma de Vo.Bo.
+        elems.append(Spacer(1, 1.5*cm))
+        st_fir = ParagraphStyle("fir", parent=styles["Normal"], fontSize=9, alignment=TA_CENTER)
+        firma = Paragraph(
+            "_______________________________________<br/>"
+            "<b>Vo.Bo.  Mtra. Claudia Gisela Ramírez Monroy</b><br/>"
+            "Encargada del Despacho de la Dirección de Formación Continua", st_fir)
+        ft = Table([[firma]], colWidths=[24*cm])
+        ft.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
+        elems.append(ft)
+
+        doc.build(elems)
         return buf.getvalue()
 
     # ── UI ────────────────────────────────────────────────────────────────
@@ -1760,12 +1844,22 @@ def render_checador():
                     st.error(f"No se pudo guardar: {e}")
 
             excel_bytes = generar_excel_reporte(df_res, df_ret, df_omis, cargar_observaciones(), periodo, fecha_ini, fecha_fin, umbral_r)
-            st.download_button(
-                "⬇️ Descargar reporte Excel (4 hojas)",
-                data=excel_bytes,
-                file_name=f"Asistencia_{mes_nombre}_{fecha_ini.year}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            pdf_bytes   = generar_pdf_ejecutivo(df_res, periodo, fecha_ini, fecha_fin)
+            cdl1, cdl2 = st.columns(2)
+            with cdl1:
+                st.download_button(
+                    "⬇️ Descargar reporte Excel (4 hojas)",
+                    data=excel_bytes,
+                    file_name=f"Asistencia_{mes_nombre}_{fecha_ini.year}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            with cdl2:
+                st.download_button(
+                    "📄 Descargar ejecutivo PDF (con logo y firma)",
+                    data=pdf_bytes,
+                    file_name=f"Asistencia_Ejecutivo_{mes_nombre}_{fecha_ini.year}.pdf",
+                    mime="application/pdf"
+                )
 
         except Exception as e:
             st.error(f"Error procesando el archivo: {e}")
