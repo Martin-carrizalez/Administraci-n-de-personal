@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+from nomina_module import render_pendientes_nomina
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
@@ -124,6 +125,20 @@ def cargar_horarios():
     ws = sh.worksheet("empleados")
     data = ws.get_all_records(numericise_ignore=["all"])
     return pd.DataFrame(data) if data else pd.DataFrame()
+
+@st.cache_data(ttl=300)
+def cargar_directorio_nomina():
+    """Lee la tab Directorio_Nomina del Sheet del checador.
+    Columnas esperadas: ID, NOMBRE_COMPLETO, CORREO, JEFE_INMEDIATO, CORREO_JEFE, CC_FIJO
+    El CC_FIJO solo se llena en las primeras filas (correos de asistentes)."""
+    client = get_client()
+    sh = client.open_by_key(st.secrets["sheet_checador_id"])
+    try:
+        ws = sh.worksheet("Directorio_Nomina")
+    except gspread.WorksheetNotFound:
+        return pd.DataFrame(columns=["ID","NOMBRE_COMPLETO","CORREO","JEFE_INMEDIATO","CORREO_JEFE","CC_FIJO"])
+    data = ws.get_all_records(numericise_ignore=["all"])
+    return pd.DataFrame(data) if data else pd.DataFrame(columns=["ID","NOMBRE_COMPLETO","CORREO","JEFE_INMEDIATO","CORREO_JEFE","CC_FIJO"])
 
 @st.cache_data(ttl=300)
 def cargar_incidencias():
@@ -288,16 +303,25 @@ def generar_folio(tipo: str, incidencias_df: pd.DataFrame) -> str:
 
 def festivos_en_periodo(festivos_df: pd.DataFrame, ini: date, fin: date) -> list:
     """Devuelve [(fecha, descripcion), ...] de los festivos que caen dentro
-    del período [ini, fin], ordenados por fecha. Expande rangos."""
+    del período [ini, fin], ordenados por fecha. Expande rangos.
+    Usa parseo flexible (pd.to_datetime) porque el Sheet puede devolver
+    las fechas en distintos formatos (YYYY-MM-DD, DD/MM/YYYY, serial, etc.)."""
     out = []
     if festivos_df is None or not hasattr(festivos_df, "empty") or festivos_df.empty:
         return out
-    tiene_desc = any("DESCRIP" in str(c).upper() for c in festivos_df.columns)
     col_desc = next((c for c in festivos_df.columns if "DESCRIP" in str(c).upper()), None)
+    col_fi   = next((c for c in festivos_df.columns if "INICIO" in str(c).upper()), None)
+    col_ff   = next((c for c in festivos_df.columns if "FIN" in str(c).upper()), None)
+    if not col_fi:
+        return out
     for _, row in festivos_df.iterrows():
         try:
-            fi = datetime.strptime(str(row["FECHA_INICIO"]), "%Y-%m-%d").date()
-            ff = datetime.strptime(str(row["FECHA_FIN"]), "%Y-%m-%d").date()
+            ts_fi = pd.to_datetime(row.get(col_fi, ""), errors="coerce")
+            ts_ff = pd.to_datetime(row.get(col_ff, "") if col_ff else row.get(col_fi, ""), errors="coerce")
+            if pd.isna(ts_fi):
+                continue
+            fi = ts_fi.date()
+            ff = ts_ff.date() if not pd.isna(ts_ff) else fi
             desc = str(row[col_desc]).strip() if col_desc else ""
             d = fi
             while d <= ff:
@@ -343,6 +367,46 @@ def dias_economicos_usados(rfc: str, solicitudes_df: pd.DataFrame) -> int:
         except Exception:
             pass
     return total
+
+def actualizar_dias_disponibles_sheet(rfc_objetivo: str = None):
+    """Recalcula DIAS DISPONIBLES (= DIAS TOTALES - usados aprobados) y lo escribe
+    en la hoja Empleados del Sheet de económicos.
+    Si rfc_objetivo se indica, solo actualiza esa fila; si no, actualiza todas.
+    Devuelve (actualizados, errores)."""
+    from gspread.cell import Cell
+    client = get_client()
+    sh = client.open_by_key(st.secrets["sheet_economicos_id"])
+    ws = sh.worksheet("Empleados")
+    registros = ws.get_all_records(numericise_ignore=["all"])
+    if not registros:
+        return 0, []
+    headers = list(registros[0].keys())
+    try:
+        col_disp = headers.index("DIAS DISPONIBLES") + 1
+    except ValueError:
+        return 0, ["No existe la columna 'DIAS DISPONIBLES' en la hoja Empleados"]
+    col_rfc = next((h for h in headers if h.upper() == "RFC"), "RFC")
+    col_tot = next((h for h in headers if "DIAS TOTALES" in h.upper()), "DIAS TOTALES")
+
+    solicitudes = cargar_solicitudes_eco()
+    celdas, errores = [], []
+    for i, row in enumerate(registros, start=2):  # fila 1 = headers
+        rfc = str(row.get(col_rfc, "")).upper().strip()
+        if not rfc:
+            continue
+        if rfc_objetivo and rfc != rfc_objetivo.upper().strip():
+            continue
+        try:
+            total = int(row.get(col_tot, 0) or 0)
+        except Exception:
+            total = 0
+        usados = dias_economicos_usados(rfc, solicitudes)
+        disponibles = total - usados
+        celdas.append(Cell(i, col_disp, disponibles))
+    if celdas:
+        ws.update_cells(celdas, value_input_option="USER_ENTERED")
+    cargar_empleados.clear()
+    return len(celdas), errores
 
 def horas_pases_mes(rfc: str, incidencias_df: pd.DataFrame) -> float:
     """Suma las horas de pases autorizados del mes en curso usando FECHA_INICIO."""
@@ -757,6 +821,14 @@ def aprobar_dia_economico(row_idx: int, nombre_admin: str):
         if col_fecha:
             ws.update_cell(row_idx, col_fecha, ahora)
         cargar_solicitudes_eco.clear()
+        # Actualizar el saldo de DIAS DISPONIBLES de ese empleado en el Sheet Empleados
+        try:
+            col_rfc = headers.index("RFC") + 1 if "RFC" in headers else None
+            rfc_sol = ws.cell(row_idx, col_rfc).value if col_rfc else None
+            if rfc_sol:
+                actualizar_dias_disponibles_sheet(rfc_sol)
+        except Exception:
+            pass
         st.success("Día económico autorizado correctamente.")
     except Exception as e:
         st.error(f"Error al aprobar: {e}")
@@ -1171,18 +1243,27 @@ def render_checador():
 
     def get_horario_fecha(emp_row, fecha, historial_df):
         rfc = str(emp_row.get("RFC","")).upper().strip()
-        if historial_df.empty or not rfc:
+        if historial_df is None or historial_df.empty or not rfc:
             return emp_row
         hist_emp = historial_df[historial_df["RFC"].astype(str).str.upper().str.strip() == rfc]
         if hist_emp.empty:
             return emp_row
-        for _, h in hist_emp.sort_values("FECHA_INICIO", ascending=False).iterrows():
+        for _, h in hist_emp.iterrows():
             try:
-                fi_h = datetime.strptime(str(h["FECHA_INICIO"]), "%Y-%m-%d").date() if h["FECHA_INICIO"] else None
-                ff_h = datetime.strptime(str(h["FECHA_FIN"]),    "%Y-%m-%d").date() if h["FECHA_FIN"]    else None
+                raw_fi = str(h.get("FECHA_INICIO","")).strip()
+                raw_ff = str(h.get("FECHA_FIN","")).strip()
+                ts_fi = pd.to_datetime(raw_fi, errors="coerce") if raw_fi else None
+                ts_ff = pd.to_datetime(raw_ff, errors="coerce") if raw_ff else None
+                fi_h = ts_fi.date() if (ts_fi is not None and not pd.isna(ts_fi)) else None
+                ff_h = ts_ff.date() if (ts_ff is not None and not pd.isna(ts_ff)) else None
+                # Rango cerrado: FI <= fecha <= FF
                 if fi_h and ff_h and fi_h <= fecha <= ff_h:
                     return h
+                # Sin FECHA_FIN: vigente desde FI en adelante
                 if fi_h and not ff_h and fecha >= fi_h:
+                    return h
+                # Sin FECHA_INICIO: vigente hasta FF (horario anterior al primer cambio)
+                if not fi_h and ff_h and fecha <= ff_h:
                     return h
             except: pass
         return emp_row
@@ -2515,9 +2596,23 @@ def vista_admin():
     incidencias = cargar_incidencias()
     horarios_df = cargar_horarios()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Pendientes", "Historial completo", "Reporte mensual", "🕐 Reloj Checador"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Pendientes", "Historial completo", "Reporte mensual", "🕐 Reloj Checador", "📋 Nómina"])
 
     with tab1:
+        with st.expander("🔄 Sincronizar saldos de días económicos al Sheet"):
+            st.caption("Recalcula DIAS DISPONIBLES (= totales − usados aprobados) y lo escribe "
+                       "en la hoja Empleados para todos. Útil para dejar el Sheet al día.")
+            if st.button("Actualizar todos los saldos ahora"):
+                with st.spinner("Recalculando y escribiendo en el Sheet..."):
+                    try:
+                        n, errs = actualizar_dias_disponibles_sheet()
+                        if errs:
+                            st.error(" · ".join(errs))
+                        else:
+                            st.success(f"✅ {n} saldo(s) actualizado(s) en la hoja Empleados.")
+                    except Exception as e:
+                        st.error(f"No se pudo actualizar: {e}")
+
         solicitudes_eco = cargar_solicitudes_eco()
         col_aprobado = next((c for c in solicitudes_eco.columns if "Aprobado" in c), None)
         col_folio    = next((c for c in solicitudes_eco.columns if "FOLIO" in c.upper() or "Folio" in c), None)
@@ -2810,6 +2905,9 @@ def vista_admin():
 
     with tab4:
         render_checador()
+
+    with tab5:
+        render_pendientes_nomina(cargar_directorio_nomina)
 
     with tab3:
         # ── Alerta días económicos por agotarse ──────
