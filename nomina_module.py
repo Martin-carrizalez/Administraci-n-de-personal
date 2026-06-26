@@ -192,11 +192,17 @@ def render_pendientes_nomina(cargar_directorio_nomina):
                        file_name="Correos_Pendientes_Nomina.txt", mime="text/plain")
 
     # 6. PDF de cartas para imprimir (agrupado por nómina)
-    pdf_bytes = generar_pdf_cartas_nomina(lista, NOMINAS, segundo)
-    if pdf_bytes:
-        st.download_button("📄 Descargar cartas en PDF (para imprimir y firmar)",
-                           data=pdf_bytes, file_name="Cartas_Pendientes_Nomina.pdf",
-                           mime="application/pdf")
+    st.markdown("#### 5. Cartas en PDF para imprimir")
+    try:
+        pdf_bytes = generar_pdf_cartas_nomina(lista, NOMINAS, segundo)
+        if pdf_bytes:
+            st.download_button("📄 Descargar cartas en PDF (para imprimir y firmar)",
+                               data=pdf_bytes, file_name="Cartas_Pendientes_Nomina.pdf",
+                               mime="application/pdf")
+        else:
+            st.warning("No se generó el PDF: revisa que los empleados tengan conceptos marcados.")
+    except Exception as e:
+        st.error(f"Error generando el PDF de cartas: {e}")
 
 
 def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False):
