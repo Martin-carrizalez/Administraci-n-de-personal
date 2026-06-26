@@ -190,3 +190,85 @@ def render_pendientes_nomina(cargar_directorio_nomina):
     txt_final = "\n".join(txt_lines)
     st.download_button("⬇️ Descargar correos en TXT", data=txt_final,
                        file_name="Correos_Pendientes_Nomina.txt", mime="text/plain")
+
+    # 6. PDF de cartas para imprimir (agrupado por nómina)
+    pdf_bytes = generar_pdf_cartas_nomina(lista, NOMINAS, segundo)
+    if pdf_bytes:
+        st.download_button("📄 Descargar cartas en PDF (para imprimir y firmar)",
+                           data=pdf_bytes, file_name="Cartas_Pendientes_Nomina.pdf",
+                           mime="application/pdf")
+
+
+def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False):
+    """Genera un PDF con una carta por empleado, agrupadas por nómina.
+    El nombre del destinatario y la firma van en negritas."""
+    if not lista:
+        return None
+    import io
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter,
+                            leftMargin=2.5*cm, rightMargin=2.5*cm, topMargin=2*cm, bottomMargin=2*cm)
+    styles = getSampleStyleSheet()
+    AZUL = colors.HexColor("#002F6C")
+    st_tit = ParagraphStyle("tit", parent=styles["Normal"], fontSize=11, fontName="Helvetica-Bold",
+                            textColor=AZUL, alignment=TA_CENTER, spaceAfter=4)
+    st_nom = ParagraphStyle("nom", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold",
+                            textColor=AZUL, alignment=TA_CENTER, spaceAfter=10)
+    st_body = ParagraphStyle("body", parent=styles["Normal"], fontSize=10, alignment=TA_JUSTIFY,
+                             leading=15, spaceAfter=8)
+
+    elems = []
+    primera = True
+    for nom in nominas:
+        # empleados que deben algo en esta nómina
+        del_nom = [x for x in lista if x["pendientes"].get(nom)]
+        if not del_nom:
+            continue
+        if not primera:
+            elems.append(PageBreak())
+        primera = False
+        elems.append(Paragraph("SECRETARÍA DE EDUCACIÓN JALISCO", st_tit))
+        elems.append(Paragraph("DIRECCIÓN DE FORMACIÓN CONTINUA", st_tit))
+        elems.append(Paragraph(f"Pendientes de firma — Nómina {nom}", st_nom))
+        elems.append(Spacer(1, 0.3*cm))
+
+        for i, x in enumerate(del_nom):
+            conceptos = x["pendientes"].get(nom, [])
+            items = "<br/>".join(f"&nbsp;&nbsp;&nbsp;&nbsp;• {c}" for c in conceptos)
+            if segundo_aviso:
+                encab = ("Por medio del presente se le hace un <b>SEGUNDO AVISO</b>, toda vez que no se ha "
+                         "presentado a regularizar su situación a pesar de haber sido notificado(a) previamente.")
+                plazo = "2 días hábiles"
+            else:
+                encab = (f"Por medio del presente se le notifica que cuenta con <b>{len(conceptos)}</b> "
+                         f"registro(s) de nómina pendiente(s) de firma en la nómina {nom}, "
+                         "correspondiente(s) a los siguientes conceptos:")
+                plazo = "3 días hábiles"
+            carta = (
+                f"Estimado(a) C. <b>{x['nombre']}</b>:<br/><br/>"
+                f"{encab}<br/><br/>{items}<br/><br/>"
+                "Se le informa que la Dirección de Pagos únicamente permite un rezago máximo de 2 quincenas. "
+                f"Se le solicita presentarse en la Dirección de Formación Continua en un plazo no mayor a {plazo}.<br/><br/>"
+                "Sin otro particular, quedo a sus órdenes.<br/><br/>"
+                "<b>Martín Ángel Carrizalez Piña</b><br/>"
+                "Enlace de Recursos Humanos de Dirección de Formación Continua"
+            )
+            elems.append(Paragraph(carta, st_body))
+            elems.append(Spacer(1, 0.5*cm))
+            # línea de firma del que recibe
+            elems.append(Paragraph("___________________________________", st_body))
+            elems.append(Paragraph(f"Firma de recibido — <b>{x['nombre']}</b>", st_body))
+            if i < len(del_nom) - 1:
+                elems.append(Spacer(1, 0.8*cm))
+
+    if not elems:
+        return None
+    doc.build(elems)
+    return buf.getvalue()
