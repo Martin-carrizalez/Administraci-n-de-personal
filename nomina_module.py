@@ -192,87 +192,93 @@ def render_pendientes_nomina(cargar_directorio_nomina):
                        file_name="Correos_Pendientes_Nomina.txt", mime="text/plain")
 
     # 6. PDF de cartas para imprimir (agrupado por nómina)
-    st.markdown("#### 5. Cartas en PDF para imprimir")
+    st.markdown("#### 5. Relación de pendientes en PDF (para imprimir)")
     try:
         pdf_bytes = generar_pdf_cartas_nomina(lista, NOMINAS, segundo)
         if pdf_bytes:
-            st.download_button("📄 Descargar cartas en PDF (para imprimir y firmar)",
-                               data=pdf_bytes, file_name="Cartas_Pendientes_Nomina.pdf",
+            st.download_button("📄 Descargar relación en PDF (una hoja por nómina)",
+                               data=pdf_bytes, file_name="Relacion_Pendientes_Nomina.pdf",
                                mime="application/pdf")
         else:
             st.warning("No se generó el PDF: revisa que los empleados tengan conceptos marcados.")
     except Exception as e:
-        st.error(f"Error generando el PDF de cartas: {e}")
+        st.error(f"Error generando el PDF: {e}")
 
 
 def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False):
-    """Genera un PDF con una carta por empleado, agrupadas por nómina.
-    El nombre del destinatario y la firma van en negritas."""
+    """Genera la RELACIÓN de pendientes de firma en PDF, idéntica al Excel:
+    una página por nómina, cada columna una quincena/concepto, debajo los
+    nombres que deben esa quincena."""
     if not lista:
         return None
     import io
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.units import cm
     from reportlab.lib import colors
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER
+    from reportlab.lib.enums import TA_CENTER
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter,
-                            leftMargin=2.5*cm, rightMargin=2.5*cm, topMargin=2*cm, bottomMargin=2*cm)
+                            leftMargin=1.5*cm, rightMargin=1.5*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
     styles = getSampleStyleSheet()
     AZUL = colors.HexColor("#002F6C")
-    st_tit = ParagraphStyle("tit", parent=styles["Normal"], fontSize=11, fontName="Helvetica-Bold",
-                            textColor=AZUL, alignment=TA_CENTER, spaceAfter=4)
-    st_nom = ParagraphStyle("nom", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold",
-                            textColor=AZUL, alignment=TA_CENTER, spaceAfter=10)
-    st_body = ParagraphStyle("body", parent=styles["Normal"], fontSize=10, alignment=TA_JUSTIFY,
-                             leading=15, spaceAfter=8)
+    st_tit = ParagraphStyle("tit", parent=styles["Normal"], fontSize=12, fontName="Helvetica-Bold",
+                            textColor=AZUL, alignment=TA_CENTER)
+    st_sub = ParagraphStyle("sub", parent=styles["Normal"], fontSize=9, alignment=TA_CENTER, spaceAfter=8)
 
     elems = []
     primera = True
     for nom in nominas:
-        # empleados que deben algo en esta nómina
-        del_nom = [x for x in lista if x["pendientes"].get(nom)]
-        if not del_nom:
+        # Construir, para esta nómina, dict {concepto: [nombres]}
+        por_concepto = {}
+        for x in lista:
+            for concepto in x["pendientes"].get(nom, []):
+                por_concepto.setdefault(concepto, []).append(x["nombre"])
+        if not por_concepto:
             continue
         if not primera:
             elems.append(PageBreak())
         primera = False
-        elems.append(Paragraph("SECRETARÍA DE EDUCACIÓN JALISCO", st_tit))
-        elems.append(Paragraph("DIRECCIÓN DE FORMACIÓN CONTINUA", st_tit))
-        elems.append(Paragraph(f"Pendientes de firma — Nómina {nom}", st_nom))
-        elems.append(Spacer(1, 0.3*cm))
 
-        for i, x in enumerate(del_nom):
-            conceptos = x["pendientes"].get(nom, [])
-            items = "<br/>".join(f"&nbsp;&nbsp;&nbsp;&nbsp;• {c}" for c in conceptos)
-            if segundo_aviso:
-                encab = ("Por medio del presente se le hace un <b>SEGUNDO AVISO</b>, toda vez que no se ha "
-                         "presentado a regularizar su situación a pesar de haber sido notificado(a) previamente.")
-                plazo = "2 días hábiles"
-            else:
-                encab = (f"Por medio del presente se le notifica que cuenta con <b>{len(conceptos)}</b> "
-                         f"registro(s) de nómina pendiente(s) de firma en la nómina {nom}, "
-                         "correspondiente(s) a los siguientes conceptos:")
-                plazo = "3 días hábiles"
-            carta = (
-                f"Estimado(a) C. <b>{x['nombre']}</b>:<br/><br/>"
-                f"{encab}<br/><br/>{items}<br/><br/>"
-                "Se le informa que la Dirección de Pagos únicamente permite un rezago máximo de 2 quincenas. "
-                f"Se le solicita presentarse en la Dirección de Formación Continua en un plazo no mayor a {plazo}.<br/><br/>"
-                "Sin otro particular, quedo a sus órdenes.<br/><br/>"
-                "<b>Martín Ángel Carrizalez Piña</b><br/>"
-                "Enlace de Recursos Humanos de Dirección de Formación Continua"
-            )
-            elems.append(Paragraph(carta, st_body))
-            elems.append(Spacer(1, 0.5*cm))
-            # línea de firma del que recibe
-            elems.append(Paragraph("___________________________________", st_body))
-            elems.append(Paragraph(f"Firma de recibido — <b>{x['nombre']}</b>", st_body))
-            if i < len(del_nom) - 1:
-                elems.append(Spacer(1, 0.8*cm))
+        elems.append(Paragraph("SECRETARÍA DE EDUCACIÓN JALISCO — DIRECCIÓN DE FORMACIÓN CONTINUA", st_tit))
+        elems.append(Paragraph(f"RELACIÓN DE FIRMAS PENDIENTES DE NÓMINA — {nom}", st_tit))
+        elems.append(Paragraph("Concentrado por quincena/concepto", st_sub))
+        elems.append(Spacer(1, 0.2*cm))
+
+        # Columnas = conceptos (en el orden en que aparecen en la lista)
+        conceptos = list(por_concepto.keys())
+        max_filas = max(len(v) for v in por_concepto.values())
+        # Encabezado
+        data = [conceptos]
+        # Filas: nombres alineados por columna
+        for i in range(max_filas):
+            fila = []
+            for c in conceptos:
+                nombres = por_concepto[c]
+                fila.append(nombres[i] if i < len(nombres) else "")
+            data.append(fila)
+
+        ancho_col = (letter[0] - 3*cm) / len(conceptos)
+        t = Table(data, colWidths=[ancho_col]*len(conceptos), repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0), AZUL),
+            ("TEXTCOLOR",(0,0),(-1,0), colors.white),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("FONTSIZE",(0,0),(-1,0),9),
+            ("FONTSIZE",(0,1),(-1,-1),8),
+            ("ALIGN",(0,0),(-1,-1),"LEFT"),
+            ("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("GRID",(0,0),(-1,-1),0.4, colors.grey),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, colors.HexColor("#F4F6F9")]),
+            ("TOPPADDING",(0,0),(-1,-1),3),
+            ("BOTTOMPADDING",(0,0),(-1,-1),3),
+        ]))
+        elems.append(t)
+        elems.append(Spacer(1, 0.3*cm))
+        total_nom = sum(len(v) for v in por_concepto.values())
+        elems.append(Paragraph(f"Total de firmas pendientes en {nom}: {total_nom}", st_sub))
 
     if not elems:
         return None
