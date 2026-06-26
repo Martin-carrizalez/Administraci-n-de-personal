@@ -212,7 +212,7 @@ def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False):
     if not lista:
         return None
     import io
-    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import cm
     from reportlab.lib import colors
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -220,7 +220,8 @@ def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False):
     from reportlab.lib.enums import TA_CENTER
 
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=letter,
+    PAGE = landscape(letter)
+    doc = SimpleDocTemplate(buf, pagesize=PAGE,
                             leftMargin=1.5*cm, rightMargin=1.5*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
     styles = getSampleStyleSheet()
     AZUL = colors.HexColor("#002F6C")
@@ -250,8 +251,12 @@ def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False):
         # Columnas = conceptos (en el orden en que aparecen en la lista)
         conceptos = list(por_concepto.keys())
         max_filas = max(len(v) for v in por_concepto.values())
-        # Encabezado
-        data = [conceptos]
+        # Encabezado: anteponer "Q" si el concepto empieza por número (ej. "10" -> "Q10")
+        def _con_q(c):
+            c = str(c).strip()
+            return c if c.upper().startswith("Q") else f"Q{c}"
+        encabezados = [_con_q(c) for c in conceptos]
+        data = [encabezados]
         # Filas: nombres alineados por columna
         for i in range(max_filas):
             fila = []
@@ -260,14 +265,14 @@ def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False):
                 fila.append(nombres[i] if i < len(nombres) else "")
             data.append(fila)
 
-        ancho_col = (letter[0] - 3*cm) / len(conceptos)
+        ancho_col = (PAGE[0] - 3*cm) / len(conceptos)
         t = Table(data, colWidths=[ancho_col]*len(conceptos), repeatRows=1)
         t.setStyle(TableStyle([
             ("BACKGROUND",(0,0),(-1,0), AZUL),
             ("TEXTCOLOR",(0,0),(-1,0), colors.white),
             ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-            ("FONTSIZE",(0,0),(-1,0),9),
-            ("FONTSIZE",(0,1),(-1,-1),8),
+            ("FONTSIZE",(0,0),(-1,0),10),
+            ("FONTSIZE",(0,1),(-1,-1),9.5),
             ("ALIGN",(0,0),(-1,-1),"LEFT"),
             ("VALIGN",(0,0),(-1,-1),"TOP"),
             ("GRID",(0,0),(-1,-1),0.4, colors.grey),
