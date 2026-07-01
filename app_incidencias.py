@@ -84,6 +84,7 @@ COLS_INCIDENCIAS = [
 # ─────────────────────────────────────────────
 # CONEXIÓN GOOGLE SHEETS
 # ─────────────────────────────────────────────
+@st.cache_resource
 def get_client():
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPES
@@ -162,11 +163,25 @@ def cargar_historial_horarios():
     ])
 
 @st.cache_data(ttl=300)
+def _leer_hoja_con_reintento(ws, intentos=3, espera=5):
+    """Lee get_all_records reintentando si Google devuelve 429 (cuota excedida)."""
+    import time as _time
+    for i in range(intentos):
+        try:
+            return ws.get_all_records()
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e) and i < intentos - 1:
+                _time.sleep(espera)
+                continue
+            raise
+    return []
+
+@st.cache_data(ttl=1800)
 def cargar_festivos():
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
     ws = sh.worksheet("festivos")
-    data = ws.get_all_records()
+    data = _leer_hoja_con_reintento(ws)
     return pd.DataFrame(data).fillna("") if data else pd.DataFrame()
 
 ASISTENCIA_TAB = "Asistencia_Mes"
@@ -916,7 +931,7 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha
                 Cell(i, inc_h.index("FECHA_AUTORIZACION") + 1, ahora_inc),
             ], value_input_option="USER_ENTERED")
             break
-    st.cache_data.clear()
+    cargar_incidencias.clear()
 
 # ─────────────────────────────────────────────
 # AUTENTICACIÓN
@@ -1015,8 +1030,7 @@ def render_checador():
     DIAS_NOMBRE  = {"LUN":"Lunes","MAR":"Martes","MIE":"Miércoles","JUE":"Jueves","VIE":"Viernes","SAB":"Sábado","DOM":"Domingo"}
 
     def get_client_ch():
-        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=SCOPES)
-        return gspread.authorize(creds)
+        return get_client()
 
     @st.cache_data(ttl=300)
     def load_emp_ch():
@@ -2048,6 +2062,15 @@ def render_checador():
                            + ", ".join(f"{d.day}/{d.month}" for d, _ in fests_periodo))
             else:
                 st.caption("🗓️ No se detectaron días inhábiles dentro del período del reporte.")
+                # Diagnóstico: mostrar qué se leyó realmente del Sheet
+                with st.expander("🔍 Diagnóstico de festivos (por qué no se detectaron)"):
+                    if festivos_df_desc is None or festivos_df_desc.empty:
+                        st.write("La tab 'festivos' se leyó VACÍA.")
+                    else:
+                        st.write("Columnas leídas:", list(festivos_df_desc.columns))
+                        st.write("Primeras filas crudas (tal como llegan del Sheet):")
+                        st.dataframe(festivos_df_desc.head(6))
+                        st.write(f"Período del reporte: {fecha_ini} a {fecha_fin}")
             excel_bytes = generar_excel_reporte(df_res, df_ret, df_omis, cargar_observaciones(), periodo, fecha_ini, fecha_fin, umbral_r, fests_periodo)
             pdf_bytes   = generar_pdf_ejecutivo(df_res, periodo, fecha_ini, fecha_fin, fests_periodo)
             cdl1, cdl2 = st.columns(2)
