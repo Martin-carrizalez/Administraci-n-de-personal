@@ -166,8 +166,8 @@ def cargar_festivos():
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
     ws = sh.worksheet("festivos")
-    data = ws.get_all_records(numericise_ignore=["all"])
-    return pd.DataFrame(data) if data else pd.DataFrame()
+    data = ws.get_all_records()
+    return pd.DataFrame(data).fillna("") if data else pd.DataFrame()
 
 ASISTENCIA_TAB = "Asistencia_Mes"
 ASISTENCIA_HEADERS = ["RFC", "NOMBRE", "PERIODO", "FALTAS", "JUSTIFICADAS",
@@ -314,14 +314,29 @@ def festivos_en_periodo(festivos_df: pd.DataFrame, ini: date, fin: date) -> list
     col_ff   = next((c for c in festivos_df.columns if "FIN" in str(c).upper()), None)
     if not col_fi:
         return out
+    def _parse_fecha(v):
+        """Parsea fecha desde texto (ISO, DD/MM), datetime, o serial de Sheets."""
+        if v is None or v == "":
+            return None
+        # Número serial de Google Sheets (días desde 1899-12-30)
+        try:
+            if isinstance(v, (int, float)) or (isinstance(v, str) and v.replace(".","",1).isdigit()):
+                serial = float(v)
+                if serial > 30000:  # rango razonable de fechas modernas
+                    return (datetime(1899,12,30) + timedelta(days=int(serial))).date()
+        except Exception:
+            pass
+        ts = pd.to_datetime(v, errors="coerce")
+        return ts.date() if not pd.isna(ts) else None
+
     for _, row in festivos_df.iterrows():
         try:
-            ts_fi = pd.to_datetime(row.get(col_fi, ""), errors="coerce")
-            ts_ff = pd.to_datetime(row.get(col_ff, "") if col_ff else row.get(col_fi, ""), errors="coerce")
-            if pd.isna(ts_fi):
+            fi = _parse_fecha(row.get(col_fi, ""))
+            ff = _parse_fecha(row.get(col_ff, "") if col_ff else row.get(col_fi, ""))
+            if fi is None:
                 continue
-            fi = ts_fi.date()
-            ff = ts_ff.date() if not pd.isna(ts_ff) else fi
+            if ff is None:
+                ff = fi
             desc = str(row[col_desc]).strip() if col_desc else ""
             d = fi
             while d <= ff:
@@ -1778,15 +1793,18 @@ def render_checador():
         elems.append(Spacer(1, 0.3*cm))
 
         # Tabla
-        cols = ["Empleado","Días\nprog.","Asist.","Faltas","Justif.","Retardos","Min.\nretardo","Omis.","%"]
+        st_cell = ParagraphStyle("cell", parent=styles["Normal"], fontSize=6.5, leading=8)
+        cols = ["Empleado","Días\nprog.","Asist.","Faltas","Justif.","Retardos","Min.\nretardo","Omis.","%","Días que faltó"]
         data = [cols]
         for _, r in df_res.sort_values("Faltas", ascending=False).iterrows():
+            dias_falto = r.get("Días que faltó", "—")
             data.append([
-                r["Empleado"], r["Días prog."], r["Asistidos"], r["Faltas"],
+                Paragraph(str(r["Empleado"]), st_cell), r["Días prog."], r["Asistidos"], r["Faltas"],
                 r["Justificadas"], r["Retardos"], r.get("Min. retardo",0),
-                r.get("Omisiones",0), r["% Asistencia"]
+                r.get("Omisiones",0), r["% Asistencia"],
+                Paragraph(str(dias_falto), st_cell)
             ])
-        t = Table(data, colWidths=[7*cm,1.6*cm,1.5*cm,1.5*cm,1.6*cm,1.8*cm,1.8*cm,1.5*cm,1.5*cm], repeatRows=1)
+        t = Table(data, colWidths=[5.2*cm,1.3*cm,1.2*cm,1.2*cm,1.3*cm,1.5*cm,1.5*cm,1.2*cm,1.2*cm,4*cm], repeatRows=1)
         estilo = [
             ("BACKGROUND",(0,0),(-1,0), AZUL),
             ("TEXTCOLOR",(0,0),(-1,0), colors.white),
