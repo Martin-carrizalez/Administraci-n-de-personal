@@ -332,6 +332,16 @@ def festivos_en_periodo(festivos_df: pd.DataFrame, ini: date, fin: date) -> list
     out = []
     if festivos_df is None or not hasattr(festivos_df, "empty") or festivos_df.empty:
         return out
+    # Normalizar ini/fin a date puro (la app puede pasarlos como datetime/Timestamp
+    # con hora, lo que rompe la comparación date <= datetime).
+    if hasattr(ini, "date") and not isinstance(ini, date):
+        ini = ini.date()
+    elif isinstance(ini, datetime):
+        ini = ini.date()
+    if hasattr(fin, "date") and not isinstance(fin, date):
+        fin = fin.date()
+    elif isinstance(fin, datetime):
+        fin = fin.date()
     col_desc = next((c for c in festivos_df.columns if "DESCRIP" in str(c).upper()), None)
     col_fi   = next((c for c in festivos_df.columns if "INICIO" in str(c).upper()), None)
     col_ff   = next((c for c in festivos_df.columns if "FIN" in str(c).upper()), None)
