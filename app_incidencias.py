@@ -1316,10 +1316,27 @@ def render_checador():
         return emp_row
 
     def parse_checada_ch(val):
+        """Extrae TODAS las marcas de la celda (pueden venir varias pegadas de 5
+        chars c/u) y devuelve (primera, última) = (entrada, salida).
+        Si solo hay una marca, devuelve (marca, "")."""
         s = str(val).strip()
-        if not s or s == "nan" or len(s) < 5:
+        if not s or s == "nan":
             return None, None
-        return s[:5], (s[5:10] if len(s) >= 10 else "")
+        marcas = []
+        i = 0
+        while i + 5 <= len(s):
+            m = s[i:i+5]
+            if len(m) == 5 and m[2] == ":" and m[:2].isdigit() and m[3:].isdigit():
+                marcas.append(m)
+                i += 5
+            else:
+                i += 1
+        if not marcas:
+            return None, None
+        if len(marcas) == 1:
+            return marcas[0], ""
+        # Primera marca = entrada, última = salida (las del medio son duplicados)
+        return marcas[0], marcas[-1]
 
     def parse_report_ch(file_bytes, empleados, festivos, historial_df, just_rfc, umbral=10):
         wb = xlrd.open_workbook(file_contents=file_bytes)
@@ -1483,12 +1500,19 @@ def render_checador():
                     mins  = (er_dt.hour - ep_dt.hour)*60 + (er_dt.minute - ep_dt.minute)
                     if mins > umbral:
                         _jt = str(just_tipo or "")
-                        _es_pase_salida = ("pase de salida" in _jt.lower() or
-                                           _jt.strip().upper().startswith(("PSE","PSR")))
-                        if just_tipo and just_tipo.startswith("Pase de entrada"):
-                            estado = "Asistió"  # pase de entrada: no retardo
+                        _jt_low = _jt.lower()
+                        _jt_up  = _jt.strip().upper()
+                        _es_pase_entrada = ("pase de entrada" in _jt_low or _jt_up.startswith("PEN"))
+                        _es_pase_salida  = ("pase de salida" in _jt_low or _jt_up.startswith(("PSE","PSR")))
+                        _es_dia_completo = ("día económico" in _jt_low or "economico" in _jt_low
+                                            or "comisión" in _jt_low or "comision" in _jt_low
+                                            or _jt_up.startswith(("ECO","COM","CUM")))
+                        if _es_pase_entrada:
+                            estado = "Asistió"  # pase de entrada: justifica la llegada tarde
                         elif _es_pase_salida:
                             estado = "Asistió"  # pase de salida ese día: no se penaliza la entrada
+                        elif _es_dia_completo:
+                            estado = "Asistió"  # día económico/comisión: no se penaliza
                         else:
                             retardos += 1
                             retardos_min += mins
