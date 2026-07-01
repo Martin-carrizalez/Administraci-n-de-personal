@@ -176,31 +176,21 @@ def _leer_hoja_con_reintento(ws, intentos=3, espera=5):
     return []
 
 def cargar_festivos():
-    """Lee la tab festivos. NO cachea resultados vacíos (si falla, la próxima
-    llamada reintenta en vez de servir un vacío guardado)."""
-    df = _cargar_festivos_cache()
-    if df is None or df.empty:
-        _cargar_festivos_cache.clear()
-        df = _cargar_festivos_cache()
-    return df if df is not None else pd.DataFrame()
-
-@st.cache_data(ttl=1800)
-def _cargar_festivos_cache():
+    """Lee la tab festivos con el MISMO método que el conteo de faltas
+    (load_fest_ch), que sí funciona. Sin cache para evitar servir vacíos."""
     import time as _time
-    client = get_client()
-    sh = client.open_by_key(st.secrets["sheet_checador_id"])
-    ws = sh.worksheet("festivos")
-    data = None
     for intento in range(3):
         try:
+            client = get_client()
+            ws = client.open_by_key(st.secrets["sheet_checador_id"]).worksheet("festivos")
             data = ws.get_all_records()
-            break
+            return pd.DataFrame(data).fillna("") if data else pd.DataFrame()
         except gspread.exceptions.APIError as e:
             if "429" in str(e) and intento < 2:
                 _time.sleep(5)
                 continue
             raise
-    return pd.DataFrame(data).fillna("") if data else pd.DataFrame()
+    return pd.DataFrame()
 
 ASISTENCIA_TAB = "Asistencia_Mes"
 ASISTENCIA_HEADERS = ["RFC", "NOMBRE", "PERIODO", "FALTAS", "JUSTIFICADAS",
@@ -2083,11 +2073,23 @@ def render_checador():
                 # Diagnóstico: mostrar qué se leyó realmente del Sheet
                 with st.expander("🔍 Diagnóstico de festivos (por qué no se detectaron)"):
                     if festivos_df_desc is None or festivos_df_desc.empty:
-                        st.write("La tab 'festivos' se leyó VACÍA.")
+                        st.write(f"La tab 'festivos' se leyó con **{0 if festivos_df_desc is None else len(festivos_df_desc)} filas**.")
+                        st.write("Columnas:", list(festivos_df_desc.columns) if festivos_df_desc is not None else "N/A")
+                        st.write("Voy a leer la tab SIN procesar para ver qué hay:")
+                        try:
+                            _cli = get_client()
+                            _ws = _cli.open_by_key(st.secrets["sheet_checador_id"]).worksheet("festivos")
+                            _valores = _ws.get_all_values()
+                            st.write(f"get_all_values() devuelve **{len(_valores)} filas** (incluyendo encabezado):")
+                            for _fila in _valores[:8]:
+                                st.text(str(_fila))
+                        except Exception as _e:
+                            st.error(f"Error leyendo valores crudos: {_e}")
                     else:
-                        st.write("Columnas leídas:", list(festivos_df_desc.columns))
-                        st.write("Primeras filas crudas (tal como llegan del Sheet):")
-                        st.dataframe(festivos_df_desc.head(6))
+                        st.write(f"Filas leídas: **{len(festivos_df_desc)}**")
+                        st.write("Columnas:", list(festivos_df_desc.columns))
+                        for _, _r in festivos_df_desc.head(8).iterrows():
+                            st.text(f"INICIO={_r.get('FECHA_INICIO')!r} | FIN={_r.get('FECHA_FIN')!r} | {_r.get('DESCRIPCION')}")
                         st.write(f"Período del reporte: {fecha_ini} a {fecha_fin}")
             excel_bytes = generar_excel_reporte(df_res, df_ret, df_omis, cargar_observaciones(), periodo, fecha_ini, fecha_fin, umbral_r, fests_periodo)
             pdf_bytes   = generar_pdf_ejecutivo(df_res, periodo, fecha_ini, fecha_fin, fests_periodo)
