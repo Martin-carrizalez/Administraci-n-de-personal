@@ -162,7 +162,6 @@ def cargar_historial_horarios():
         "ENTRADA_VIE","SALIDA_VIE"
     ])
 
-@st.cache_data(ttl=300)
 def _leer_hoja_con_reintento(ws, intentos=3, espera=5):
     """Lee get_all_records reintentando si Google devuelve 429 (cuota excedida)."""
     import time as _time
@@ -176,12 +175,31 @@ def _leer_hoja_con_reintento(ws, intentos=3, espera=5):
             raise
     return []
 
-@st.cache_data(ttl=1800)
 def cargar_festivos():
+    """Lee la tab festivos. NO cachea resultados vacíos (si falla, la próxima
+    llamada reintenta en vez de servir un vacío guardado)."""
+    df = _cargar_festivos_cache()
+    if df is None or df.empty:
+        _cargar_festivos_cache.clear()
+        df = _cargar_festivos_cache()
+    return df if df is not None else pd.DataFrame()
+
+@st.cache_data(ttl=1800)
+def _cargar_festivos_cache():
+    import time as _time
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
     ws = sh.worksheet("festivos")
-    data = _leer_hoja_con_reintento(ws)
+    data = None
+    for intento in range(3):
+        try:
+            data = ws.get_all_records()
+            break
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e) and intento < 2:
+                _time.sleep(5)
+                continue
+            raise
     return pd.DataFrame(data).fillna("") if data else pd.DataFrame()
 
 ASISTENCIA_TAB = "Asistencia_Mes"
@@ -2055,7 +2073,7 @@ def render_checador():
                 festivos_df_desc = cargar_festivos()
             except Exception as e:
                 festivos_df_desc = pd.DataFrame()
-                st.warning(f"No se pudieron cargar los días festivos para el listado: {e}")
+                st.error(f"⚠️ Error leyendo la tab 'festivos': {e}")
             fests_periodo = festivos_en_periodo(festivos_df_desc, fecha_ini, fecha_fin)
             if fests_periodo:
                 st.caption(f"🗓️ Días inhábiles en el período incluidos en el reporte: "
