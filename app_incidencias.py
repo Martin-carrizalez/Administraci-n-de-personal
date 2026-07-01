@@ -1805,23 +1805,42 @@ def render_checador():
         styles = getSampleStyleSheet()
         elems = []
 
-        # Encabezado con logo
-        st_tit = ParagraphStyle("tit", parent=styles["Normal"], fontSize=13, fontName="Helvetica-Bold",
-                                textColor=AZUL, alignment=TA_CENTER)
+        # Encabezado con logo — título centrado respecto a la PÁGINA completa
+        st_tit = ParagraphStyle("tit", parent=styles["Normal"], fontSize=14, fontName="Helvetica-Bold",
+                                textColor=AZUL, alignment=TA_CENTER, leading=17)
         st_sub = ParagraphStyle("sub", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold",
                                 textColor=AZUL, alignment=TA_CENTER)
-        st_per = ParagraphStyle("per", parent=styles["Normal"], fontSize=8, alignment=TA_CENTER)
-        encab = Paragraph("SECRETARÍA DE EDUCACIÓN JALISCO<br/>DIRECCIÓN DE FORMACIÓN CONTINUA<br/>"
+        st_per = ParagraphStyle("per", parent=styles["Normal"], fontSize=8, alignment=TA_CENTER, textColor=colors.HexColor("#555555"))
+        encab = Paragraph("SECRETARÍA DE EDUCACIÓN JALISCO<br/>"
+                          "DIRECCIÓN DE FORMACIÓN CONTINUA<br/>"
                           f"<font size=11>REPORTE DE ASISTENCIA — {mes_nombre.upper()} {fecha_ini.year}</font>", st_tit)
         if os.path.exists("logos_gris.png"):
             logo_rl = RLImage("logos_gris.png", width=4.5*cm, height=1.2*cm)
-            head = Table([[logo_rl, encab]], colWidths=[5*cm, 19*cm])
-            head.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(0,0),(0,0),"LEFT")]))
+            # logo (izq) | título (centro, simétrico) | espacio igual al logo (der)
+            head = Table([[logo_rl, encab, ""]], colWidths=[5*cm, 14*cm, 5*cm])
+            head.setStyle(TableStyle([
+                ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+                ("ALIGN",(0,0),(0,0),"LEFT"),
+                ("ALIGN",(1,0),(1,0),"CENTER"),
+            ]))
             elems.append(head)
         else:
             elems.append(encab)
-        elems.append(Spacer(1, 0.2*cm))
-        elems.append(Paragraph(f"Período: {fecha_ini.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')}", st_per))
+        elems.append(Spacer(1, 0.15*cm))
+        # Línea divisoria bajo el encabezado (aspecto formal)
+        from reportlab.platypus import HRFlowable
+        elems.append(HRFlowable(width="100%", thickness=1, color=AZUL, spaceBefore=2, spaceAfter=4))
+        # Metadatos institucionales
+        MESES_ES = {1:"enero",2:"febrero",3:"marzo",4:"abril",5:"mayo",6:"junio",7:"julio",8:"agosto",9:"septiembre",10:"octubre",11:"noviembre",12:"diciembre"}
+        hoy = datetime.now(pytz.timezone("America/Mexico_City"))
+        fecha_emision = f"{hoy.day} de {MESES_ES[hoy.month]} de {hoy.year}"
+        st_meta = ParagraphStyle("meta", parent=styles["Normal"], fontSize=8, alignment=TA_CENTER, textColor=colors.HexColor("#333333"))
+        elems.append(Paragraph(
+            "<b>Tipo de Documento:</b> Reporte Ejecutivo Institucional&nbsp;&nbsp;·&nbsp;&nbsp;"
+            f"<b>Fecha de Emisión:</b> {fecha_emision}&nbsp;&nbsp;·&nbsp;&nbsp;"
+            "<b>Área Emisora:</b> Control de Personal / Recursos Humanos", st_meta))
+        elems.append(Spacer(1, 0.15*cm))
+        elems.append(Paragraph(f"Período del reporte: {fecha_ini.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')}", st_per))
         elems.append(Spacer(1, 0.3*cm))
 
         # Tabla
@@ -1876,6 +1895,16 @@ def render_checador():
         ft = Table([[firma]], colWidths=[24*cm])
         ft.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
         elems.append(ft)
+
+        # Leyenda de confidencialidad (uso institucional / auditoría)
+        elems.append(Spacer(1, 0.5*cm))
+        elems.append(HRFlowable(width="60%", thickness=0.5, color=colors.grey, spaceBefore=2, spaceAfter=4))
+        st_conf = ParagraphStyle("conf", parent=styles["Normal"], fontSize=7.5, alignment=TA_CENTER,
+                                 textColor=colors.HexColor("#555555"), leading=10)
+        elems.append(Paragraph(
+            "Este documento es para uso exclusivo de la Dirección de Formación Continua y contiene "
+            "información confidencial de carácter institucional. Su emisión tiene fines de control "
+            "interno y respaldo administrativo.", st_conf))
 
         # Pie de página con numeración "Página X de Y" e identificación del reporte
         pie_txt = f"Reporte de Asistencia — {mes_nombre} {fecha_ini.year} · DFC/SEJ"
