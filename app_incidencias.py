@@ -1303,13 +1303,13 @@ def render_checador():
                 ts_ff = pd.to_datetime(raw_ff, errors="coerce") if raw_ff else None
                 fi_h = ts_fi.date() if (ts_fi is not None and not pd.isna(ts_fi)) else None
                 ff_h = ts_ff.date() if (ts_ff is not None and not pd.isna(ts_ff)) else None
-                # Rango cerrado: FI <= fecha <= FF
+                # SOLO rangos CERRADOS (con inicio Y fin) pisan el horario.
+                # Un registro sin FECHA_FIN NO se considera vigente: el horario
+                # actual siempre es el de la tab 'empleados' (evita que un historial
+                # viejo abierto pise el horario correcto de hoy).
                 if fi_h and ff_h and fi_h <= fecha <= ff_h:
                     return h
-                # Sin FECHA_FIN: vigente desde FI en adelante
-                if fi_h and not ff_h and fecha >= fi_h:
-                    return h
-                # Sin FECHA_INICIO: vigente hasta FF (horario anterior al primer cambio)
+                # Sin FECHA_INICIO pero con FECHA_FIN: horario anterior a un cambio.
                 if not fi_h and ff_h and fecha <= ff_h:
                     return h
             except: pass
@@ -1424,6 +1424,29 @@ def render_checador():
                             entrada_real = ""
                     except: pass
 
+                # Protección extra: si hay entrada Y salida pero la "entrada" está
+                # DESPUÉS de la hora de salida programada (marcas invertidas o dato
+                # de horario incorrecto), no calcular un retardo absurdo. Se marca
+                # para revisión en vez de inventar cientos de minutos.
+                if entrada_real and salida_real and ep and sp:
+                    try:
+                        er = datetime.strptime(entrada_real, "%H:%M")
+                        spd = datetime.strptime(sp, "%H:%M")
+                        epd = datetime.strptime(ep, "%H:%M")
+                        # Si la entrada real cae después de la salida programada,
+                        # o la marca de "entrada" está más cerca de la salida:
+                        if er >= spd:
+                            estado = "Revisar (marcas/horario inconsistente)"
+                            detalle_faltas.append({
+                                "nombre": nombre, "fecha": dia_dt.date(), "nd": nd,
+                                "prog_entrada": ep, "checada_entrada": entrada_real,
+                                "checada_salida": salida_real, "retardo_min": 0,
+                                "estado": "Revisar (marcas/horario inconsistente)",
+                                "justificante": just_tipo or ""
+                            })
+                            continue
+                    except: pass
+
                 if not entrada_real:
                     # Si hay un pase de entrada justificado ese día, la entrada está cubierta:
                     # no es omisión.
@@ -1459,8 +1482,13 @@ def render_checador():
                     er_dt = datetime.strptime(entrada_real, "%H:%M")
                     mins  = (er_dt.hour - ep_dt.hour)*60 + (er_dt.minute - ep_dt.minute)
                     if mins > umbral:
+                        _jt = str(just_tipo or "")
+                        _es_pase_salida = ("pase de salida" in _jt.lower() or
+                                           _jt.strip().upper().startswith(("PSE","PSR")))
                         if just_tipo and just_tipo.startswith("Pase de entrada"):
                             estado = "Asistió"  # pase de entrada: no retardo
+                        elif _es_pase_salida:
+                            estado = "Asistió"  # pase de salida ese día: no se penaliza la entrada
                         else:
                             retardos += 1
                             retardos_min += mins
@@ -1504,8 +1532,13 @@ def render_checador():
                             })
                     except: pass
 
-                # Detectar salida omitida: checó entrada pero no salida
-                if entrada_real and not salida_real and sp:
+                # Detectar salida omitida: checó entrada pero no salida.
+                # EXCEPCIÓN: si tiene un pase de salida autorizado (PSE/PSR), no marcó
+                # salida a propósito (se retiró con permiso) → no es omisión.
+                _jts = str(just_tipo or "")
+                tiene_pase_salida = ("pase de salida" in _jts.lower() or
+                                     _jts.strip().upper().startswith(("PSE","PSR")))
+                if entrada_real and not salida_real and sp and not tiene_pase_salida:
                     omisiones += 1
                     det_omisiones.append({
                         "Empleado": nombre,
@@ -1830,16 +1863,6 @@ def render_checador():
         # Línea divisoria bajo el encabezado (aspecto formal)
         from reportlab.platypus import HRFlowable
         elems.append(HRFlowable(width="100%", thickness=1, color=AZUL, spaceBefore=2, spaceAfter=4))
-        # Metadatos institucionales
-        MESES_ES = {1:"enero",2:"febrero",3:"marzo",4:"abril",5:"mayo",6:"junio",7:"julio",8:"agosto",9:"septiembre",10:"octubre",11:"noviembre",12:"diciembre"}
-        hoy = datetime.now(pytz.timezone("America/Mexico_City"))
-        fecha_emision = f"{hoy.day} de {MESES_ES[hoy.month]} de {hoy.year}"
-        st_meta = ParagraphStyle("meta", parent=styles["Normal"], fontSize=8, alignment=TA_CENTER, textColor=colors.HexColor("#333333"))
-        elems.append(Paragraph(
-            "<b>Tipo de Documento:</b> Reporte Ejecutivo Institucional&nbsp;&nbsp;·&nbsp;&nbsp;"
-            f"<b>Fecha de Emisión:</b> {fecha_emision}&nbsp;&nbsp;·&nbsp;&nbsp;"
-            "<b>Área Emisora:</b> Control de Personal / Recursos Humanos", st_meta))
-        elems.append(Spacer(1, 0.15*cm))
         elems.append(Paragraph(f"Período del reporte: {fecha_ini.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')}", st_per))
         elems.append(Spacer(1, 0.3*cm))
 
@@ -1895,16 +1918,6 @@ def render_checador():
         ft = Table([[firma]], colWidths=[24*cm])
         ft.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
         elems.append(ft)
-
-        # Leyenda de confidencialidad (uso institucional / auditoría)
-        elems.append(Spacer(1, 0.5*cm))
-        elems.append(HRFlowable(width="60%", thickness=0.5, color=colors.grey, spaceBefore=2, spaceAfter=4))
-        st_conf = ParagraphStyle("conf", parent=styles["Normal"], fontSize=7.5, alignment=TA_CENTER,
-                                 textColor=colors.HexColor("#555555"), leading=10)
-        elems.append(Paragraph(
-            "Este documento es para uso exclusivo de la Dirección de Formación Continua y contiene "
-            "información confidencial de carácter institucional. Su emisión tiene fines de control "
-            "interno y respaldo administrativo.", st_conf))
 
         # Pie de página con numeración "Página X de Y" e identificación del reporte
         pie_txt = f"Reporte de Asistencia — {mes_nombre} {fecha_ini.year} · DFC/SEJ"
