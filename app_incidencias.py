@@ -1447,18 +1447,23 @@ def render_checador():
                 # para revisión en vez de inventar cientos de minutos.
                 if entrada_real and salida_real and ep and sp:
                     try:
-                        er = datetime.strptime(entrada_real, "%H:%M")
+                        er  = datetime.strptime(entrada_real, "%H:%M")
+                        srd = datetime.strptime(salida_real, "%H:%M")
                         spd = datetime.strptime(sp, "%H:%M")
                         epd = datetime.strptime(ep, "%H:%M")
-                        # Si la entrada real cae después de la salida programada,
-                        # o la marca de "entrada" está más cerca de la salida:
-                        if er >= spd:
-                            estado = "Revisar (marcas/horario inconsistente)"
+                        # Marcas inconsistentes con el horario del día:
+                        # (a) la "entrada" cae después de la hora de salida programada, o
+                        # (b) la SALIDA real ocurre antes/igual que la hora de ENTRADA
+                        #     programada → checó en un turno que NO es el suyo
+                        #     (ej. horario vespertino pero marcó toda la mañana).
+                        fuera_de_horario = (er >= spd) or (srd <= epd)
+                        if fuera_de_horario:
+                            estado = "Revisar (checó fuera de su horario)"
                             detalle_faltas.append({
                                 "nombre": nombre, "fecha": dia_dt.date(), "nd": nd,
                                 "prog_entrada": ep, "checada_entrada": entrada_real,
                                 "checada_salida": salida_real, "retardo_min": 0,
-                                "estado": "Revisar (marcas/horario inconsistente)",
+                                "estado": "Revisar (checó fuera de su horario)",
                                 "justificante": just_tipo or ""
                             })
                             continue
