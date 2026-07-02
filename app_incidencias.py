@@ -407,7 +407,10 @@ def dias_habiles_entre(fecha_inicio: date, fecha_fin: date, festivos_df: pd.Data
 
 def dias_economicos_usados(rfc: str, solicitudes_df: pd.DataFrame) -> int:
     df = solicitudes_df[solicitudes_df["RFC"].astype(str).str.upper() == rfc.upper()]
-    df_aprobados = df[df["Aprobado Por"].astype(str).str.strip() != ""]
+    # Solo cuentan las APROBADAS: la columna tiene nombre de admin.
+    # Las rechazadas escriben "RECHAZADO — ..." en la misma columna y NO deben descontar días.
+    aprob = df["Aprobado Por"].astype(str).str.strip()
+    df_aprobados = df[(aprob != "") & (~aprob.str.upper().str.startswith("RECHAZADO"))]
     total = 0
     for _, row in df_aprobados.iterrows():
         try:
@@ -830,49 +833,71 @@ def rechazar_incidencia(folio: str, obs: str):
             break
     cargar_incidencias.clear()
 
-def rechazar_dia_economico(row_idx: int, obs: str):
+def _localizar_fila_eco(ws, folio: str = "", rfc: str = "", fecha_inicio: str = "", fecha_registro: str = ""):
+    """Relee el Sheet EN VIVO y localiza la fila de la solicitud.
+    Prioridad: FOLIO exacto; si no hay folio, RFC + Fecha Inicio + Fecha Registro
+    (para solicitudes viejas sin folio). Devuelve (num_fila, headers_norm) o (None, headers_norm).
+    NUNCA usar índices de DataFrames cacheados: si alguien insertó/borró filas
+    en el Sheet, se aprobaría la solicitud equivocada."""
+    headers = [h.upper().strip() for h in ws.row_values(1)]
+    data = ws.get_all_records(numericise_ignore=["all"])
+    folio = str(folio or "").strip()
+    for i, row in enumerate(data, start=2):
+        row_norm = {str(k).upper().strip(): str(v).strip() for k, v in row.items()}
+        if folio and row_norm.get("FOLIO", "") == folio:
+            return i, headers
+        if not folio and rfc:
+            if (row_norm.get("RFC", "").upper() == rfc.upper().strip()
+                    and row_norm.get("FECHA INICIO", "") == str(fecha_inicio).strip()
+                    and row_norm.get("FECHA REGISTRO", "") == str(fecha_registro).strip()):
+                return i, headers
+    return None, headers
+
+def rechazar_dia_economico(obs: str, folio: str = "", rfc: str = "", fecha_inicio: str = "", fecha_registro: str = ""):
     try:
-        import pytz
-        tz_mx = pytz.timezone("America/Mexico_City")
-        ahora = datetime.now(pytz.utc).astimezone(tz_mx).strftime("%Y-%m-%d %H:%M")
         client = get_client()
         sh = client.open_by_key(st.secrets["sheet_economicos_id"])
         ws = sh.worksheet("Solicitudes")
-        headers = [h.upper().strip() for h in ws.row_values(1)]
+        fila, headers = _localizar_fila_eco(ws, folio, rfc, fecha_inicio, fecha_registro)
+        if fila is None:
+            st.error(f"No encontré la solicitud {folio or rfc} en el Sheet. Recarga la página e intenta de nuevo.")
+            return
         col_aprobado = headers.index("APROBADO POR") + 1 if "APROBADO POR" in headers else None
-        col_motivo   = headers.index("MOTIVO") + 1 if "MOTIVO" in headers else None
         if col_aprobado:
-            ws.update_cell(row_idx, col_aprobado, f"RECHAZADO — {obs}")
+            ws.update_cell(fila, col_aprobado, f"RECHAZADO — {obs}")
         cargar_solicitudes_eco.clear()
         st.warning("Solicitud rechazada.")
     except Exception as e:
         st.error(f"Error al rechazar: {e}")
 
-def aprobar_dia_economico(row_idx: int, nombre_admin: str):
-    """Escribe el nombre del admin en Aprobado Por de la tab Solicitudes."""
+def aprobar_dia_economico(nombre_admin: str, folio: str = "", rfc: str = "", fecha_inicio: str = "", fecha_registro: str = ""):
+    """Escribe el nombre del admin en Aprobado Por, localizando la fila por FOLIO en vivo."""
     try:
         import pytz
+        from gspread.cell import Cell
         tz_mx = pytz.timezone("America/Mexico_City")
         ahora = datetime.now(pytz.utc).astimezone(tz_mx).strftime("%Y-%m-%d %H:%M")
         client = get_client()
         sh = client.open_by_key(st.secrets["sheet_economicos_id"])
         ws = sh.worksheet("Solicitudes")
-        headers = [h.upper().strip() for h in ws.row_values(1)]
-        col_aprobado = headers.index("APROBADO POR") + 1 if "APROBADO POR" in headers else None
-        col_fecha    = headers.index("FECHA REGISTRO") + 1 if "FECHA REGISTRO" in headers else None
-        if col_aprobado:
-            ws.update_cell(row_idx, col_aprobado, nombre_admin)
-        # Guardar fecha de autorización
-        col_fecha_aut = next((j+1 for j, h in enumerate([h.upper().strip() for h in ws.row_values(1)]) if "FECHA" in h and "AUTORIZACION" in h), None)
+        fila, headers = _localizar_fila_eco(ws, folio, rfc, fecha_inicio, fecha_registro)
+        if fila is None:
+            st.error(f"No encontré la solicitud {folio or rfc} en el Sheet. Recarga la página e intenta de nuevo.")
+            return
+        celdas = []
+        if "APROBADO POR" in headers:
+            celdas.append(Cell(fila, headers.index("APROBADO POR") + 1, nombre_admin))
+        col_fecha_aut = next((j + 1 for j, h in enumerate(headers) if "FECHA" in h and "AUTORIZACION" in h), None)
         if col_fecha_aut:
-            ws.update_cell(row_idx, col_fecha_aut, ahora)
-        if col_fecha:
-            ws.update_cell(row_idx, col_fecha, ahora)
+            celdas.append(Cell(fila, col_fecha_aut, ahora))
+        if celdas:
+            ws.update_cells(celdas, value_input_option="USER_ENTERED")
         cargar_solicitudes_eco.clear()
         # Actualizar el saldo de DIAS DISPONIBLES de ese empleado en el Sheet Empleados
         try:
-            col_rfc = headers.index("RFC") + 1 if "RFC" in headers else None
-            rfc_sol = ws.cell(row_idx, col_rfc).value if col_rfc else None
+            rfc_sol = rfc
+            if not rfc_sol and "RFC" in headers:
+                rfc_sol = ws.cell(fila, headers.index("RFC") + 1).value
             if rfc_sol:
                 actualizar_dias_disponibles_sheet(rfc_sol)
         except Exception:
@@ -992,7 +1017,12 @@ def login():
 
         usr_row           = match_usr.iloc[0]
         correo_registrado = str(usr_row.get("Correo electrónico institucional", "")).strip().lower()
-        if correo_registrado and correo.strip().lower() != correo_registrado:
+        if not correo_registrado:
+            # SEGURIDAD: sin correo registrado NO se permite el acceso.
+            # Antes, un correo vacío en el Sheet dejaba entrar con solo el RFC.
+            st.error("Tu RFC no tiene correo registrado en el sistema. Contacta a RH para completar tu registro.")
+            return
+        if correo.strip().lower() != correo_registrado:
             st.error("El correo no coincide con el RFC registrado.")
             return
 
@@ -1046,6 +1076,8 @@ def render_checador():
 
     DIAS_NUM_CH  = {0:"LUN",1:"MAR",2:"MIE",3:"JUE",4:"VIE",5:"SAB",6:"DOM"}
     DIAS_NOMBRE  = {"LUN":"Lunes","MAR":"Martes","MIE":"Miércoles","JUE":"Jueves","VIE":"Viernes","SAB":"Sábado","DOM":"Domingo"}
+    # Si este texto NO aparece en el reporte generado, la app está corriendo código viejo.
+    VERSION_REPORTE = "motor v2.1 (01-jul-2026)"
 
     def get_client_ch():
         return get_client()
@@ -1459,6 +1491,17 @@ def render_checador():
                         fuera_de_horario = (er >= spd) or (srd <= epd)
                         if fuera_de_horario:
                             estado = "Revisar (checó fuera de su horario)"
+                            # VISIBLE: va a la tabla de revisión (df_omis), que sí
+                            # se muestra en pantalla y sí se exporta al Excel.
+                            omisiones += 1
+                            det_omisiones.append({
+                                "Empleado": nombre,
+                                "Fecha": dia_dt.strftime("%d/%m/%Y"),
+                                "Día": DIAS_NOMBRE.get(nd, nd),
+                                "Omitió": "⚠ Checó fuera de su horario",
+                                "Hora prog. entrada": f"{ep} - {sp}",
+                                "Checada registrada": f"{entrada_real} - {salida_real}",
+                            })
                             detalle_faltas.append({
                                 "nombre": nombre, "fecha": dia_dt.date(), "nd": nd,
                                 "prog_entrada": ep, "checada_entrada": entrada_real,
@@ -1669,6 +1712,16 @@ def render_checador():
         ws1["A4"].alignment = center()
         ws1.row_dimensions[4].height = 30
 
+        # ── Bloque de metadatos institucionales ──
+        _tz_mx_rep = pytz.timezone("America/Mexico_City")
+        _fecha_emision = datetime.now(pytz.utc).astimezone(_tz_mx_rep)
+        ws1.merge_cells("A5:K5")
+        ws1["A5"] = (f"Tipo de Documento: Reporte Ejecutivo Institucional  ·  "
+                     f"Fecha de Emisión: {_fecha_emision.strftime('%d/%m/%Y')}  ·  "
+                     f"Área Emisora: Control de Personal / Recursos Humanos")
+        ws1["A5"].font = Font(size=8, name="Arial", color="555555")
+        ws1["A5"].alignment = center()
+
         ws1.append([])
 
         hdrs = ["Empleado","Días prog.","Asistidos","Faltas","Justificadas","Retardos","Min. retardo","Omisiones","% Asistencia","Días que faltó","Días justificados"]
@@ -1731,6 +1784,17 @@ def render_checador():
         else:
             base = prox + 3
 
+        # ── Leyenda de confidencialidad (antes de la firma) ──
+        ws1.merge_cells(start_row=base, start_column=1, end_row=base, end_column=11)
+        cl = ws1.cell(base, 1)
+        cl.value = ("Este documento es para uso exclusivo de la Dirección de Formación Continua "
+                    "y contiene información confidencial de carácter institucional. "
+                    "Su emisión tiene fines de control interno y respaldo administrativo.")
+        cl.font = Font(italic=True, size=8, name="Arial", color="555555")
+        cl.alignment = center()
+        ws1.row_dimensions[base].height = 26
+        base += 2
+
         # ── Bloque de firma / Vo.Bo. (aval para archivo y auditoría) ──
         ws1.merge_cells(start_row=base, start_column=4, end_row=base, end_column=8)
         cf = ws1.cell(base, 4)
@@ -1746,6 +1810,15 @@ def render_checador():
         cc.value = DIRECTORA_CARGO
         cc.font = Font(size=9, name="Arial", color="555555")
         cc.alignment = center()
+
+        # ── Pie de generación ──
+        pie_row = base + 4
+        ws1.merge_cells(start_row=pie_row, start_column=1, end_row=pie_row, end_column=11)
+        cp = ws1.cell(pie_row, 1)
+        cp.value = (f"Generado el {_fecha_emision.strftime('%d/%m/%Y %H:%M')} · "
+                    f"Recursos Humanos — DFC · SEJ")
+        cp.font = Font(size=8, name="Arial", color="999999")
+        cp.alignment = center()
 
         # ── Hoja 2: Detalle faltas ──────────────────────────────────────────
         ws2 = wb.create_sheet("Detalle faltas y justificantes")
@@ -1796,7 +1869,7 @@ def render_checador():
         # ── Hoja 3: Detalle retardos ───────────────────────────────────────
         ws3 = wb.create_sheet("Detalle de retardos")
         ws3.merge_cells("A1:H1")
-        ws3["A1"] = f"DETALLE DE RETARDOS — {mes_nombre.upper()} {fecha_ini.year}  (tolerancia {umbral} min)"
+        ws3["A1"] = f"DETALLE DE RETARDOS — {mes_nombre.upper()} {fecha_ini.year}  (tolerancia {umbral} min) · {VERSION_REPORTE}"
         ws3["A1"].font = Font(bold=True, size=11, name="Arial", color=AZUL)
         ws3["A1"].alignment = center()
         ws3.append([])
@@ -2052,7 +2125,7 @@ def render_checador():
             mes_nombre = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio",
                           "Agosto","Septiembre","Octubre","Noviembre","Diciembre"][fecha_ini.month-1]
 
-            st.success(f"📅 {periodo} — {mes_nombre} {fecha_ini.year}")
+            st.success(f"📅 {periodo} — {mes_nombre} {fecha_ini.year} · {VERSION_REPORTE}")
 
             c1,c2,c3,c4,c5 = st.columns(5)
             c1.metric("Empleados activos", len(df_res))
@@ -2784,16 +2857,24 @@ def vista_admin():
                     col2.write(f"**Registrado:** {str(row.get('Fecha Registro',''))}")
                     obs_eco = st.text_input("Observaciones (para rechazo)", key=f"obs_eco_{idx}")
                     col_a, col_r = st.columns(2)
+                    _rfc_eco   = str(row.get("RFC", ""))
+                    _fi_eco    = str(row.get("Fecha Inicio", ""))
+                    _freg_eco  = str(row.get("Fecha Registro", ""))
+                    _folio_real = str(row.get(col_folio, "")) if col_folio else ""
                     with col_a:
                         if st.button("✅ Aprobar", key=f"eco_{idx}", type="primary"):
-                            aprobar_dia_economico(idx + 2, "admin")
+                            aprobar_dia_economico(st.session_state.get("nombre", "admin"),
+                                                  folio=_folio_real, rfc=_rfc_eco,
+                                                  fecha_inicio=_fi_eco, fecha_registro=_freg_eco)
                             st.rerun()
                     with col_r:
                         if st.button("❌ Rechazar", key=f"rec_eco_{idx}"):
                             if not obs_eco:
                                 st.error("Escribe una observación para rechazar.")
                             else:
-                                rechazar_dia_economico(idx + 2, obs_eco)
+                                rechazar_dia_economico(obs_eco,
+                                                       folio=_folio_real, rfc=_rfc_eco,
+                                                       fecha_inicio=_fi_eco, fecha_registro=_freg_eco)
                                 st.rerun()
             for _, row in pendientes.iterrows():
                 with st.expander(f"**{row['FOLIO']}** · {TIPO_LABELS.get(row['TIPO'], row['TIPO'])} · {row['NOMBRE']}"):
@@ -3481,7 +3562,10 @@ def main():
                 st.write(f"**Incidencia:** {TIPO_LABELS.get(tipo_reg, tipo_reg)}")
                 st.write(f"**Periodo:** {fi_reg} al {ff_reg}")
                 st.write(f"**Estado:** {estado_reg}")
-                st.write(f"**Motivo:** {motivo_reg}")
+                # PRIVACIDAD: el motivo NO se muestra en el validador público.
+                # Los folios son enumerables en la URL y el motivo puede contener
+                # información médica/familiar. Para validar autenticidad basta
+                # folio + tipo + periodo + estado. El motivo se consulta con sesión.
         else:
             st.error("🚨 ALERTA: DOCUMENTO NO ENCONTRADO O ALTERADO")
             st.warning("Este folio no existe en los registros oficiales de la DFC. El formato impreso podría ser falso o modificado de manera ilícita.")
