@@ -1,6 +1,12 @@
 import streamlit as st
 import os
-from nomina_module import render_pendientes_nomina
+# Import protegido: si nomina_module falta o truena, la app sigue funcionando
+# (solo se deshabilita esa pestaña). Un módulo secundario no debe tumbar el login.
+try:
+    from nomina_module import render_pendientes_nomina
+except Exception as _e_nomina:
+    render_pendientes_nomina = None
+    _ERROR_NOMINA = str(_e_nomina)
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
@@ -285,6 +291,77 @@ def guardar_observaciones(nuevas: list[dict]):
     if nuevas_filas:
         ws.append_rows(nuevas_filas, value_input_option="USER_ENTERED")
     cargar_observaciones.clear()
+
+
+# ── Justificaciones de Dirección: faltas justificadas con Vo.Bo. de la titular ──
+# Se guardan en el Sheet y se aplican ANTES de generar el reporte, para que
+# Excel y PDF salgan ya corregidos (adiós edición manual del Excel).
+JUSTIF_DIR_TAB = "Justificaciones_Direccion"
+JUSTIF_DIR_HEADERS = ["RFC", "NOMBRE", "FECHA", "MOTIVO", "REGISTRADO"]
+
+def _ws_justif_dir():
+    client = get_client()
+    sh = client.open_by_key(st.secrets["sheet_checador_id"])
+    try:
+        return sh.worksheet(JUSTIF_DIR_TAB)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(JUSTIF_DIR_TAB, rows=2, cols=len(JUSTIF_DIR_HEADERS))
+        ws.append_row(JUSTIF_DIR_HEADERS)
+        return ws
+
+@st.cache_data(ttl=60)
+def cargar_justif_direccion():
+    try:
+        ws = _ws_justif_dir()
+        data = ws.get_all_records(numericise_ignore=["all"])
+        return pd.DataFrame(data) if data else pd.DataFrame(columns=JUSTIF_DIR_HEADERS)
+    except Exception:
+        return pd.DataFrame(columns=JUSTIF_DIR_HEADERS)
+
+def guardar_justif_direccion(nuevas: list[dict]):
+    """nuevas: [{RFC, NOMBRE, FECHA (YYYY-MM-DD), MOTIVO}, ...].
+    No duplica: si ya existe RFC+FECHA, actualiza el motivo."""
+    if not nuevas:
+        return
+    ws = _ws_justif_dir()
+    existentes = ws.get_all_records(numericise_ignore=["all"])
+    idx = {}
+    for i, row in enumerate(existentes, start=2):
+        idx[(str(row.get("RFC","")).upper().strip(), str(row.get("FECHA","")).strip())] = i
+    ahora = datetime.now(pytz.utc).astimezone(pytz.timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M")
+    from gspread.cell import Cell
+    actualizaciones, filas_nuevas = [], []
+    for n in nuevas:
+        rfc_n = str(n.get("RFC","")).upper().strip()
+        fecha_n = str(n.get("FECHA","")).strip()
+        if not rfc_n or not fecha_n:
+            continue
+        clave = (rfc_n, fecha_n)
+        if clave in idx:
+            fila = idx[clave]
+            actualizaciones.append(Cell(fila, 4, str(n.get("MOTIVO",""))))
+            actualizaciones.append(Cell(fila, 5, ahora))
+        else:
+            filas_nuevas.append([rfc_n, n.get("NOMBRE",""), fecha_n, str(n.get("MOTIVO","")), ahora])
+    if actualizaciones:
+        ws.update_cells(actualizaciones, value_input_option="USER_ENTERED")
+    if filas_nuevas:
+        ws.append_rows(filas_nuevas, value_input_option="USER_ENTERED")
+    cargar_justif_direccion.clear()
+
+def eliminar_justif_direccion(rfc: str, fecha: str):
+    """Quita una justificación (para deshacer errores). Localiza la fila EN VIVO."""
+    try:
+        ws = _ws_justif_dir()
+        data = ws.get_all_records(numericise_ignore=["all"])
+        for i, row in enumerate(data, start=2):
+            if (str(row.get("RFC","")).upper().strip() == str(rfc).upper().strip()
+                    and str(row.get("FECHA","")).strip() == str(fecha).strip()):
+                ws.delete_rows(i)
+                break
+        cargar_justif_direccion.clear()
+    except Exception as e:
+        st.error(f"No se pudo eliminar la justificación: {e}")
 
 
 
@@ -1784,17 +1861,6 @@ def render_checador():
         else:
             base = prox + 3
 
-        # ── Leyenda de confidencialidad (antes de la firma) ──
-        ws1.merge_cells(start_row=base, start_column=1, end_row=base, end_column=11)
-        cl = ws1.cell(base, 1)
-        cl.value = ("Este documento es para uso exclusivo de la Dirección de Formación Continua "
-                    "y contiene información confidencial de carácter institucional. "
-                    "Su emisión tiene fines de control interno y respaldo administrativo.")
-        cl.font = Font(italic=True, size=8, name="Arial", color="555555")
-        cl.alignment = center()
-        ws1.row_dimensions[base].height = 26
-        base += 2
-
         # ── Bloque de firma / Vo.Bo. (aval para archivo y auditoría) ──
         ws1.merge_cells(start_row=base, start_column=4, end_row=base, end_column=8)
         cf = ws1.cell(base, 4)
@@ -1811,8 +1877,19 @@ def render_checador():
         cc.font = Font(size=9, name="Arial", color="555555")
         cc.alignment = center()
 
+        # ── Leyenda de confidencialidad (debajo de la firma) ──
+        ley_row = base + 4
+        ws1.merge_cells(start_row=ley_row, start_column=1, end_row=ley_row, end_column=11)
+        cl = ws1.cell(ley_row, 1)
+        cl.value = ("Este documento es para uso exclusivo de la Dirección de Formación Continua "
+                    "y contiene información confidencial de carácter institucional. "
+                    "Su emisión tiene fines de control interno y respaldo administrativo.")
+        cl.font = Font(italic=True, size=8, name="Arial", color="555555")
+        cl.alignment = center()
+        ws1.row_dimensions[ley_row].height = 26
+
         # ── Pie de generación ──
-        pie_row = base + 4
+        pie_row = ley_row + 1
         ws1.merge_cells(start_row=pie_row, start_column=1, end_row=pie_row, end_column=11)
         cp = ws1.cell(pie_row, 1)
         cp.value = (f"Generado el {_fecha_emision.strftime('%d/%m/%Y %H:%M')} · "
@@ -1966,6 +2043,13 @@ def render_checador():
         from reportlab.platypus import HRFlowable
         elems.append(HRFlowable(width="100%", thickness=1, color=AZUL, spaceBefore=2, spaceAfter=4))
         elems.append(Paragraph(f"Período del reporte: {fecha_ini.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')}", st_per))
+        # ── Metadatos institucionales ──
+        _tz_pdf = pytz.timezone("America/Mexico_City")
+        _emision_pdf = datetime.now(pytz.utc).astimezone(_tz_pdf)
+        elems.append(Paragraph(
+            f"Tipo de Documento: Reporte Ejecutivo Institucional  ·  "
+            f"Fecha de Emisión: {_emision_pdf.strftime('%d/%m/%Y')}  ·  "
+            f"Área Emisora: Control de Personal / Recursos Humanos", st_per))
         elems.append(Spacer(1, 0.3*cm))
 
         # Tabla
@@ -2021,8 +2105,19 @@ def render_checador():
         ft.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
         elems.append(ft)
 
+        # ── Leyenda de confidencialidad (debajo de la firma) ──
+        elems.append(Spacer(1, 0.5*cm))
+        st_ley = ParagraphStyle("ley", parent=styles["Normal"], fontSize=7,
+                                alignment=TA_CENTER, textColor=colors.HexColor("#555555"),
+                                fontName="Helvetica-Oblique")
+        elems.append(Paragraph(
+            "Este documento es para uso exclusivo de la Dirección de Formación Continua "
+            "y contiene información confidencial de carácter institucional. "
+            "Su emisión tiene fines de control interno y respaldo administrativo.", st_ley))
+
         # Pie de página con numeración "Página X de Y" e identificación del reporte
-        pie_txt = f"Reporte de Asistencia — {mes_nombre} {fecha_ini.year} · DFC/SEJ"
+        pie_txt = (f"Generado el {_emision_pdf.strftime('%d/%m/%Y %H:%M')} · "
+                   f"Recursos Humanos — DFC · SEJ")
 
         from reportlab.pdfgen import canvas as _canvas
 
@@ -2117,6 +2212,22 @@ def render_checador():
             eventos_inst = st.session_state.get("eventos_institucionales", [])
             just_rfc = build_justificantes_rfc(economicos, incapacidades, incidencias_p, fi, ff, eventos_inst)
 
+            # ── Justificaciones de Dirección (Vo.Bo.): se aplican ANTES de
+            # generar, para que Excel y PDF salgan ya corregidos ──
+            try:
+                _jd = cargar_justif_direccion()
+                if not _jd.empty:
+                    for _, _rj in _jd.iterrows():
+                        _rfc_j = str(_rj.get("RFC", "")).strip().upper()
+                        _f_j = pd.to_datetime(str(_rj.get("FECHA", "")), errors="coerce")
+                        if _rfc_j and not pd.isna(_f_j) and fi <= _f_j.date() <= ff:
+                            _mot_j = str(_rj.get("MOTIVO", "")).strip()
+                            just_rfc.setdefault(_rfc_j, {})[_f_j.date()] = (
+                                f"Justificada por Dirección|motivo:{_mot_j}" if _mot_j
+                                else "Justificada por Dirección")
+            except Exception as _e_jd:
+                st.warning(f"No se pudieron leer las justificaciones de Dirección: {_e_jd}")
+
         try:
             df_res, df_ret, df_omis, periodo, fecha_ini, fecha_fin = parse_report_ch(
                 uploaded_xls.getvalue(), empleados_ch, festivos_ch,
@@ -2150,6 +2261,61 @@ def render_checador():
 
             # ── Selector de avisos de faltas ────────────────────────────
             con_faltas = df_res[df_res["Faltas"] > 0].copy()
+            # ── Justificaciones de Dirección (Vo.Bo.) ─────────────────
+            st.markdown("### ✍️ Justificar faltas (Vo.Bo. de Dirección)")
+            st.caption("Marca las faltas que la Dirección justifica. Se guardan en el Sheet y "
+                       "al instante el reporte se regenera con ellas aplicadas — el Excel y el "
+                       "PDF salen ya corregidos, sin editar nada a mano.")
+            _con_faltas_j = df_res[df_res["Faltas"] > 0]
+            if _con_faltas_j.empty:
+                st.info("No hay faltas por justificar en este período.")
+            else:
+                _emp_sel = st.selectbox("Empleado con falta(s)",
+                                        _con_faltas_j["Empleado"].tolist(), key="jd_emp")
+                _row_sel = _con_faltas_j[_con_faltas_j["Empleado"] == _emp_sel].iloc[0]
+                _rfc_sel = str(_row_sel.get("RFC", "")).upper().strip()
+                _fechas_raw = [f.strip() for f in str(_row_sel["Días que faltó"]).split(",")
+                               if f.strip() and str(_row_sel["Días que faltó"]) != "—"]
+                _fechas_sel = st.multiselect("Fecha(s) de falta a justificar (dd/mm)",
+                                             _fechas_raw, key="jd_fechas")
+                _motivo_jd = st.text_input("Motivo de la justificación (opcional)",
+                                           key="jd_motivo",
+                                           placeholder="Ej. Comisión verbal de la Dirección")
+                if st.button("✅ Guardar justificación(es)", key="jd_guardar", type="primary"):
+                    if not _fechas_sel:
+                        st.error("Selecciona al menos una fecha.")
+                    else:
+                        _nuevas_jd = []
+                        for _f in _fechas_sel:
+                            try:
+                                _d, _m = _f.split("/")
+                                _fecha_iso = f"{fecha_ini.year}-{int(_m):02d}-{int(_d):02d}"
+                                _nuevas_jd.append({"RFC": _rfc_sel, "NOMBRE": _emp_sel,
+                                                   "FECHA": _fecha_iso, "MOTIVO": _motivo_jd})
+                            except Exception:
+                                st.error(f"Fecha con formato inesperado: {_f}")
+                        if _nuevas_jd:
+                            guardar_justif_direccion(_nuevas_jd)
+                            st.success(f"{len(_nuevas_jd)} justificación(es) guardada(s). Regenerando reporte...")
+                            st.rerun()
+            # Justificaciones ya registradas en el período, con opción de deshacer
+            try:
+                _jd_ver = cargar_justif_direccion()
+                if not _jd_ver.empty:
+                    _jd_ver["_F"] = pd.to_datetime(_jd_ver["FECHA"].astype(str), errors="coerce")
+                    _jd_per = _jd_ver[(_jd_ver["_F"].dt.date >= fi) & (_jd_ver["_F"].dt.date <= ff)]
+                    if not _jd_per.empty:
+                        with st.expander(f"📄 Justificaciones de Dirección registradas ({len(_jd_per)})"):
+                            for _, _rj in _jd_per.iterrows():
+                                c_txt, c_btn = st.columns([5, 1])
+                                c_txt.write(f"**{_rj['NOMBRE']}** · {_rj['FECHA']} · {_rj['MOTIVO'] or 'sin motivo'}")
+                                if c_btn.button("🗑️", key=f"jd_del_{_rj['RFC']}_{_rj['FECHA']}"):
+                                    eliminar_justif_direccion(_rj["RFC"], _rj["FECHA"])
+                                    st.rerun()
+            except Exception:
+                pass
+            st.divider()
+
             st.markdown("### 📨 Avisos de faltas a empleados")
             if con_faltas.empty:
                 st.success("No hay empleados con faltas en este período.")
@@ -3130,7 +3296,10 @@ def vista_admin():
         render_checador()
 
     with tab5:
-        render_pendientes_nomina(cargar_directorio_nomina)
+        if render_pendientes_nomina is None:
+            st.error(f"El módulo de nómina no está disponible: {_ERROR_NOMINA}")
+        else:
+            render_pendientes_nomina(cargar_directorio_nomina)
 
     with tab3:
         # ── Alerta días económicos por agotarse ──────
