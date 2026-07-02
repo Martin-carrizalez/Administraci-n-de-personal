@@ -194,7 +194,7 @@ def render_pendientes_nomina(cargar_directorio_nomina):
     # 6. PDF de cartas para imprimir (agrupado por nómina)
     st.markdown("#### 5. Relación de pendientes en PDF (para imprimir)")
     try:
-        pdf_bytes = generar_pdf_cartas_nomina(lista, NOMINAS, segundo)
+        pdf_bytes = generar_pdf_cartas_nomina(lista, NOMINAS, segundo, conceptos_por_nomina)
         if pdf_bytes:
             st.download_button("📄 Descargar relación en PDF (una hoja por nómina)",
                                data=pdf_bytes, file_name="Relacion_Pendientes_Nomina.pdf",
@@ -205,13 +205,20 @@ def render_pendientes_nomina(cargar_directorio_nomina):
         st.error(f"Error generando el PDF: {e}")
 
 
-def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False):
-    """Genera la RELACIÓN de pendientes de firma en PDF, idéntica al Excel:
-    una página por nómina, cada columna una quincena/concepto, debajo los
-    nombres que deben esa quincena."""
+def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False, conceptos_por_nomina=None):
+    """Genera la RELACIÓN de pendientes de firma en PDF, clonando el formato
+    del Excel de control (Control_Firmas_Nomina):
+      · Fila 1: clave de la nómina (negritas, centrado)
+      · Fila 2: QUINCENA Q{min} A Q{max} DEL {año}
+      · Headers de concepto con fondo gris, en el ORDEN en que se capturaron
+      · Nombres en orden alfabético por columna
+      · Pie por columna: PENDIENTES: N (negritas)
+    Una página por nómina."""
     if not lista:
         return None
     import io
+    import re
+    from datetime import datetime
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import cm
     from reportlab.lib import colors
@@ -224,15 +231,20 @@ def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False):
     doc = SimpleDocTemplate(buf, pagesize=PAGE,
                             leftMargin=1.5*cm, rightMargin=1.5*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
     styles = getSampleStyleSheet()
-    AZUL = colors.HexColor("#002F6C")
-    st_tit = ParagraphStyle("tit", parent=styles["Normal"], fontSize=12, fontName="Helvetica-Bold",
-                            textColor=AZUL, alignment=TA_CENTER)
-    st_sub = ParagraphStyle("sub", parent=styles["Normal"], fontSize=9, alignment=TA_CENTER, spaceAfter=8)
+    GRIS_HDR = colors.HexColor("#BFBFBF")
+    st_nom = ParagraphStyle("nom", parent=styles["Normal"], fontSize=13, fontName="Helvetica-Bold",
+                            alignment=TA_CENTER, spaceAfter=2)
+    st_qna = ParagraphStyle("qna", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold",
+                            alignment=TA_CENTER, spaceAfter=8)
+
+    def _con_q(c):
+        c = str(c).strip()
+        return c if c.upper().startswith("Q") else f"Q{c}"
 
     elems = []
     primera = True
     for nom in nominas:
-        # Construir, para esta nómina, dict {concepto: [nombres]}
+        # dict {concepto: [nombres]} para esta nómina
         por_concepto = {}
         for x in lista:
             for concepto in x["pendientes"].get(nom, []):
@@ -243,47 +255,66 @@ def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False):
             elems.append(PageBreak())
         primera = False
 
-        elems.append(Paragraph("SECRETARÍA DE EDUCACIÓN JALISCO — DIRECCIÓN DE FORMACIÓN CONTINUA", st_tit))
-        elems.append(Paragraph(f"RELACIÓN DE FIRMAS PENDIENTES DE NÓMINA — {nom}", st_tit))
-        elems.append(Paragraph("Concentrado por quincena/concepto", st_sub))
-        elems.append(Spacer(1, 0.2*cm))
+        # Orden de columnas = orden en que se CAPTURARON los conceptos
+        # (no el orden en que se agregaron empleados)
+        if conceptos_por_nomina and conceptos_por_nomina.get(nom):
+            orden = [c for c in conceptos_por_nomina[nom] if c in por_concepto]
+            orden += [c for c in por_concepto if c not in orden]
+        else:
+            orden = list(por_concepto.keys())
 
-        # Columnas = conceptos (en el orden en que aparecen en la lista)
-        conceptos = list(por_concepto.keys())
-        max_filas = max(len(v) for v in por_concepto.values())
-        # Encabezado: anteponer "Q" si el concepto empieza por número (ej. "10" -> "Q10")
-        def _con_q(c):
-            c = str(c).strip()
-            return c if c.upper().startswith("Q") else f"Q{c}"
-        encabezados = [_con_q(c) for c in conceptos]
+        # Nombres en orden alfabético por columna (como el Excel de control)
+        for c in orden:
+            por_concepto[c] = sorted(por_concepto[c])
+
+        # Línea "QUINCENA Qx A Qy DEL {año}" a partir de los conceptos
+        nums = []
+        for c in orden:
+            m = re.search(r"(\d+)", str(c))
+            if m:
+                nums.append(int(m.group(1)))
+        anio = datetime.now().year
+        if nums:
+            linea_qna = f"QUINCENA Q{min(nums)} A Q{max(nums)} DEL {anio}"
+        else:
+            linea_qna = f"CONCENTRADO POR QUINCENA/CONCEPTO — {anio}"
+
+        elems.append(Paragraph(str(nom), st_nom))
+        elems.append(Paragraph(linea_qna, st_qna))
+
+        encabezados = [_con_q(c) for c in orden]
+        max_filas = max(len(por_concepto[c]) for c in orden)
         data = [encabezados]
-        # Filas: nombres alineados por columna
         for i in range(max_filas):
             fila = []
-            for c in conceptos:
+            for c in orden:
                 nombres = por_concepto[c]
                 fila.append(nombres[i] if i < len(nombres) else "")
             data.append(fila)
+        # Pie por columna, igual que el Excel
+        data.append([f"PENDIENTES: {len(por_concepto[c])}" for c in orden])
 
-        ancho_col = (PAGE[0] - 3*cm) / len(conceptos)
-        t = Table(data, colWidths=[ancho_col]*len(conceptos), repeatRows=1)
+        ancho_col = (PAGE[0] - 3*cm) / len(orden)
+        t = Table(data, colWidths=[ancho_col]*len(orden), repeatRows=1)
+        ult = len(data) - 1
         t.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,0), AZUL),
-            ("TEXTCOLOR",(0,0),(-1,0), colors.white),
+            # Header de conceptos: fondo gris, negritas, centrado (como el Excel)
+            ("BACKGROUND",(0,0),(-1,0), GRIS_HDR),
             ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("ALIGN",(0,0),(-1,0),"CENTER"),
             ("FONTSIZE",(0,0),(-1,0),10),
-            ("FONTSIZE",(0,1),(-1,-1),9.5),
-            ("ALIGN",(0,0),(-1,-1),"LEFT"),
+            # Cuerpo: nombres a la izquierda
+            ("FONTSIZE",(0,1),(-1,-1),9),
+            ("ALIGN",(0,1),(-1,ult-1),"LEFT"),
             ("VALIGN",(0,0),(-1,-1),"TOP"),
             ("GRID",(0,0),(-1,-1),0.4, colors.grey),
-            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, colors.HexColor("#F4F6F9")]),
+            # Pie PENDIENTES: negritas
+            ("FONTNAME",(0,ult),(-1,ult),"Helvetica-Bold"),
+            ("ALIGN",(0,ult),(-1,ult),"LEFT"),
             ("TOPPADDING",(0,0),(-1,-1),3),
             ("BOTTOMPADDING",(0,0),(-1,-1),3),
         ]))
         elems.append(t)
-        elems.append(Spacer(1, 0.3*cm))
-        total_nom = sum(len(v) for v in por_concepto.values())
-        elems.append(Paragraph(f"Total de firmas pendientes en {nom}: {total_nom}", st_sub))
 
     if not elems:
         return None
