@@ -1678,7 +1678,10 @@ def render_checador():
                                 "Hora prog.": ep,
                                 "Hora real": entrada_real,
                                 "Minutos tarde": mins,
-                                "Observación": (f"Compensado: salió +{_extra_sal} min después de su hora"
+                                "Observación": ((f"Compensado: salida prog. {sp}, salió {salida_real} "
+                                                 f"(+{_extra_sal} min)"
+                                                 + (" ⚠ verificar horario en Sheet o checada"
+                                                    if _extra_sal > 180 else ""))
                                                 if _compensado else ""),
                                 "Motivo del día": _motivo_dia
                             })
@@ -1786,11 +1789,7 @@ def render_checador():
                 "Justificadas": justif,
                 "Retardos": retardos,
                 "Min. retardo": retardos_min,
-                "Retardos comp.": retardos_comp,
-                "Salidas antic.": salidas_antic,
                 "Omisiones": omisiones,
-                "Horas prog.": round(min_prog_total/60, 1),
-                "Horas trab.": round(min_trab_total/60, 1),
                 "Dif. horas": round((min_trab_total - min_prog_total)/60, 1),
                 "% Asistencia": f"{pct}%",
                 "Días que faltó": ", ".join(dias_falta) if dias_falta else "—",
@@ -1873,7 +1872,7 @@ def render_checador():
 
         ws1.append([])
 
-        hdrs = ["Empleado","Días prog.","Asistidos","Faltas","Justificadas","Retardos","Min. retardo","Retardos comp.","Salidas antic.","Omisiones","Horas prog.","Horas trab.","Dif. horas","% Asistencia","Días que faltó","Días justificados"]
+        hdrs = ["Empleado","Días prog.","Asistidos","Faltas","Justificadas","Retardos","Min. retardo","Omisiones","Dif. horas","% Asistencia","Días que faltó","Días justificados"]
         ws1.append(hdrs)
         hrow = ws1.max_row
         for col, _ in enumerate(hdrs, 1):
@@ -1889,11 +1888,8 @@ def render_checador():
             bg = ROJO if faltas >= 10 or pct < 75 else (AMARILLO if faltas >= 3 or pct < 90 else (VERDE if r["Justificadas"] > 0 else BLANCO))
             row_data = [r["Empleado"], r["Días prog."], r["Asistidos"], r["Faltas"],
                         r["Justificadas"], r["Retardos"], r.get("Min. retardo", 0),
-                        r.get("Retardos comp.", 0), r.get("Salidas antic.", 0),
-                        r.get("Omisiones", 0),
-                        r.get("Horas prog.", ""), r.get("Horas trab.", ""),
-                        r.get("Dif. horas", ""), r["% Asistencia"],
-                        r["Días que faltó"], r["Días justificados"]]
+                        r.get("Omisiones", 0), r.get("Dif. horas", ""),
+                        r["% Asistencia"], r["Días que faltó"], r["Días justificados"]]
             ws1.append(row_data)
             drow = ws1.max_row
             for col in range(1, len(hdrs) + 1):
@@ -1902,10 +1898,10 @@ def render_checador():
                 c.border    = border()
                 c.font      = Font(size=9, name="Arial")
                 c.alignment = center() if col > 1 else left()
-            # Verde en "Dif. horas" positiva: visibilizar a quien trabaja de más
+            # Dif. horas positiva en verde: lo bueno también se ve
             try:
                 if float(r.get("Dif. horas", 0)) > 0:
-                    c_dif = ws1.cell(drow, 13)
+                    c_dif = ws1.cell(drow, 9)
                     c_dif.fill = fill(VERDE)
                     c_dif.font = Font(size=9, name="Arial", bold=True, color="0F6E56")
             except Exception:
