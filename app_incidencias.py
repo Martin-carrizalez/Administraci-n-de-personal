@@ -1447,7 +1447,17 @@ def render_checador():
         # Primera marca = entrada, última = salida (las del medio son duplicados)
         return marcas[0], marcas[-1]
 
-    def parse_report_ch(file_bytes, empleados, festivos, historial_df, just_rfc, umbral=10):
+    def parse_report_ch(file_bytes, empleados, festivos, historial_df, just_rfc, umbral=10,
+                        comp_diaria=False, comp_mensual=False):
+        def _mins_rango(h1, h2):
+            """Minutos de h1 a h2 (mismo día). 0 si no es calculable o es negativo."""
+            try:
+                a = datetime.strptime(str(h1).strip(), "%H:%M")
+                b = datetime.strptime(str(h2).strip(), "%H:%M")
+                m = (b.hour - a.hour) * 60 + (b.minute - a.minute)
+                return m if m > 0 else 0
+            except Exception:
+                return 0
         wb = xlrd.open_workbook(file_contents=file_bytes)
         if "Reporte de Asistencia" not in wb.sheet_names():
             raise ValueError("No encontré hoja 'Reporte de Asistencia'.")
@@ -1497,6 +1507,8 @@ def render_checador():
             nombre = emp_row["NOMBRE"]
             rfc    = str(emp_row.get("RFC","")).upper().strip()
             dias_prog = asistidos = faltas = retardos = retardos_min = justif = omisiones = 0
+            salidas_antic = retardos_comp = 0
+            min_prog_total = min_trab_total = 0
             uid_ch     = checadas.get(uid, {})
             just_emp_personal = just_rfc.get(rfc, {})
             just_emp_global   = just_rfc.get("__GLOBAL__", {})
@@ -1514,6 +1526,7 @@ def render_checador():
                 ep  = str(hor.get(f"ENTRADA_{nd}","")).strip()
                 if not ep:
                     continue
+                sp_dia = str(hor.get(f"SALIDA_{nd}","")).strip()
                 dias_prog += 1
                 ch  = uid_ch.get(dia_dt.day)
                 just_tipo = just_emp.get(dia_dt.date())
@@ -1525,6 +1538,8 @@ def render_checador():
                     else:
                         faltas += 1
                         dias_falta.append(dia_dt.strftime("%d/%m"))
+                        # Una falta debe las horas programadas completas del día
+                        min_prog_total += _mins_rango(ep, sp_dia)
                     continue
 
                 asistidos += 1
@@ -1639,9 +1654,18 @@ def render_checador():
                         elif _es_dia_completo:
                             estado = "Asistió"  # día económico/comisión: no se penaliza
                         else:
-                            retardos += 1
-                            retardos_min += mins
-                            estado = "Retardo"
+                            # ── Compensación diaria (opcional): si salió al menos
+                            # tantos minutos DESPUÉS de su hora como llegó tarde,
+                            # el retardo queda compensado y no se cuenta ──
+                            _extra_sal = _mins_rango(sp, salida_real) if (comp_diaria and salida_real and sp) else 0
+                            _compensado = comp_diaria and _extra_sal >= mins
+                            if _compensado:
+                                retardos_comp += 1
+                                estado = "Retardo compensado"
+                            else:
+                                retardos += 1
+                                retardos_min += mins
+                                estado = "Retardo"
                             _motivo_dia = ""
                             if just_tipo and "motivo:" in str(just_tipo):
                                 _motivo_dia = str(just_tipo).split("motivo:")[1].strip()
@@ -1654,7 +1678,8 @@ def render_checador():
                                 "Hora prog.": ep,
                                 "Hora real": entrada_real,
                                 "Minutos tarde": mins,
-                                "Observación": "",
+                                "Observación": (f"Compensado: salió +{_extra_sal} min después de su hora"
+                                                if _compensado else ""),
                                 "Motivo del día": _motivo_dia
                             })
                 except: pass
@@ -1698,14 +1723,56 @@ def render_checador():
                         "Checada registrada": f"Entrada {entrada_real}",
                     })
 
+                # ── SALIDA ANTICIPADA: salió antes de su hora programada ──
+                # (caso César: horario 7:00-13:00, checando 7:00-12:00 sin que
+                # nada lo detectara — el sistema solo vigilaba la entrada).
+                # No aplica si tiene pase de salida o justificante de día completo.
+                _jts_up = _jts.strip().upper()
+                _just_dia_comp = ("económico" in _jts.lower() or "economico" in _jts.lower()
+                                  or "comisión" in _jts.lower() or "comision" in _jts.lower()
+                                  or "dirección" in _jts.lower() or "direccion" in _jts.lower()
+                                  or _jts_up.startswith(("ECO", "COM", "CUM")))
+                if entrada_real and salida_real and sp and not tiene_pase_salida and not _just_dia_comp:
+                    _antic = _mins_rango(salida_real, sp)
+                    if _antic > umbral:
+                        salidas_antic += 1
+                        det_omisiones.append({
+                            "Empleado": nombre,
+                            "Fecha": dia_dt.strftime("%d/%m/%Y"),
+                            "Día": DIAS_NOMBRE.get(nd, nd),
+                            "Omitió": f"⏰ Salida anticipada ({_antic} min antes)",
+                            "Hora prog. entrada": f"Salida prog. {sp}",
+                            "Checada registrada": f"Salió {salida_real}",
+                        })
+
+                # ── Horas del día: solo días con ambas marcas se comparan
+                # (trabajadas vs programadas). Faltas ya sumaron lo programado. ──
+                if entrada_real and salida_real and ep and sp:
+                    _mp_dia = _mins_rango(ep, sp)
+                    if _mp_dia:
+                        min_prog_total += _mp_dia
+                        min_trab_total += _mins_rango(entrada_real, salida_real)
+
                 detalle_faltas.append({
                     "nombre": nombre, "fecha": dia_dt.date(), "nd": nd,
                     "prog_entrada": ep, "checada_entrada": entrada_real,
                     "checada_salida": salida_real, "retardo_min": max(0,mins),
                     "estado": estado, "justificante": just_tipo or ""
                 })
-                detalle_retardos.extend(det_retardos_emp)
-                det_retardos_emp = []
+
+            # ── Compensación mensual (opcional): si trabajó igual o más horas
+            # que las programadas del período, sus retardos no se cuentan
+            # (quedan visibles en el detalle marcados como compensados) ──
+            if comp_mensual and min_prog_total > 0 and min_trab_total >= min_prog_total and retardos > 0:
+                _dif_h_emp = (min_trab_total - min_prog_total) / 60
+                for _r in det_retardos_emp:
+                    if not _r.get("Observación"):
+                        _r["Observación"] = f"Compensado: cumplió sus horas del período (+{_dif_h_emp:.1f} h)"
+                retardos_comp += retardos
+                retardos = 0
+                retardos_min = 0
+            detalle_retardos.extend(det_retardos_emp)
+            det_retardos_emp = []
 
             detalle_omisiones.extend(det_omisiones)
 
@@ -1719,7 +1786,12 @@ def render_checador():
                 "Justificadas": justif,
                 "Retardos": retardos,
                 "Min. retardo": retardos_min,
+                "Retardos comp.": retardos_comp,
+                "Salidas antic.": salidas_antic,
                 "Omisiones": omisiones,
+                "Horas prog.": round(min_prog_total/60, 1),
+                "Horas trab.": round(min_trab_total/60, 1),
+                "Dif. horas": round((min_trab_total - min_prog_total)/60, 1),
                 "% Asistencia": f"{pct}%",
                 "Días que faltó": ", ".join(dias_falta) if dias_falta else "—",
                 "Días justificados": ", ".join(dias_just) if dias_just else "—",
@@ -1801,7 +1873,7 @@ def render_checador():
 
         ws1.append([])
 
-        hdrs = ["Empleado","Días prog.","Asistidos","Faltas","Justificadas","Retardos","Min. retardo","Omisiones","% Asistencia","Días que faltó","Días justificados"]
+        hdrs = ["Empleado","Días prog.","Asistidos","Faltas","Justificadas","Retardos","Min. retardo","Retardos comp.","Salidas antic.","Omisiones","Horas prog.","Horas trab.","Dif. horas","% Asistencia","Días que faltó","Días justificados"]
         ws1.append(hdrs)
         hrow = ws1.max_row
         for col, _ in enumerate(hdrs, 1):
@@ -1816,16 +1888,28 @@ def render_checador():
             pct    = int(str(r["% Asistencia"]).replace("%","") or 0)
             bg = ROJO if faltas >= 10 or pct < 75 else (AMARILLO if faltas >= 3 or pct < 90 else (VERDE if r["Justificadas"] > 0 else BLANCO))
             row_data = [r["Empleado"], r["Días prog."], r["Asistidos"], r["Faltas"],
-                        r["Justificadas"], r["Retardos"], r.get("Min. retardo", 0), r.get("Omisiones", 0), r["% Asistencia"],
+                        r["Justificadas"], r["Retardos"], r.get("Min. retardo", 0),
+                        r.get("Retardos comp.", 0), r.get("Salidas antic.", 0),
+                        r.get("Omisiones", 0),
+                        r.get("Horas prog.", ""), r.get("Horas trab.", ""),
+                        r.get("Dif. horas", ""), r["% Asistencia"],
                         r["Días que faltó"], r["Días justificados"]]
             ws1.append(row_data)
             drow = ws1.max_row
-            for col in range(1, 12):
+            for col in range(1, len(hdrs) + 1):
                 c = ws1.cell(drow, col)
                 c.fill      = fill(bg)
                 c.border    = border()
                 c.font      = Font(size=9, name="Arial")
                 c.alignment = center() if col > 1 else left()
+            # Verde en "Dif. horas" positiva: visibilizar a quien trabaja de más
+            try:
+                if float(r.get("Dif. horas", 0)) > 0:
+                    c_dif = ws1.cell(drow, 13)
+                    c_dif.fill = fill(VERDE)
+                    c_dif.font = Font(size=9, name="Arial", bold=True, color="0F6E56")
+            except Exception:
+                pass
 
         ws1.append([])
         ws1.append(["Leyenda:", "0-2 faltas/≥90%", "3-9 faltas/75-89%", "≥10 faltas/<75%", "Justificado"])
@@ -2155,6 +2239,16 @@ def render_checador():
     with col_tol:
         umbral_r = st.number_input("Tolerancia retardo (min)", min_value=1, max_value=30, value=10)
 
+    col_cd, col_cm = st.columns(2)
+    with col_cd:
+        comp_d = st.checkbox("Compensar retardos con salida tardía (mismo día)", value=False,
+                             help="Si llegó X min tarde pero salió al menos X min después de su hora, "
+                                  "el retardo no se cuenta (queda visible como 'Compensado' en el detalle).")
+    with col_cm:
+        comp_m = st.checkbox("Compensar retardos si cumple sus horas del período", value=False,
+                             help="Si sus horas trabajadas del período igualan o superan las programadas, "
+                                  "sus retardos no se cuentan (quedan visibles como compensados).")
+
     # ── Días justificados por evento institucional ──────────────────────
     with st.expander("📋 Agregar días justificados por evento institucional"):
         st.caption("Agrega fechas donde todos los empleados tienen autorizado faltar o salir temprano por evento oficial (ej: Juegos Magisteriales, Comida del Maestro).")
@@ -2231,7 +2325,7 @@ def render_checador():
         try:
             df_res, df_ret, df_omis, periodo, fecha_ini, fecha_fin = parse_report_ch(
                 uploaded_xls.getvalue(), empleados_ch, festivos_ch,
-                historial_df, just_rfc, umbral_r)
+                historial_df, just_rfc, umbral_r, comp_d, comp_m)
 
             mes_nombre = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio",
                           "Agosto","Septiembre","Octubre","Noviembre","Diciembre"][fecha_ini.month-1]
