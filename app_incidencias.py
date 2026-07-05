@@ -2685,8 +2685,8 @@ def vista_empleado():
                 (sol_hist_all["FECHA_DT"].dt.year == ahora.year) &
                 (sol_hist_all["FECHA_DT"].dt.month == ahora.month)
             ].copy()
-            if sol_hist.empty:
-                sol_hist = sol_hist_all  # si falla el filtro mostrar todo
+            # Mes sin solicitudes = tabla vacía. NO mostrar el histórico como
+            # respaldo: hacía que en julio aparecieran solicitudes de junio.
         else:
             sol_hist = sol_hist_all
     else:
@@ -2725,7 +2725,7 @@ def vista_empleado():
         frames.append(mis_inc[[c for c in cols_mostrar if c in mis_inc.columns]])
 
     if not frames:
-        st.info("Aún no tienes solicitudes registradas.")
+        st.info("No tienes solicitudes este mes.")
     else:
         df_consolidado = pd.concat(frames, ignore_index=True)
         st.dataframe(df_consolidado, use_container_width=True, hide_index=True)
