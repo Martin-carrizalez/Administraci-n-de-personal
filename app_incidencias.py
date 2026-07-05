@@ -213,9 +213,11 @@ def _ws_asistencia():
         return ws
 
 def guardar_asistencia_mes(filas: list[dict], periodo: str):
-    """Reemplaza el contenido de Asistencia_Mes con el último reporte procesado."""
+    """Reemplaza el contenido de Asistencia_Mes con el último reporte procesado.
+    SIN clear() previo: se escribe encima y el sobrante se limpia solo si la
+    escritura tuvo éxito. Si Google falla (429), los datos anteriores quedan
+    intactos en vez de perder la tab completa."""
     ws = _ws_asistencia()
-    ws.clear()
     rows = [ASISTENCIA_HEADERS]
     ahora = datetime.now(pytz.timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M")
     for f in filas:
@@ -225,6 +227,12 @@ def guardar_asistencia_mes(filas: list[dict], periodo: str):
             f.get("RETARDOS",0), f.get("DIAS_FALTA",""), f.get("AVISAR",""), ahora
         ])
     ws.update(rows, value_input_option="USER_ENTERED")
+    # Éxito: limpiar filas viejas que hayan quedado debajo de la tabla nueva
+    try:
+        if ws.row_count > len(rows):
+            ws.batch_clear([f"A{len(rows) + 1}:J{ws.row_count}"])
+    except Exception:
+        pass
     cargar_asistencia_mes.clear()
 
 @st.cache_data(ttl=300)
@@ -794,13 +802,53 @@ def subir_anexo_drive(archivo, folio: str, rfc: str) -> str:
     except Exception as e:
         return f"ERROR: {e}"
 
+def _envio_duplicado(clave: str) -> bool:
+    """Candado anti doble clic: True si esta MISMA solicitud ya se envió en los
+    últimos 2 minutos de esta sesión (doble clic o rerun de Streamlit).
+    Evita solicitudes y folios duplicados."""
+    import hashlib
+    import time as _time
+    h = hashlib.md5(clave.encode()).hexdigest()
+    ult = st.session_state.get("_ultimo_envio")
+    if ult and ult[0] == h and (_time.time() - ult[1]) < 120:
+        return True
+    st.session_state["_ultimo_envio"] = (h, _time.time())
+    return False
+
+def _error_amable(e: Exception, contexto: str = ""):
+    """Traduce errores de cuota de Google a un mensaje humano en vez de traceback."""
+    if "429" in str(e) or "Quota" in str(e) or "quota" in str(e):
+        st.error("⏳ El sistema está ocupado en este momento (muchas personas usándolo a la vez). "
+                 "Espera 15 segundos y vuelve a intentar. Tu información no se perdió.")
+    else:
+        st.error(f"Error {contexto}: {e}")
+
 def guardar_dia_economico(datos: dict):
     """Guarda día económico en tab Solicitudes del Sheet económicos — igual que app3."""
+    # Candado: la misma persona + mismas fechas en <2 min = doble clic
+    if _envio_duplicado(f"ECO|{datos.get('rfc','')}|{datos.get('fecha_inicio','')}|{datos.get('fecha_fin','')}"):
+        st.warning("Esta solicitud ya se envió hace un momento. Si crees que es un error, espera 2 minutos.")
+        return
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_economicos_id"])
     ws = sh.worksheet("Solicitudes")
     todas = ws.get_all_records(numericise_ignore=["all"])
     nuevo_id = len(todas) + 1
+    # FOLIO recalculado EN VIVO sobre lo recién leído (no sobre cache):
+    # cierra la ventana de folios duplicados por concurrencia.
+    try:
+        anio_f = datetime.now().year
+        pref = f"ECO-{anio_f}-"
+        nums = []
+        for t in todas:
+            fol = str(t.get("FOLIO", ""))
+            if fol.startswith(pref):
+                pp = fol.split("-")
+                if len(pp) == 3 and pp[2].isdigit():
+                    nums.append(int(pp[2]))
+        datos["folio"] = f"{pref}{str(max(nums) + 1 if nums else 1).zfill(4)}"
+    except Exception:
+        pass  # conserva el folio previamente generado
     emp_id = ""
     try:
         empleados = cargar_empleados()
@@ -833,12 +881,31 @@ def guardar_dia_economico(datos: dict):
     ]
     ws.append_row(fila, value_input_option="USER_ENTERED")
     cargar_solicitudes_eco.clear()
+    return True
 
 def guardar_incidencia(datos: dict):
+    # Candado: la misma persona + tipo + fechas en <2 min = doble clic
+    if _envio_duplicado(f"{datos.get('tipo','')}|{datos.get('rfc','')}|{datos.get('fecha_inicio','')}|{datos.get('fecha_fin','')}"):
+        st.warning("Esta solicitud ya se envió hace un momento. Si crees que es un error, espera 2 minutos.")
+        return False
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
     ws = sh.worksheet("Incidencias")
     todas = ws.get_all_records(numericise_ignore=["all"])
+    # FOLIO recalculado EN VIVO sobre lo recién leído (cierra duplicados por concurrencia)
+    try:
+        anio_f = datetime.now().year
+        pref = f"{datos.get('tipo','')}-{anio_f}-"
+        nums = []
+        for t in todas:
+            fol = str(t.get("FOLIO", ""))
+            if fol.startswith(pref):
+                pp = fol.split("-")
+                if len(pp) == 3 and pp[2].isdigit():
+                    nums.append(int(pp[2]))
+        datos["folio"] = f"{pref}{str(max(nums) + 1 if nums else 1).zfill(4)}"
+    except Exception:
+        pass
     fila = [
         len(todas) + 1,
         datos["folio"],
@@ -859,6 +926,7 @@ def guardar_incidencia(datos: dict):
     ]
     ws.append_row(fila, value_input_option="USER_ENTERED")
     cargar_incidencias.clear()
+    return True
 
 def autorizar_incidencia(folio: str, obs: str = ""):
     try:
@@ -889,7 +957,7 @@ def autorizar_incidencia(folio: str, obs: str = ""):
     except gspread.exceptions.APIError:
         st.error("⏳ Google Sheets está saturado temporalmente. Espera 5 segundos e intenta de nuevo.")
     except Exception as e:
-        st.error(f"Error al autorizar: {e}")
+        _error_amable(e, "al autorizar")
 
 def rechazar_incidencia(folio: str, obs: str):
     client = get_client()
@@ -945,7 +1013,7 @@ def rechazar_dia_economico(obs: str, folio: str = "", rfc: str = "", fecha_inici
         cargar_solicitudes_eco.clear()
         st.warning("Solicitud rechazada.")
     except Exception as e:
-        st.error(f"Error al rechazar: {e}")
+        _error_amable(e, "al rechazar")
 
 def aprobar_dia_economico(nombre_admin: str, folio: str = "", rfc: str = "", fecha_inicio: str = "", fecha_registro: str = ""):
     """Escribe el nombre del admin en Aprobado Por, localizando la fila por FOLIO en vivo."""
@@ -981,7 +1049,7 @@ def aprobar_dia_economico(nombre_admin: str, folio: str = "", rfc: str = "", fec
             pass
         st.success("Día económico autorizado correctamente.")
     except Exception as e:
-        st.error(f"Error al aprobar: {e}")
+        _error_amable(e, "al aprobar")
 
 def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha_inicio_cho: str = None):
     client = get_client()
@@ -3044,19 +3112,25 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
             "director_general": st.session_state.get("director_general", ""),
             "hora_retorno":    hora_retorno,
         }
-        if tipo == "ECO":
-            guardar_dia_economico(datos)
-        else:
-            guardar_incidencia(datos)
-        pdf_bytes = generar_comprobante_pdf(datos)
-        st.success(f"✅ Solicitud registrada con folio **{folio}**")
-        st.download_button(
-            label="⬇️ Descargar comprobante PDF",
-            data=pdf_bytes,
-            file_name=f"Comprobante_{folio}.pdf",
-            mime="application/pdf",
-        )
-        st.info("Imprime tu comprobante y preséntalo en RH junto con el documento físico original.")
+        _guardado_ok = False
+        try:
+            if tipo == "ECO":
+                _guardado_ok = guardar_dia_economico(datos)
+            else:
+                _guardado_ok = guardar_incidencia(datos)
+        except Exception as _e_save:
+            _error_amable(_e_save, "al registrar la solicitud")
+        if _guardado_ok:
+            folio = datos["folio"]  # puede haberse recalculado en vivo al guardar
+            pdf_bytes = generar_comprobante_pdf(datos)
+            st.success(f"✅ Solicitud registrada con folio **{folio}**")
+            st.download_button(
+                label="⬇️ Descargar comprobante PDF",
+                data=pdf_bytes,
+                file_name=f"Comprobante_{folio}.pdf",
+                mime="application/pdf",
+            )
+            st.info("Imprime tu comprobante y preséntalo en RH junto con el documento físico original.")
 
 # ─────────────────────────────────────────────
 # VISTA ADMIN
@@ -3754,7 +3828,11 @@ def vista_ari():
     if st.session_state.get("rol") == "empleado":
         rfc    = st.session_state.get("rfc", "")
         nombre = st.session_state.get("nombre", "")
-        partes = [f"Nombre: {nombre}"]
+        # Minimización de datos hacia la API externa: solo el nombre de pila.
+        # Convención del Sheet: APELLIDO_P APELLIDO_M NOMBRE(S).
+        _tk = str(nombre).split()
+        nombre_pila = " ".join(_tk[2:]) if len(_tk) >= 3 else (_tk[-1] if _tk else "")
+        partes = [f"Nombre: {nombre_pila}"]
         try:
             empleados   = cargar_empleados()
             solicitudes = cargar_solicitudes_eco()
