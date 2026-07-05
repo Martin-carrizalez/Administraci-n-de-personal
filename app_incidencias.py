@@ -2749,7 +2749,24 @@ def vista_empleado():
     if not asis.empty and "RFC" in asis.columns:
         mi_asis = asis[asis["RFC"].astype(str).str.upper() == str(rfc).upper()]
 
-    with st.expander("📊 Mis faltas este mes", expanded=False):
+    # Título honesto: el contenido es del ÚLTIMO reporte procesado del checador,
+    # que casi siempre es del mes anterior. Nunca decir "este mes" si no lo es.
+    _titulo_faltas = "📊 Mis faltas del último período procesado"
+    try:
+        if not mi_asis.empty:
+            _per = str(mi_asis.iloc[0].get("PERIODO", ""))
+            _f_per = pd.to_datetime(_per.split("~")[0].strip(), errors="coerce")
+            if not pd.isna(_f_per):
+                _meses_es = {1:"enero",2:"febrero",3:"marzo",4:"abril",5:"mayo",6:"junio",
+                             7:"julio",8:"agosto",9:"septiembre",10:"octubre",11:"noviembre",12:"diciembre"}
+                _hoy_mx = datetime.now(pytz.timezone("America/Mexico_City"))
+                if _f_per.year == _hoy_mx.year and _f_per.month == _hoy_mx.month:
+                    _titulo_faltas = "📊 Mis faltas este mes"
+                else:
+                    _titulo_faltas = f"📊 Mis faltas — reporte de {_meses_es[_f_per.month]} {_f_per.year}"
+    except Exception:
+        pass
+    with st.expander(_titulo_faltas, expanded=False):
         st.info("ℹ️ Este contador es informativo. Las faltas no justificadas las gestiona Recursos Humanos.")
         if mi_asis.empty:
             c1, c2, c3 = st.columns(3)
