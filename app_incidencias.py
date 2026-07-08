@@ -2528,6 +2528,127 @@ def vista_directorio():
                             st.markdown(f"{_icon} **{_r['NOMBRE']}** — {_rol or 'Asesor'}{_extra}{_correo}")
 
 
+# ═══════════════════════════════════════════════════════════════════
+# PROTOCOLO DE EMERGENCIA — Contacto de emergencia (acceso directo + log)
+# ═══════════════════════════════════════════════════════════════════
+# Reutiliza la misma lista de RFCs autorizados que el directorio de
+# Centros de Maestros (secrets: rfcs_directorio_cm). No hay aprobación
+# en tiempo real: el control de acceso YA ES esa lista, decidida de
+# antemano. Cada consulta se registra sola en la bitácora.
+#
+# EN TU GOOGLE SHEET: agrega 2 columnas nuevas a la tab "Directorio":
+#   CONTACTO_EMERGENCIA_NOMBRE   |   CONTACTO_EMERGENCIA_TEL
+
+EMERGENCIA_TAB = "Bitacora_Emergencias"
+EMERGENCIA_HEADERS = ["ID", "CONSULTOR_RFC", "CONSULTOR_NOMBRE", "COMPAÑERO_CONSULTADO", "FECHA_HORA"]
+
+@st.cache_data(ttl=300)
+def _cargar_directorio_completo():
+    """Loader a nivel módulo (independiente del anidado dentro de
+    vista_directorio) para que el protocolo de emergencia no dependa
+    de haber entrado antes a esa vista."""
+    client = get_client()
+    sh = client.open_by_key(st.secrets["sheet_checador_id"])
+    ws = sh.worksheet("Directorio")
+    data = ws.get_all_records(numericise_ignore=["all"])
+    return pd.DataFrame(data).fillna("")
+
+def _ws_emergencias():
+    client = get_client()
+    sh = client.open_by_key(st.secrets["sheet_checador_id"])
+    try:
+        return sh.worksheet(EMERGENCIA_TAB)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(EMERGENCIA_TAB, rows=2, cols=len(EMERGENCIA_HEADERS))
+        ws.append_row(EMERGENCIA_HEADERS)
+        return ws
+
+def registrar_consulta_emergencia(rfc: str, nombre: str, companero: str):
+    """Escribe el log EN EL MOMENTO en que se revela el contacto.
+    Nunca debe bloquear una emergencia real por un fallo de red."""
+    try:
+        ws = _ws_emergencias()
+        todas = ws.get_all_records(numericise_ignore=["all"])
+        nuevo_id = len(todas) + 1
+        ahora = datetime.now(pytz.timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M")
+        ws.append_row([nuevo_id, rfc, nombre, companero, ahora], value_input_option="USER_ENTERED")
+    except Exception:
+        pass
+
+def _rfcs_secret(clave: str) -> list[str]:
+    try:
+        return [str(r).upper().strip() for r in st.secrets.get(clave, [])]
+    except Exception:
+        return []
+
+def vista_contacto_emergencia():
+    rfc_actual = str(st.session_state.get("rfc", "")).upper().strip()
+    autorizados = _rfcs_secret("rfcs_directorio_cm")
+    if st.session_state.get("rol") != "admin" and rfc_actual not in autorizados:
+        st.error("No tienes permiso para esta sección.")
+        return
+
+    st.markdown("## 🚨 Contacto de Emergencia")
+
+    # ── Disclaimer con aceptación explícita: se pide en CADA sesión ──
+    st.error(
+        "**AVISO IMPORTANTE — Uso restringido**\n\n"
+        "Esta sección contiene datos personales confidenciales (contacto de "
+        "emergencia) y debe usarse ÚNICAMENTE en caso de una emergencia real.\n\n"
+        "Cada consulta queda registrada de forma permanente con tu nombre, RFC, "
+        "la persona consultada y la fecha/hora exacta.\n\n"
+        "El uso de esta información para fines distintos a una emergencia "
+        "constituye una falta administrativa y, en su caso, puede derivar en "
+        "responsabilidad legal conforme a la normatividad aplicable en materia "
+        "de protección de datos personales."
+    )
+    acepto = st.checkbox(
+        "Entiendo el aviso anterior, confirmo que se trata de una emergencia real "
+        "y acepto que esta consulta quedará registrada con mis datos."
+    )
+    if not acepto:
+        st.info("Marca la casilla anterior para continuar.")
+        return
+
+    try:
+        df = _cargar_directorio_completo()
+    except Exception:
+        df = pd.DataFrame()
+    if df.empty or "NOMBRE" not in df.columns:
+        st.info("No se pudo cargar el directorio.")
+        return
+
+    busq = st.text_input("🔍 Busca por nombre", placeholder="Escribe el nombre del compañero...")
+    if busq:
+        q = busq.lower().strip()
+        opciones = df[df["NOMBRE"].astype(str).str.lower().str.contains(q, na=False)]["NOMBRE"].tolist()
+    else:
+        opciones = df["NOMBRE"].astype(str).tolist()
+
+    companero = st.selectbox("Selecciona al compañero", [""] + sorted(set(opciones)))
+
+    if companero and st.button("🚨 VER CONTACTO DE EMERGENCIA", type="primary", use_container_width=True):
+        fila = df[df["NOMBRE"].astype(str) == companero]
+        if fila.empty:
+            st.error("No se encontró a esa persona en el directorio.")
+        else:
+            r = fila.iloc[0]
+            c_nombre = str(r.get("CONTACTO_EMERGENCIA_NOMBRE", "")).strip()
+            c_tel = str(r.get("CONTACTO_EMERGENCIA_TEL", "")).strip()
+            registrar_consulta_emergencia(rfc_actual, st.session_state.get("nombre", ""), companero)
+            if c_nombre or c_tel:
+                nombre_txt = c_nombre or "(sin nombre registrado)"
+                tel_txt = c_tel or "(sin teléfono registrado)"
+                st.success(f"**Contacto de {companero}:**\n\n👤 {nombre_txt}\n\n📞 {tel_txt}")
+            else:
+                st.warning(f"{companero} no tiene contacto de emergencia registrado en el sistema. "
+                          "Contacta directamente a RH.")
+            _tz_emer = pytz.timezone("America/Mexico_City")
+            _sello = datetime.now(_tz_emer).strftime("%d/%m/%Y %H:%M")
+            _nombre_ses = st.session_state.get("nombre", "")
+            st.caption(f"Consulta registrada — {_nombre_ses} · {rfc_actual} · {_sello}")
+
+
 def vista_ari():
     """ARI embebida: chat de dudas de RH con contexto del usuario autenticado."""
     try:
@@ -2650,6 +2771,12 @@ def main():
         if st.button("📞 Directorio DFC"):
             st.session_state["vista"] = "directorio"
             st.rerun()
+        _rfc_sb = str(st.session_state.get("rfc", "")).upper().strip()
+        _autoriz_emer = _rfcs_secret("rfcs_directorio_cm")
+        if st.session_state.get("rol") == "admin" or _rfc_sb in _autoriz_emer:
+            if st.button("🚨 Contacto de Emergencia"):
+                st.session_state["vista"] = "emergencia"
+                st.rerun()
         if st.button("🤖 Pregúntale a ARI la IA de RH"):
             st.session_state["vista"] = "ari"
             st.rerun()
@@ -2667,6 +2794,8 @@ def main():
         vista_ari()
     elif vista == "directorio":
         vista_directorio()
+    elif vista == "emergencia":
+        vista_contacto_emergencia()
     elif vista == "calendario":
         vista_calendario()
     elif vista == "nomina":
