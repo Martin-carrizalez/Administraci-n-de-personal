@@ -2467,7 +2467,7 @@ def vista_directorio():
             "Recursos Materiales":         "📦",
             "Licitaciones y Presupuestos": "📋",
             "Comunicación Social":         "📢",
-            "Dir. Desarrollo Académico":   "🎓",
+            "Dir. Desarrollo Académico":   "👩‍🏫",
         }
         # Normalizar: si DEPARTAMENTO está vacío usar AREA como dept
         df["DEPT_VISTA"] = df.apply(lambda r: r["DEPARTAMENTO"] if r["DEPARTAMENTO"] else r["AREA"], axis=1)
@@ -2484,7 +2484,7 @@ def vista_directorio():
                 for _, row in personas.iterrows():
                     tarjeta(row)
 
-    # ── 🎓 Directorio de Centros de Maestros ──────────────────────────
+    # ── 🏫 Directorio de Centros de Maestros ──────────────────────────
     # Solo visible para el admin y los RFCs listados en secrets:
     #   rfcs_directorio_cm = ["RFC1", "RFC2", ...]
     # (en secrets, NO en el código: los RFC son dato personal)
