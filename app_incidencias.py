@@ -2497,7 +2497,7 @@ def vista_directorio():
 
     if _permiso_cm:
         st.markdown("---")
-        st.markdown("## 🎓 Centros de Maestros")
+        st.markdown("## 🏫 Centros de Maestros")
         if df_cm.empty:
             st.info("Aún no hay personal de Centros de Maestros en la tab Directorio. "
                     "Agrega filas con AREA = 'Centro de Maestros <nombre>' y "
@@ -2522,7 +2522,7 @@ def vista_directorio():
                     with st.expander(f"🎓 {_etq}  ·  {len(_gente)} persona(s)"):
                         for _, _r in _gente.iterrows():
                             _rol = str(_r.get("DEPARTAMENTO", "")).strip()
-                            _icon = "👑" if "RESPONSABLE" in _rol.upper() else "•"
+                            _icon = "🧑‍💼" if "RESPONSABLE" in _rol.upper() else "•"
                             _extra = f" · 📞 {_r['EXTENSION']}" if str(_r.get("EXTENSION", "")).strip() else ""
                             _correo = f" · {_r['CORREO']}" if str(_r.get("CORREO", "")).strip() else ""
                             st.markdown(f"{_icon} **{_r['NOMBRE']}** — {_rol or 'Asesor'}{_extra}{_correo}")
