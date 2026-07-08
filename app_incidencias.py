@@ -2519,7 +2519,7 @@ def vista_directorio():
                     _es_resp = _gente["DEPARTAMENTO"].astype(str).str.upper().str.contains("RESPONSABLE", na=False)
                     _gente = pd.concat([_gente[_es_resp], _gente[~_es_resp]])
                     _etq = str(_centro).replace("Centro de Maestros", "").strip()
-                    with st.expander(f"🎓 {_etq}  ·  {len(_gente)} persona(s)"):
+                    with st.expander(f"🏫 {_etq}  ·  {len(_gente)} persona(s)"):
                         for _, _r in _gente.iterrows():
                             _rol = str(_r.get("DEPARTAMENTO", "")).strip()
                             _icon = "🧑‍💼" if "RESPONSABLE" in _rol.upper() else "•"
