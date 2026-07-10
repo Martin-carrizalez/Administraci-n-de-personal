@@ -2819,7 +2819,7 @@ def main():
                 }
                 </script>
             """, height=0)
-        if st.button("🤖 Pregúntale a ARI la IA de RH"):
+        if st.button("🤖 🧠 Pregúntale a ARI la IA de RH"):
             st.session_state["vista"] = "ari"
             st.rerun()
         if st.button("🏠 Inicio"):
