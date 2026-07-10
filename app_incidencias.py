@@ -2526,6 +2526,23 @@ def vista_directorio():
                             _extra = f" · 📞 {_r['EXTENSION']}" if str(_r.get("EXTENSION", "")).strip() else ""
                             _correo = f" · {_r['CORREO']}" if str(_r.get("CORREO", "")).strip() else ""
                             st.markdown(f"{_icon} **{_r['NOMBRE']}** — {_rol or 'Asesor'}{_extra}{_correo}")
+                            # 👇 NUEVO: Mapeo y formateo del horario del asesor 👇
+                            horario_str = []
+                            # Usamos COLUMNAS_HORARIO que ya tienes definido al inicio de tu app
+                            for dia, (col_e, col_s) in COLUMNAS_HORARIO.items():
+                                ent = str(_r.get(col_e, "")).strip()
+                                sal = str(_r.get(col_s, "")).strip()
+                                
+                                # Solo mostrar el día si tiene entrada y salida registradas
+                                if ent and sal and ent.lower() != "nan" and sal.lower() != "nan":
+                                    # Formateo por si Sheets manda formato de segundos (ej: 08:00:00)
+                                    ent = ent.replace(":00:00", ":00")
+                                    sal = sal.replace(":00:00", ":00")
+                                    horario_str.append(f"**{dia}** {ent}-{sal}")
+
+                            if horario_str:
+                                st.caption(f"🕒 {' | '.join(horario_str)}")
+                            # 👆 FIN DE LO NUEVO 👆
 
 
 # ═══════════════════════════════════════════════════════════════════
