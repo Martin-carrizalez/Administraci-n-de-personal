@@ -2581,6 +2581,15 @@ def _rfcs_secret(clave: str) -> list[str]:
     except Exception:
         return []
 
+def _normalizar_busqueda(texto: str) -> str:
+    """Mayúsculas y sin acentos, para comparar sin importar cómo esté
+    capturado el nombre en el Sheet (con/sin acentos, mayús/minús).
+    'Ángel' y 'angel' deben coincidir; antes no lo hacían."""
+    import unicodedata
+    t = str(texto or "").upper().strip()
+    t = unicodedata.normalize("NFKD", t)
+    return "".join(c for c in t if not unicodedata.combining(c))
+
 def vista_contacto_emergencia():
     rfc_actual = str(st.session_state.get("rfc", "")).upper().strip()
     autorizados = _rfcs_secret("rfcs_directorio_cm")
@@ -2618,17 +2627,24 @@ def vista_contacto_emergencia():
         st.info("No se pudo cargar el directorio.")
         return
 
-    busq = st.text_input("🔍 Busca por nombre", placeholder="Escribe el nombre del compañero...")
+    # Mostrar SIEMPRE en mayúsculas, sin importar cómo esté capturado en el
+    # Sheet (mezcla de mayúsculas/minúsculas rompía la vista y la búsqueda).
+    df = df.copy()
+    df["NOMBRE"] = df["NOMBRE"].astype(str).str.upper().str.strip()
+    df["_NOMBRE_BUSQUEDA"] = df["NOMBRE"].apply(_normalizar_busqueda)
+
+    busq = st.text_input("🔍 Busca por nombre", placeholder="Escribe nombre o apellido, con o sin acentos...")
     if busq:
-        q = busq.lower().strip()
-        opciones = df[df["NOMBRE"].astype(str).str.lower().str.contains(q, na=False)]["NOMBRE"].tolist()
+        q = _normalizar_busqueda(busq)
+        opciones = df[df["_NOMBRE_BUSQUEDA"].str.contains(q, na=False)]["NOMBRE"].tolist()
+        st.caption(f"{len(opciones)} resultado(s)")
     else:
-        opciones = df["NOMBRE"].astype(str).tolist()
+        opciones = df["NOMBRE"].tolist()
 
     companero = st.selectbox("Selecciona al compañero", [""] + sorted(set(opciones)))
 
     if companero and st.button("🚨 VER CONTACTO DE EMERGENCIA", type="primary", use_container_width=True):
-        fila = df[df["NOMBRE"].astype(str) == companero]
+        fila = df[df["NOMBRE"] == companero]
         if fila.empty:
             st.error("No se encontró a esa persona en el directorio.")
         else:
@@ -2774,9 +2790,35 @@ def main():
         _rfc_sb = str(st.session_state.get("rfc", "")).upper().strip()
         _autoriz_emer = _rfcs_secret("rfcs_directorio_cm")
         if st.session_state.get("rol") == "admin" or _rfc_sb in _autoriz_emer:
-            if st.button("🚨 Contacto de Emergencia"):
+            if st.button("🚨 Contacto de Emergencia", key="btn_emer_sidebar"):
                 st.session_state["vista"] = "emergencia"
                 st.rerun()
+            # Colorea SOLO este botón (busca por su texto exacto, no depende
+            # de clases internas de Streamlit que cambian entre versiones).
+            import streamlit.components.v1 as components
+            components.html("""
+                <script>
+                function _colorearBotonEmergencia() {
+                    try {
+                        const botones = window.parent.document.querySelectorAll('button');
+                        botones.forEach(function(b) {
+                            if (b.innerText && b.innerText.indexOf("Contacto de Emergencia") !== -1) {
+                                b.style.backgroundColor = "#FF6B00";
+                                b.style.color = "#FFFFFF";
+                                b.style.fontWeight = "bold";
+                                b.style.border = "none";
+                            }
+                        });
+                    } catch (e) {}
+                }
+                _colorearBotonEmergencia();
+                if (!window.parent._emerObserverSet) {
+                    window.parent._emerObserverSet = true;
+                    new MutationObserver(_colorearBotonEmergencia)
+                        .observe(window.parent.document.body, {childList: true, subtree: true});
+                }
+                </script>
+            """, height=0)
         if st.button("🤖 Pregúntale a ARI la IA de RH"):
             st.session_state["vista"] = "ari"
             st.rerun()
