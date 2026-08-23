@@ -155,10 +155,19 @@ except Exception as _e_zx:  # pragma: no cover
     _ERROR_ZX = str(_e_zx)
 
 
-def estampar_qr_pdf(pdf_bytes: bytes, id_oficio: str,
+POSICIONES_QR = {
+    "Superior izquierda": "SI",
+    "Superior derecha": "SD",
+    "Inferior izquierda": "II",
+    "Inferior derecha": "ID",
+}
+
+
+def estampar_qr_pdf(pdf_bytes: bytes, id_oficio: str, posicion: str = "SD",
                     lado_cm: float = 2.3, margen_cm: float = 1.0) -> bytes:
-    """Inserta el QR en la esquina superior derecha de la PRIMERA página y
-    escribe el ID en claro debajo, por si el QR se destruye al engrapar.
+    """Inserta el QR en la esquina indicada de la PRIMERA página y escribe el
+    ID en claro junto a él, por si el QR se destruye al engrapar.
+    La esquina se elige porque el membrete varía entre formatos de oficio.
     Devuelve el PDF listo para imprimir y pasar a firma."""
     if pymupdf is None:
         raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
@@ -168,11 +177,27 @@ def estampar_qr_pdf(pdf_bytes: bytes, id_oficio: str,
     try:
         pagina = doc[0]
         lado, margen = lado_cm * CM, margen_cm * CM
-        x_der = pagina.rect.width - margen
-        rect = pymupdf.Rect(x_der - lado, margen, x_der, margen + lado)
+        ancho, alto = pagina.rect.width, pagina.rect.height
+
+        x0 = margen if posicion in ("SI", "II") else ancho - margen - lado
+        # Abajo se reserva espacio extra para no pisar el pie de página legal.
+        y0 = margen if posicion in ("SI", "SD") else alto - margen - lado - 14
+
+        rect = pymupdf.Rect(x0, y0, x0 + lado, y0 + lado)
         pagina.insert_image(rect, stream=png)
         pagina.insert_text((rect.x0, rect.y1 + 7), id_oficio, fontsize=6)
         return doc.tobytes()
+    finally:
+        doc.close()
+
+
+def vista_previa_pdf(pdf_bytes: bytes, dpi: int = 90) -> bytes:
+    """PNG de la primera página, para revisar dónde cayó el QR antes de confirmar."""
+    if pymupdf is None:
+        return b""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        return doc[0].get_pixmap(dpi=dpi).tobytes("png")
     finally:
         doc.close()
 
@@ -267,6 +292,11 @@ TRATAMIENTOS = (
     r"MAESTRO|MAESTRA|LICENCIADO|LICENCIADA|DOCTOR|DOCTORA)"
 )
 
+_RE_FOLIO_ENC = re.compile(
+    r"oficio\s*(?::|n[uú]m\.?(?:ero)?|n[oº°]\.?|#)?\s*:?\s*"
+    r"(\d{1,6})\s*/\s*(?:[\dA-Za-z]{1,8}\s*/\s*)?(\d{4})",
+    re.IGNORECASE,
+)
 _RE_FOLIO = re.compile(
     r"\b[A-ZÁÉÍÓÚÑ]{2,8}(?:\s*/\s*[A-ZÁÉÍÓÚÑ0-9]{1,10})*\s*/\s*(\d{1,6})\s*/\s*(\d{4})\b"
 )
@@ -278,13 +308,13 @@ _RE_FECHA_TEXTO = re.compile(
     r"\b(\d{1,2})\s+de\s+([a-záéíóú]+)\s+(?:de|del)\s+(\d{4})", re.IGNORECASE
 )
 _RE_FECHA_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
-_RE_ASUNTO = re.compile(
-    r"asunto\s*:?\s*(.+?)(?:\n\s*\n|\n(?=\s*(?:" + TRATAMIENTOS + r")\b)|$)",
-    re.IGNORECASE | re.DOTALL,
-)
+_RE_ASUNTO = re.compile(r"^\s*asunto\s*:?\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 _RE_PRESENTE = re.compile(r"^\s*P\s*R\s*E\s*S\s*E\s*N\s*T\s*E\s*\.?\s*$", re.IGNORECASE)
-_RE_DESTINATARIO = re.compile(
-    r"^\s*(" + TRATAMIENTOS + r")\.?\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s\.]{4,60})\s*$"
+# Líneas que pertenecen al encabezado y por tanto NO son del destinatario.
+_RE_ENCABEZADO = re.compile(
+    r"^\s*(?:oficio|asunto|expediente|exp)\s*[:.]|"
+    r"\b\d{1,2}\s+de\s+[a-záéíóú]+\s+(?:de|del)\s+\d{4}",
+    re.IGNORECASE,
 )
 
 
@@ -302,7 +332,7 @@ def extraer_datos_regex(texto: str) -> dict:
     lineas = [l.rstrip() for l in texto.splitlines()]
 
     # ── Folio ──
-    m = _RE_FOLIO.search(texto) or _RE_FOLIO_ALT.search(texto)
+    m = _RE_FOLIO_ENC.search(texto) or _RE_FOLIO.search(texto) or _RE_FOLIO_ALT.search(texto)
     if m:
         datos["folio"] = m.group(1).zfill(4)
 
@@ -323,22 +353,25 @@ def extraer_datos_regex(texto: str) -> dict:
         datos["asunto"] = _limpiar(m.group(1))[:250]
 
     # ── Destinatario y cargo ──
-    # El cargo va entre el nombre y la línea "P R E S E N T E".
+    # Se ancla en la línea "P R E S E N T E" y se camina hacia atrás: la
+    # primera línea del bloque es el nombre, las siguientes son el cargo.
+    # No se exige tratamiento (LIC., MTRA.): muchos oficios no lo usan.
     idx_presente = next(
         (i for i, l in enumerate(lineas) if _RE_PRESENTE.match(l)), None
     )
-    idx_nombre = None
-    tope = idx_presente if idx_presente is not None else len(lineas)
-    for i in range(tope - 1, -1, -1):
-        mm = _RE_DESTINATARIO.match(lineas[i])
-        if mm:
-            datos["dirigido_a"] = _limpiar(f"{mm.group(1)}. {mm.group(2)}")
-            idx_nombre = i
-            break
-
-    if idx_nombre is not None and idx_presente is not None:
-        cargo = [_limpiar(l) for l in lineas[idx_nombre + 1:idx_presente]]
-        datos["cargo_destino"] = " ".join(c for c in cargo if c)[:200]
+    if idx_presente is not None:
+        bloque = []
+        for i in range(idx_presente - 1, max(-1, idx_presente - 7), -1):
+            linea = lineas[i].strip()
+            if not linea:
+                break
+            if _RE_ENCABEZADO.search(linea):
+                break
+            bloque.insert(0, _limpiar(linea))
+        if bloque:
+            datos["dirigido_a"] = bloque[0][:120]
+            if len(bloque) > 1:
+                datos["cargo_destino"] = " ".join(bloque[1:])[:200]
 
     return datos
 
@@ -644,6 +677,22 @@ def render_oficios(deps: dict):
                                       value=sug.get("cargo_destino", ""), key="of_cargo")
                 obs = st.text_area("Observaciones", key="of_obs", height=70)
 
+                st.divider()
+                cp1, cp2 = st.columns([1, 2])
+                pos_nom = cp1.radio("Posición del QR",
+                                    options=list(POSICIONES_QR.keys()),
+                                    index=0, key="of_pos",
+                                    help="Elige una zona libre de membrete, "
+                                         "sello y firma.")
+                pos = POSICIONES_QR[pos_nom]
+                id_previo = construir_id(int(anio), folio or "0")
+                try:
+                    prev = vista_previa_pdf(estampar_qr_pdf(pdf_bytes, id_previo, pos))
+                    cp2.image(prev, caption="Vista previa · así se imprimirá",
+                              use_container_width=True)
+                except Exception as e:
+                    cp2.warning(f"No se pudo generar la vista previa: {e}")
+
                 if st.button("Confirmar y estampar QR", type="primary", key="of_btn_reg"):
                     if not str(folio).strip().isdigit():
                         st.warning("El folio debe ser numérico.")
@@ -664,7 +713,7 @@ def render_oficios(deps: dict):
                         else:
                             try:
                                 with st.spinner("Estampando QR y resguardando..."):
-                                    sellado = estampar_qr_pdf(pdf_bytes, resultado)
+                                    sellado = estampar_qr_pdf(pdf_bytes, resultado, pos)
                                     url = subir_bytes_drive(
                                         sellado, f"{resultado}_SINFIRMA.pdf",
                                         "application/pdf")
