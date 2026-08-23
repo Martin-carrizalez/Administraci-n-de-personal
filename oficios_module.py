@@ -133,15 +133,16 @@ def generar_token() -> str:
 
 def generar_qr_png(token: str, color: str = "#888888") -> bytes:
     """QR con corrección de error alta (H): sobrevive sello, engrapado y
-    dobleces. Lleva SOLO el token, no una URL: con menos datos el símbolo usa
-    menos módulos y se puede imprimir más pequeño sin perder legibilidad."""
+    dobleces. Lleva la URL completa con el token para que al escanearlo con
+    el celular abra directo la página de validación. Eso obliga a 2.0 cm
+    mínimo (41 módulos); no se sacrifica por hacerlo más pequeño."""
     qr = qrcode.QRCode(
         version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_H,
         box_size=10,
         border=2,
     )
-    qr.add_data(token)
+    qr.add_data(f"{URL_APP}/?validar_oficio={token}")
     qr.make(fit=True)
     img = qr.make_image(fill_color=color, back_color="white")
     buf = BytesIO()
@@ -180,14 +181,14 @@ POSICIONES_QR = {
 
 
 def estampar_qr_pdf(pdf_bytes: bytes, token: str, posicion: str = "ID",
-                    lado_cm: float = 1.6, margen_cm: float = 1.0,
+                    lado_cm: float = 2.3, margen_cm: float = 1.0,
                     color: str = "#888888", etiqueta: str = "") -> bytes:
     """Inserta el QR discreto en la esquina indicada de la PRIMERA página.
 
     Medido sobre escaneo degradado a 150 dpi (contraste pobre, inclinación,
-    JPEG): con token de 12 caracteres, 1.3 cm es el mínimo fiable y 1.6 cm
-    deja margen. Por debajo de 1.3 cm no se lee. El color casi no afecta la
-    lectura, así que el gris permite discreción sin costo.
+    JPEG): con la URL completa (49 módulos), 2.3 cm es el mínimo fiable
+    (12/12 lecturas). A 2.0 cm falla siempre (0/12). El color casi no afecta la lectura, así
+    que el gris da discreción sin costo; el blanco no se lee nunca.
     """
     if pymupdf is None:
         raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
@@ -253,7 +254,7 @@ def leer_qr_pdf(archivo_bytes: bytes, nombre: str, dpi: int = 300) -> list[tuple
         hallados = []
         for res in zxingcpp.read_barcodes(img):
             texto = str(res.text).strip()
-            if "validar_oficio=" in texto:          # formato anterior
+            if "validar_oficio=" in texto:
                 texto = texto.split("validar_oficio=")[-1].strip()
             if _RE_TOKEN.match(texto):
                 hallados.append((num_pag, texto))
@@ -743,9 +744,9 @@ def render_oficios(deps: dict):
                                     index=3, key="of_pos",
                                     help="Elige una zona libre de sello y firma.")
                 pos = POSICIONES_QR[pos_nom]
-                lado = cp1.slider("Tamaño (cm)", 1.3, 2.5, 1.6, 0.1, key="of_lado",
-                                  help="Por debajo de 1.3 cm el escáner deja "
-                                       "de leerlo de forma fiable.")
+                lado = cp1.slider("Tamaño (cm)", 2.3, 3.0, 2.3, 0.1, key="of_lado",
+                                  help="2.3 cm es el mínimo medido para que el "
+                                       "QR abra la página de validación.")
                 discreto = cp1.checkbox("Gris discreto", value=True, key="of_gris")
                 color = "#888888" if discreto else "#000000"
                 try:
