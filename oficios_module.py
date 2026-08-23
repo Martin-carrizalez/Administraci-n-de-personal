@@ -135,10 +135,266 @@ def generar_qr_png(id_oficio: str) -> bytes:
 
 
 # ─────────────────────────────────────────────
-# DRIVE
+# MOTOR PDF: estampado y lectura
 # ─────────────────────────────────────────────
-def subir_oficio_drive(archivo, id_oficio: str) -> str:
-    """Sube el escaneo a la carpeta de oficios. Sin permiso 'anyone':
+CM = 28.3465  # 1 cm en puntos PDF
+
+# Import protegido: si falta la librería, el resto del módulo sigue vivo.
+try:
+    import pymupdf
+    _ERROR_PDF = ""
+except Exception as _e_pdf:  # pragma: no cover
+    pymupdf = None
+    _ERROR_PDF = str(_e_pdf)
+
+try:
+    import zxingcpp
+    _ERROR_ZX = ""
+except Exception as _e_zx:  # pragma: no cover
+    zxingcpp = None
+    _ERROR_ZX = str(_e_zx)
+
+
+def estampar_qr_pdf(pdf_bytes: bytes, id_oficio: str,
+                    lado_cm: float = 2.3, margen_cm: float = 1.0) -> bytes:
+    """Inserta el QR en la esquina superior derecha de la PRIMERA página y
+    escribe el ID en claro debajo, por si el QR se destruye al engrapar.
+    Devuelve el PDF listo para imprimir y pasar a firma."""
+    if pymupdf is None:
+        raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
+
+    png = generar_qr_png(id_oficio)
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        pagina = doc[0]
+        lado, margen = lado_cm * CM, margen_cm * CM
+        x_der = pagina.rect.width - margen
+        rect = pymupdf.Rect(x_der - lado, margen, x_der, margen + lado)
+        pagina.insert_image(rect, stream=png)
+        pagina.insert_text((rect.x0, rect.y1 + 7), id_oficio, fontsize=6)
+        return doc.tobytes()
+    finally:
+        doc.close()
+
+
+def extraer_texto_pdf(pdf_bytes: bytes, max_paginas: int = 2) -> str:
+    """Texto de las primeras páginas. Los oficios salen de Word, así que
+    traen capa de texto: no hace falta OCR."""
+    if pymupdf is None:
+        return ""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        partes = [doc[i].get_text() for i in range(min(max_paginas, doc.page_count))]
+        return "\n".join(partes).strip()
+    finally:
+        doc.close()
+
+
+def leer_qr_pdf(archivo_bytes: bytes, nombre: str, dpi: int = 200) -> list[tuple[int, str]]:
+    """Devuelve [(num_pagina, ID_OFICIO), ...] de cada página donde haya un QR
+    del minutario. Es lo que permite procesar un escaneo en lote sin separadores."""
+    if zxingcpp is None:
+        raise RuntimeError(f"zxing-cpp no disponible: {_ERROR_ZX}")
+
+    from PIL import Image
+
+    def _ids_de_imagen(img, num_pag):
+        hallados = []
+        for res in zxingcpp.read_barcodes(img):
+            texto = str(res.text)
+            if "validar_oficio=" in texto:
+                hallados.append((num_pag, texto.split("validar_oficio=")[-1].strip()))
+        return hallados
+
+    encontrados = []
+    if nombre.lower().endswith(".pdf"):
+        if pymupdf is None:
+            raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
+        doc = pymupdf.open(stream=archivo_bytes, filetype="pdf")
+        try:
+            for i in range(doc.page_count):
+                pix = doc[i].get_pixmap(dpi=dpi)
+                img = Image.open(BytesIO(pix.tobytes("png")))
+                encontrados.extend(_ids_de_imagen(img, i))
+        finally:
+            doc.close()
+    else:
+        encontrados.extend(_ids_de_imagen(Image.open(BytesIO(archivo_bytes)), 0))
+    return encontrados
+
+
+def partir_pdf_por_qr(pdf_bytes: bytes, marcas: list[tuple[int, str]]) -> dict[str, bytes]:
+    """Corta un PDF de lote en documentos individuales. Cada página con QR
+    inicia un oficio nuevo; las siguientes sin QR se le anexan."""
+    if pymupdf is None:
+        raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
+
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        inicios = sorted(marcas, key=lambda m: m[0])
+        salida = {}
+        for idx, (pag_ini, id_of) in enumerate(inicios):
+            pag_fin = inicios[idx + 1][0] - 1 if idx + 1 < len(inicios) else doc.page_count - 1
+            nuevo = pymupdf.open()
+            nuevo.insert_pdf(doc, from_page=pag_ini, to_page=pag_fin)
+            salida[id_of] = nuevo.tobytes()
+            nuevo.close()
+        return salida
+    finally:
+        doc.close()
+
+
+# ─────────────────────────────────────────────
+# EXTRACCIÓN DE DATOS DEL OFICIO
+#
+# Método por defecto: expresiones regulares sobre la estructura fija del
+# oficio institucional. Es determinista, auditable y NO envía el contenido
+# del oficio a ningún servicio externo. La IA queda como opción apagada.
+# ─────────────────────────────────────────────
+import re
+
+CAMPOS_EXTRAIBLES = ["folio", "fecha_oficio", "asunto", "dirigido_a", "cargo_destino"]
+
+MESES = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+    "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+    "noviembre": 11, "diciembre": 12,
+}
+
+# Tratamientos que anteceden al nombre del destinatario en un oficio oficial.
+TRATAMIENTOS = (
+    r"(?:LIC|MTRO|MTRA|ING|DR|DRA|PROF|PROFR|PROFRA|C|CP|LIC\.?A|ARQ|"
+    r"MAESTRO|MAESTRA|LICENCIADO|LICENCIADA|DOCTOR|DOCTORA)"
+)
+
+_RE_FOLIO = re.compile(
+    r"\b[A-ZÁÉÍÓÚÑ]{2,8}(?:\s*/\s*[A-ZÁÉÍÓÚÑ0-9]{1,10})*\s*/\s*(\d{1,6})\s*/\s*(\d{4})\b"
+)
+_RE_FOLIO_ALT = re.compile(
+    r"oficio\s*(?:n[uú]m\.?(?:ero)?|n[oº°]\.?|#)?\s*:?\s*(\d{1,6})\s*/\s*(\d{4})",
+    re.IGNORECASE,
+)
+_RE_FECHA_TEXTO = re.compile(
+    r"\b(\d{1,2})\s+de\s+([a-záéíóú]+)\s+(?:de|del)\s+(\d{4})", re.IGNORECASE
+)
+_RE_FECHA_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_RE_ASUNTO = re.compile(
+    r"asunto\s*:?\s*(.+?)(?:\n\s*\n|\n(?=\s*(?:" + TRATAMIENTOS + r")\b)|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_RE_PRESENTE = re.compile(r"^\s*P\s*R\s*E\s*S\s*E\s*N\s*T\s*E\s*\.?\s*$", re.IGNORECASE)
+_RE_DESTINATARIO = re.compile(
+    r"^\s*(" + TRATAMIENTOS + r")\.?\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s\.]{4,60})\s*$"
+)
+
+
+def _limpiar(texto: str) -> str:
+    return re.sub(r"\s+", " ", str(texto or "")).strip(" .:,;-")
+
+
+def extraer_datos_regex(texto: str) -> dict:
+    """Lee los campos del oficio con reglas explícitas. Todo campo que no
+    encuentre queda vacío: nunca adivina."""
+    datos = {c: "" for c in CAMPOS_EXTRAIBLES}
+    if not texto or not texto.strip():
+        return datos
+
+    lineas = [l.rstrip() for l in texto.splitlines()]
+
+    # ── Folio ──
+    m = _RE_FOLIO.search(texto) or _RE_FOLIO_ALT.search(texto)
+    if m:
+        datos["folio"] = m.group(1).zfill(4)
+
+    # ── Fecha ──
+    m = _RE_FECHA_TEXTO.search(texto)
+    if m:
+        mes = MESES.get(m.group(2).lower())
+        if mes:
+            datos["fecha_oficio"] = f"{m.group(3)}-{mes:02d}-{int(m.group(1)):02d}"
+    if not datos["fecha_oficio"]:
+        m = _RE_FECHA_ISO.search(texto)
+        if m:
+            datos["fecha_oficio"] = m.group(0)
+
+    # ── Asunto ──
+    m = _RE_ASUNTO.search(texto)
+    if m:
+        datos["asunto"] = _limpiar(m.group(1))[:250]
+
+    # ── Destinatario y cargo ──
+    # El cargo va entre el nombre y la línea "P R E S E N T E".
+    idx_presente = next(
+        (i for i, l in enumerate(lineas) if _RE_PRESENTE.match(l)), None
+    )
+    idx_nombre = None
+    tope = idx_presente if idx_presente is not None else len(lineas)
+    for i in range(tope - 1, -1, -1):
+        mm = _RE_DESTINATARIO.match(lineas[i])
+        if mm:
+            datos["dirigido_a"] = _limpiar(f"{mm.group(1)}. {mm.group(2)}")
+            idx_nombre = i
+            break
+
+    if idx_nombre is not None and idx_presente is not None:
+        cargo = [_limpiar(l) for l in lineas[idx_nombre + 1:idx_presente]]
+        datos["cargo_destino"] = " ".join(c for c in cargo if c)[:200]
+
+    return datos
+
+
+def extraer_datos_ia(texto: str) -> dict:
+    """OPCIONAL y APAGADO por defecto. Solo corre si en secrets existe
+    usar_ia_oficios = true. Enviaría el texto del oficio a un servicio
+    externo, por eso requiere activación explícita."""
+    vacio = {c: "" for c in CAMPOS_EXTRAIBLES}
+    if not st.secrets.get("usar_ia_oficios", False):
+        return vacio
+    if not texto.strip() or "GEMINI_API_KEY" not in st.secrets:
+        return vacio
+    try:
+        import json
+        import google.generativeai as genai
+
+        prompt = (
+            "Extrae los datos de este oficio institucional mexicano.\n"
+            "Responde SOLO con JSON, sin markdown:\n"
+            '{"folio":"","fecha_oficio":"","asunto":"","dirigido_a":"","cargo_destino":""}\n'
+            '- "folio": solo dígitos (de "DFC/RH/0100/2026" extrae "0100").\n'
+            '- "fecha_oficio": AAAA-MM-DD.\n'
+            "- Si un dato no aparece, cadena vacía. No inventes.\n\nTEXTO:\n"
+        )
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        modelo = genai.GenerativeModel("gemini-2.5-flash-lite")
+        crudo = str(modelo.generate_content(prompt + texto[:6000]).text).strip()
+        if "```" in crudo:
+            crudo = crudo.split("```")[1].replace("json", "", 1).strip()
+        d = json.loads(crudo)
+        return {k: str(d.get(k, "") or "") for k in vacio}
+    except Exception:
+        return vacio
+
+
+def extraer_datos_oficio(texto: str) -> tuple[dict, str]:
+    """Punto de entrada único. Devuelve (datos, método usado).
+    La IA solo complementa campos que las reglas dejaron vacíos, y solo
+    si está habilitada explícitamente en secrets."""
+    datos = extraer_datos_regex(texto)
+    metodo = "reglas"
+
+    faltantes = [c for c in CAMPOS_EXTRAIBLES if not datos[c]]
+    if faltantes and st.secrets.get("usar_ia_oficios", False):
+        sugeridos = extraer_datos_ia(texto)
+        completados = [c for c in faltantes if sugeridos.get(c)]
+        if completados:
+            for c in completados:
+                datos[c] = sugeridos[c]
+            metodo = "reglas + IA"
+    return datos, metodo
+
+
+def subir_bytes_drive(contenido: bytes, nombre_archivo: str, mimetype: str) -> str:
+    """Sube contenido en memoria a la carpeta de oficios. Sin permiso 'anyone':
     el acceso se hereda de la membresía de la Unidad Compartida."""
     try:
         from googleapiclient.discovery import build
@@ -151,13 +407,9 @@ def subir_oficio_drive(archivo, id_oficio: str) -> str:
             scopes=["https://www.googleapis.com/auth/drive"],
         )
         service = build("drive", "v3", credentials=creds)
-
-        ext = archivo.name.split(".")[-1].lower()
-        media = MediaIoBaseUpload(io.BytesIO(archivo.getvalue()), mimetype=archivo.type)
-        meta = {
-            "name": f"{id_oficio}.{ext}",
-            "parents": [st.secrets["drive_oficios_folder"]],
-        }
+        media = MediaIoBaseUpload(io.BytesIO(contenido), mimetype=mimetype)
+        meta = {"name": nombre_archivo,
+                "parents": [st.secrets["drive_oficios_folder"]]}
         creado = service.files().create(
             body=meta, media_body=media, fields="id", supportsAllDrives=True
         ).execute()
@@ -166,15 +418,18 @@ def subir_oficio_drive(archivo, id_oficio: str) -> str:
         return f"ERROR: {e}"
 
 
-def sha256_archivo(archivo) -> str:
-    """Huella del escaneo. Si alguien sustituye el archivo en Drive,
-    el hash deja de coincidir."""
-    return hashlib.sha256(archivo.getvalue()).hexdigest()
+def subir_oficio_drive(archivo, id_oficio: str) -> str:
+    """Sube un archivo cargado por la persona usuaria."""
+    ext = archivo.name.split(".")[-1].lower()
+    return subir_bytes_drive(archivo.getvalue(), f"{id_oficio}.{ext}",
+                             archivo.type or "application/octet-stream")
 
 
-# ─────────────────────────────────────────────
-# ESCRITURA
-# ─────────────────────────────────────────────
+def sha256_bytes(contenido: bytes) -> str:
+    """Huella del archivo. Si alguien lo sustituye en Drive, deja de coincidir."""
+    return hashlib.sha256(contenido).hexdigest()
+
+
 def reservar_oficio(get_client, datos: dict) -> tuple[bool, str]:
     """Alta de un folio ya asignado por el minutario de la Dirección.
     Rechaza duplicados: es el único detector de que alguien copió mal
@@ -236,24 +491,6 @@ def _actualizar_fila(get_client, id_oficio: str, cambios: dict) -> bool:
             st.cache_data.clear()
             return True
     return False
-
-
-def registrar_escaneo(get_client, id_oficio: str, archivo, es_acuse: bool) -> tuple[bool, str]:
-    url = subir_oficio_drive(archivo, id_oficio)
-    if url.startswith("ERROR:"):
-        return False, url
-
-    estado = "ACUSE" if es_acuse else "ESCANEADO"
-    ok = _actualizar_fila(get_client, id_oficio, {
-        "URL": url,
-        "SHA256": sha256_archivo(archivo),
-        "FECHA_ESCANEO": _hoy(),
-        "ESTADO": estado,
-    })
-    if ok:
-        _registrar_log(get_client, id_oficio, estado, url)
-        return True, url
-    return False, "No se encontró el oficio en el Sheet."
 
 
 def cancelar_oficio(get_client, id_oficio: str, motivo: str) -> bool:
@@ -346,75 +583,170 @@ def render_oficios(deps: dict):
         return
 
     tab_reg, tab_esc, tab_cons = st.tabs(
-        ["➕ Registrar folio", "📎 Subir escaneo", "📋 Consultar"]
+        ["📤 Emitir oficio", "📎 Escaneo firmado", "📋 Consultar"]
     )
 
-    # ── Registrar ────────────────────────────
+    # ── Emitir oficio ────────────────────────
     with tab_reg:
-        anio_actual = datetime.now(TZ).year
-        c1, c2, c3 = st.columns([1, 1, 2])
-        anio = c1.number_input("Año", min_value=2020, max_value=2100,
-                               value=anio_actual, step=1, key="of_anio")
-        folio = c2.text_input("Folio del minutario", key="of_folio",
-                              help="El número que te asignó la Dirección.")
-        fecha_of = c3.date_input("Fecha del oficio", key="of_fecha")
-
-        asunto = st.text_input("Asunto", key="of_asunto")
-        c4, c5 = st.columns(2)
-        dirigido = c4.text_input("Dirigido a", key="of_dirigido")
-        cargo = c5.text_input("Cargo del destinatario", key="of_cargo")
-        obs = st.text_area("Observaciones", key="of_obs", height=70)
-
-        if st.button("Registrar folio", type="primary", key="of_btn_reg"):
-            if not str(folio).strip().isdigit():
-                st.warning("El folio debe ser numérico.")
-            elif not asunto.strip() or not dirigido.strip():
-                st.warning("Asunto y destinatario son obligatorios.")
-            else:
-                ok, resultado = reservar_oficio(get_client, {
-                    "anio": int(anio),
-                    "folio": folio,
-                    "fecha_oficio": fecha_of.strftime("%Y-%m-%d"),
-                    "asunto": asunto.strip(),
-                    "dirigido_a": dirigido.strip(),
-                    "cargo_destino": cargo.strip(),
-                    "observaciones": obs.strip(),
-                })
-                if ok:
-                    st.success(f"Registrado: **{resultado}**")
-                    png = generar_qr_png(resultado)
-                    cq1, cq2 = st.columns([1, 3])
-                    cq1.image(png, width=150)
-                    cq2.download_button(
-                        "⬇️ Descargar QR (PNG)", data=png,
-                        file_name=f"QR_{resultado}.png", mime="image/png",
-                        key="of_dl_qr",
-                    )
-                    cq2.caption("Insértalo en el oficio a 2–2.5 cm, esquina superior "
-                                "derecha, **antes** de imprimir y firmar.")
-                else:
-                    st.error(resultado)
-
-    # ── Subir escaneo ────────────────────────
-    with tab_esc:
-        if df.empty:
-            st.info("Aún no hay folios registrados.")
+        if pymupdf is None:
+            st.error(f"Falta PyMuPDF: {_ERROR_PDF}")
         else:
-            pendientes = df[df["ESTADO"].astype(str) != "CANCELADO"]
-            opciones = pendientes["ID_OFICIO"].astype(str).tolist()
-            sel = st.selectbox("Oficio", options=opciones, key="of_sel_esc")
-            es_acuse = st.checkbox("Es acuse sellado de recibido", key="of_acuse")
-            archivo = st.file_uploader("Escaneo (PDF o imagen)",
-                                       type=["pdf", "jpg", "jpeg", "png"],
-                                       key="of_file")
-            if archivo and st.button("Guardar escaneo", type="primary", key="of_btn_esc"):
-                with st.spinner("Subiendo a Drive..."):
-                    ok, res = registrar_escaneo(get_client, sel, archivo, es_acuse)
-                if ok:
-                    st.success("Escaneo resguardado.")
-                    st.markdown(f"[Abrir en Drive]({res})")
+            st.markdown("**1.** Sube el oficio en PDF · **2.** Confirma los datos · "
+                        "**3.** Descarga el PDF con QR y pásalo a firma")
+
+            pdf_in = st.file_uploader("Oficio en PDF (sin firmar)", type=["pdf"],
+                                      key="of_pdf_in")
+
+            if pdf_in is not None:
+                pdf_bytes = pdf_in.getvalue()
+
+                huella = hashlib.md5(pdf_bytes).hexdigest()
+                if st.session_state.get("_of_huella") != huella:
+                    with st.spinner("Leyendo el oficio..."):
+                        texto = extraer_texto_pdf(pdf_bytes)
+                        sug, metodo = extraer_datos_oficio(texto)
+                        st.session_state["_of_sug"] = sug
+                        st.session_state["_of_metodo"] = metodo
+                        st.session_state["_of_huella"] = huella
+                        st.session_state["_of_hay_texto"] = bool(texto.strip())
+
+                sug = st.session_state.get("_of_sug", {})
+                metodo = st.session_state.get("_of_metodo", "reglas")
+                if not st.session_state.get("_of_hay_texto", True):
+                    st.warning("El PDF no trae capa de texto (parece escaneado). "
+                               "Captura los datos a mano.")
+                elif any(sug.values()):
+                    st.info(f"Datos detectados por **{metodo}**. "
+                            "Revísalos y corrígelos antes de continuar.")
+                    if metodo == "reglas":
+                        st.caption("El contenido del oficio se procesó localmente. "
+                                   "No se envió a ningún servicio externo.")
+
+                anio_actual = datetime.now(TZ).year
+                c1, c2, c3 = st.columns([1, 1, 2])
+                anio = c1.number_input("Año", min_value=2020, max_value=2100,
+                                       value=anio_actual, step=1, key="of_anio")
+                folio = c2.text_input("Folio del minutario",
+                                      value=sug.get("folio", ""), key="of_folio",
+                                      help="El número que te asignó la Dirección.")
+                try:
+                    f_def = datetime.strptime(sug.get("fecha_oficio", ""), "%Y-%m-%d").date()
+                except Exception:
+                    f_def = datetime.now(TZ).date()
+                fecha_of = c3.date_input("Fecha del oficio", value=f_def, key="of_fecha")
+
+                asunto = st.text_input("Asunto", value=sug.get("asunto", ""),
+                                       key="of_asunto")
+                c4, c5 = st.columns(2)
+                dirigido = c4.text_input("Dirigido a", value=sug.get("dirigido_a", ""),
+                                         key="of_dirigido")
+                cargo = c5.text_input("Cargo del destinatario",
+                                      value=sug.get("cargo_destino", ""), key="of_cargo")
+                obs = st.text_area("Observaciones", key="of_obs", height=70)
+
+                if st.button("Confirmar y estampar QR", type="primary", key="of_btn_reg"):
+                    if not str(folio).strip().isdigit():
+                        st.warning("El folio debe ser numérico.")
+                    elif not asunto.strip() or not dirigido.strip():
+                        st.warning("Asunto y destinatario son obligatorios.")
+                    else:
+                        ok, resultado = reservar_oficio(get_client, {
+                            "anio": int(anio),
+                            "folio": folio,
+                            "fecha_oficio": fecha_of.strftime("%Y-%m-%d"),
+                            "asunto": asunto.strip(),
+                            "dirigido_a": dirigido.strip(),
+                            "cargo_destino": cargo.strip(),
+                            "observaciones": obs.strip(),
+                        })
+                        if not ok:
+                            st.error(resultado)
+                        else:
+                            try:
+                                with st.spinner("Estampando QR y resguardando..."):
+                                    sellado = estampar_qr_pdf(pdf_bytes, resultado)
+                                    url = subir_bytes_drive(
+                                        sellado, f"{resultado}_SINFIRMA.pdf",
+                                        "application/pdf")
+                                    _actualizar_fila(get_client, resultado, {
+                                        "ESTADO": "EMITIDO",
+                                        "URL": url if not url.startswith("ERROR:") else "",
+                                    })
+                                    _registrar_log(get_client, resultado, "EMITIDO", url)
+                                st.success(f"**{resultado}** listo. Imprime este PDF "
+                                           "y pásalo a firma.")
+                                st.download_button(
+                                    "⬇️ Descargar PDF con QR",
+                                    data=sellado,
+                                    file_name=f"{resultado}_conQR.pdf",
+                                    mime="application/pdf", key="of_dl_pdf",
+                                )
+                                if url.startswith("ERROR:"):
+                                    st.warning(f"Se registró, pero falló Drive: {url}")
+                            except Exception as e:
+                                _error_amable(e, "al estampar el QR")
+
+    # ── Escaneo firmado ──────────────────────
+    with tab_esc:
+        if zxingcpp is None:
+            st.error(f"Falta zxing-cpp: {_ERROR_ZX}")
+        elif df.empty:
+            st.info("Aún no hay oficios emitidos.")
+        else:
+            st.caption("Sube el oficio ya firmado y sellado. El sistema lee el QR "
+                       "y lo asocia solo. Si el PDF trae varios oficios, los separa.")
+            es_acuse = st.checkbox("Son acuses sellados de recibido", key="of_acuse")
+            scan = st.file_uploader("Escaneo (PDF de uno o varios oficios, o imagen)",
+                                    type=["pdf", "jpg", "jpeg", "png"], key="of_file")
+
+            if scan is not None:
+                scan_bytes = scan.getvalue()
+                try:
+                    with st.spinner("Buscando códigos QR..."):
+                        marcas = leer_qr_pdf(scan_bytes, scan.name)
+                except Exception as e:
+                    marcas = []
+                    _error_amable(e, "al leer el QR")
+
+                conocidos = set(df["ID_OFICIO"].astype(str))
+                validas = [(p, i) for p, i in marcas if i in conocidos]
+                huerfanas = [i for _, i in marcas if i not in conocidos]
+
+                if huerfanas:
+                    st.error("QR que **no** corresponden a este minutario: "
+                             + ", ".join(sorted(set(huerfanas))))
+
+                if not validas:
+                    st.warning("No se detectó ningún QR del minutario. Verifica que el "
+                               "escaneo sea de al menos 200 dpi y que el QR esté completo.")
                 else:
-                    st.error(res)
+                    st.success(f"Detectados: {', '.join(i for _, i in validas)}")
+                    if st.button("Guardar escaneos", type="primary", key="of_btn_esc"):
+                        es_pdf = scan.name.lower().endswith(".pdf")
+                        piezas = (partir_pdf_por_qr(scan_bytes, validas) if es_pdf
+                                  else {validas[0][1]: scan_bytes})
+                        estado = "ACUSE" if es_acuse else "ESCANEADO"
+                        sufijo = "ACUSE" if es_acuse else "FIRMADO"
+                        mime = "application/pdf" if es_pdf else (scan.type or "image/png")
+                        ext = "pdf" if es_pdf else scan.name.split(".")[-1].lower()
+
+                        barra = st.progress(0.0)
+                        for n, (id_of, contenido) in enumerate(piezas.items(), start=1):
+                            url = subir_bytes_drive(
+                                contenido, f"{id_of}_{sufijo}.{ext}", mime)
+                            if url.startswith("ERROR:"):
+                                st.error(f"{id_of}: {url}")
+                            else:
+                                _actualizar_fila(get_client, id_of, {
+                                    "URL": url,
+                                    "SHA256": sha256_bytes(contenido),
+                                    "FECHA_ESCANEO": _hoy(),
+                                    "ESTADO": estado,
+                                })
+                                _registrar_log(get_client, id_of, estado, url)
+                                st.write(f"✅ {id_of} → [Drive]({url})")
+                            barra.progress(n / len(piezas))
+                        st.cache_data.clear()
 
     # ── Consultar ────────────────────────────
     with tab_cons:

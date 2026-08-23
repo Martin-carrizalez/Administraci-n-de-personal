@@ -10,3 +10,5 @@ plotly
 openpyxl
 pytz
 google-generativeai
+PyMuPDF
+zxing-cpp
