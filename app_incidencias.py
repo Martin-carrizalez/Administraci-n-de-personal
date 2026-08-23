@@ -69,6 +69,10 @@ DIRECTORA_NOMBRE = "Claudia Gisela Ramírez Monroy"
 DIRECTORA_CARGO  = "Encargada del Despacho de la Dirección de Formación Continua"
 NOMBRE_DIRECTORA = f"{DIRECTORA_NOMBRE}<br/>{DIRECTORA_CARGO}"
 DRIVE_ANEXOS_FOLDER = "1LnQjrhjEKgKxFTJD8USLoiCpCKQHfOQC"
+# Subcarpeta APARTE para las listas de asistencia mensual de Centros de
+# Maestros (no se mezclan con los anexos de incidencias). Crea la carpeta
+# dentro de tu unidad compartida y sustituye este ID por el real.
+DRIVE_ASISTENCIA_CM_FOLDER = "PON_AQUI_EL_ID_DE_LA_CARPETA_ASISTENCIA_CM"
 
 COLUMNAS_HORARIO = {
     "LUN": ("ENTRADA_LUN", "SALIDA_LUN"),
@@ -767,8 +771,10 @@ def generar_comprobante_pdf(datos: dict) -> bytes:
 # ─────────────────────────────────────────────
 # ESCRITURA EN SHEETS
 # ─────────────────────────────────────────────
-def subir_anexo_drive(archivo, folio: str, rfc: str) -> str:
-    """Sube un archivo a Google Drive y retorna el link de visualización."""
+def subir_archivo_drive(archivo, nombre_archivo: str, folder_id: str) -> str:
+    """Sube un archivo a Google Drive y retorna el link de visualización,
+    o un string que empieza con 'ERROR:' si falla. Quien la llame DEBE
+    checar ese prefijo antes de tratar el resultado como link válido."""
     try:
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaIoBaseUpload
@@ -780,27 +786,22 @@ def subir_anexo_drive(archivo, folio: str, rfc: str) -> str:
             scopes=["https://www.googleapis.com/auth/drive"]
         )
         service = build("drive", "v3", credentials=creds)
-
-        ext = archivo.name.split(".")[-1].lower()
-        nombre_archivo = f"{folio}_{rfc}.{ext}"
         media = MediaIoBaseUpload(io.BytesIO(archivo.read()), mimetype=archivo.type)
-        file_metadata = {
-            "name": nombre_archivo,
-            "parents": [DRIVE_ANEXOS_FOLDER],
-        }
+        file_metadata = {"name": nombre_archivo, "parents": [folder_id]}
         archivo_drive = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields="id",
-            supportsAllDrives=True
+            body=file_metadata, media_body=media, fields="id", supportsAllDrives=True
         ).execute()
-
         file_id = archivo_drive.get("id")
         # NOTA: sin permiso "anyone" — el acceso se hereda de la membresía
         # de la unidad compartida (solo RH y la service account).
         return f"https://drive.google.com/file/d/{file_id}/view"
     except Exception as e:
         return f"ERROR: {e}"
+
+def subir_anexo_drive(archivo, folio: str, rfc: str) -> str:
+    """Sube un archivo a Google Drive y retorna el link de visualización."""
+    ext = archivo.name.split(".")[-1].lower()
+    return subir_archivo_drive(archivo, f"{folio}_{rfc}.{ext}", DRIVE_ANEXOS_FOLDER)
 
 def _envio_duplicado(clave: str) -> bool:
     """Candado anti doble clic: True si esta MISMA solicitud ya se envió en los
@@ -1220,6 +1221,14 @@ except Exception as _e_chk:
     _checador_mod = None
     _ERROR_CHECADOR = str(_e_chk)
 
+# ── Minutario de oficios: módulo aparte (aún no entregado) ──
+try:
+    import oficios_module as _oficios_mod
+    _ERROR_OFICIOS = ""
+except Exception as _e_of:
+    _oficios_mod = None
+    _ERROR_OFICIOS = str(_e_of)
+
 def render_checador():
     if _checador_mod is None:
         st.error(f"El módulo del checador no está disponible: {_ERROR_CHECADOR}")
@@ -1236,6 +1245,15 @@ def render_checador():
         "guardar_asistencia_mes": guardar_asistencia_mes,
         "DIRECTORA_NOMBRE": DIRECTORA_NOMBRE,
         "DIRECTORA_CARGO": DIRECTORA_CARGO,
+    })
+
+def render_oficios():
+    if _oficios_mod is None:
+        st.error(f"Módulo de oficios no disponible: {_ERROR_OFICIOS}")
+        return
+    _oficios_mod.render_oficios({
+        "get_client": get_client,
+        "rfcs_autorizados": _rfcs_secret("rfcs_oficios"),
     })
 
 
@@ -2378,11 +2396,9 @@ def vista_directorio():
 
     @st.cache_data(ttl=300)
     def cargar_directorio():
-        client = get_client()
-        sh = client.open_by_key(st.secrets["sheet_checador_id"])
-        ws = sh.worksheet("Directorio")
-        data = ws.get_all_records(numericise_ignore=["all"])
-        return pd.DataFrame(data).fillna("")
+        # FASE 1 migración: lee del Padrón Maestro con fallback automático
+        # a la tab Directorio (mismas columnas que la vista espera).
+        return _directorio_unificado()
 
     st.markdown("## 📞 Directorio interno DFC 2026")
     st.caption("Toca un área para ver su equipo · Busca por nombre, extensión o correo")
@@ -2526,23 +2542,6 @@ def vista_directorio():
                             _extra = f" · 📞 {_r['EXTENSION']}" if str(_r.get("EXTENSION", "")).strip() else ""
                             _correo = f" · {_r['CORREO']}" if str(_r.get("CORREO", "")).strip() else ""
                             st.markdown(f"{_icon} **{_r['NOMBRE']}** — {_rol or 'Asesor'}{_extra}{_correo}")
-                            # 👇 NUEVO: Mapeo y formateo del horario del asesor 👇
-                            horario_str = []
-                            # Usamos COLUMNAS_HORARIO que ya tienes definido al inicio de tu app
-                            for dia, (col_e, col_s) in COLUMNAS_HORARIO.items():
-                                ent = str(_r.get(col_e, "")).strip()
-                                sal = str(_r.get(col_s, "")).strip()
-                                
-                                # Solo mostrar el día si tiene entrada y salida registradas
-                                if ent and sal and ent.lower() != "nan" and sal.lower() != "nan":
-                                    # Formateo por si Sheets manda formato de segundos (ej: 08:00:00)
-                                    ent = ent.replace(":00:00", ":00")
-                                    sal = sal.replace(":00:00", ":00")
-                                    horario_str.append(f"**{dia}** {ent}-{sal}")
-
-                            if horario_str:
-                                st.caption(f"🕒 {' | '.join(horario_str)}")
-                            # 👆 FIN DE LO NUEVO 👆
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -2559,16 +2558,65 @@ def vista_directorio():
 EMERGENCIA_TAB = "Bitacora_Emergencias"
 EMERGENCIA_HEADERS = ["ID", "CONSULTOR_RFC", "CONSULTOR_NOMBRE", "COMPAÑERO_CONSULTADO", "FECHA_HORA"]
 
+# ═══════════════════════════════════════════════════════════════════
+# PADRÓN MAESTRO — Fuente única de verdad del personal (Fase 1 de migración)
+# ═══════════════════════════════════════════════════════════════════
+# Secrets necesario:  sheet_padron_id = "1F_CHd4p0n_5RGMS6NXYRXS_KUNM9UNkjdzL1LcZaCYU"
+# Y compartir ese spreadsheet con el client_email de la service account (Editor).
+#
+# RED DE SEGURIDAD: si el padrón no está accesible (secret faltante, permiso
+# faltante, tab renombrada), los loaders CAEN AUTOMÁTICAMENTE a la tab
+# Directorio de siempre — la app nunca se queda sin directorio por la migración.
+
+PADRON_TAB = "Padron"
+
 @st.cache_data(ttl=300)
-def _cargar_directorio_completo():
-    """Loader a nivel módulo (independiente del anidado dentro de
-    vista_directorio) para que el protocolo de emergencia no dependa
-    de haber entrado antes a esa vista."""
+def cargar_padron():
+    """Lee el PADRON_MAESTRO_DFC completo. Devuelve DataFrame vacío si no
+    está accesible (el consumidor decide su fallback)."""
+    try:
+        client = get_client()
+        sh = client.open_by_key(st.secrets["sheet_padron_id"])
+        ws = sh.worksheet(PADRON_TAB)
+        data = ws.get_all_records(numericise_ignore=["all"])
+        df = pd.DataFrame(data).fillna("")
+        if not df.empty and "ACTIVO" in df.columns:
+            df = df[df["ACTIVO"].astype(str).str.upper().str.strip() != "NO"]
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+def _directorio_unificado():
+    """Directorio para las vistas, derivado del PADRÓN cuando está disponible
+    (renombrando NOMBRE_COMPLETO→NOMBRE y UBICACION_FISICA→AREA para que las
+    pantallas actuales no noten el cambio), o de la tab Directorio si no."""
+    padron = cargar_padron()
+    if not padron.empty and "NOMBRE_COMPLETO" in padron.columns:
+        df = padron.copy()
+        df["NOMBRE"] = df["NOMBRE_COMPLETO"]
+        if "UBICACION_FISICA" in df.columns:
+            df["AREA"] = df["UBICACION_FISICA"]
+        if "DEPARTAMENTO" not in df.columns:
+            df["DEPARTAMENTO"] = ""
+        if "EXTENSION" not in df.columns:
+            df["EXTENSION"] = ""
+        if "CORREO" not in df.columns:
+            df["CORREO"] = ""
+        st.session_state["_fuente_directorio"] = "padron"
+        return df.fillna("")
+    # Fallback: comportamiento idéntico al de siempre
+    st.session_state["_fuente_directorio"] = "tab_directorio (padrón no accesible)"
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
     ws = sh.worksheet("Directorio")
     data = ws.get_all_records(numericise_ignore=["all"])
     return pd.DataFrame(data).fillna("")
+
+@st.cache_data(ttl=300)
+def _cargar_directorio_completo():
+    """Loader a nivel módulo para el protocolo de emergencia y el directorio.
+    FASE 1: lee del Padrón Maestro, con fallback automático a la tab Directorio."""
+    return _directorio_unificado()
 
 def _ws_emergencias():
     client = get_client()
@@ -2682,6 +2730,32 @@ def vista_contacto_emergencia():
             st.caption(f"Consulta registrada — {_nombre_ses} · {rfc_actual} · {_sello}")
 
 
+# ── Centros de Maestros: extraído a cm_module.py ──
+try:
+    import cm_module as _cm_module
+    _ERROR_CM = ""
+except Exception as _e_cm:
+    _cm_module = None
+    _ERROR_CM = str(_e_cm)
+
+if _cm_module is not None:
+    _cm_module.configurar(get_client=get_client, error_amable=_error_amable,
+                          columnas_horario=COLUMNAS_HORARIO,
+                          subir_archivo_drive=subir_archivo_drive,
+                          carpeta_asistencia_cm=DRIVE_ASISTENCIA_CM_FOLDER)
+
+def _centro_del_responsable(rfc_actual: str):
+    if _cm_module is None:
+        return None
+    return _cm_module._centro_del_responsable(rfc_actual)
+
+def vista_toma_lista_cm():
+    if _cm_module is None:
+        st.error(f"El módulo de Centros de Maestros no está disponible: {_ERROR_CM}")
+        return
+    _cm_module.vista_toma_lista_cm()
+
+
 def vista_ari():
     """ARI embebida: chat de dudas de RH con contexto del usuario autenticado."""
     try:
@@ -2780,6 +2854,11 @@ def main():
             st.rerun()
         return
 
+    # ── Interceptor QR de validación de oficios (módulo aparte) ──
+    if "validar_oficio" in st.query_params and _oficios_mod is not None:
+        _oficios_mod.render_validacion_oficio(get_client, st.query_params["validar_oficio"])
+        return
+
     if "rol" not in st.session_state:
         st.markdown("<style>[data-testid='stSidebar']{display:none}</style>", unsafe_allow_html=True)
         login()
@@ -2836,7 +2915,17 @@ def main():
                 }
                 </script>
             """, height=0)
-        if st.button("🤖 🧠 Pregúntale a ARI la IA de RH"):
+
+        _centro_resp = _centro_del_responsable(_rfc_sb)
+        if st.session_state.get("rol") == "admin" or _centro_resp:
+            if st.button("📋 Toma de Lista (Centros piloto)"):
+                st.session_state["vista"] = "toma_lista_cm"
+                st.rerun()
+        if st.session_state.get("rol") == "admin" or _rfc_sb in _rfcs_secret("rfcs_oficios"):
+            if st.button("📄 Minutario de oficios", key="btn_of_sidebar"):
+                st.session_state["vista"] = "oficios"
+                st.rerun()
+        if st.button("🤖 Pregúntale a ARI la IA de RH"):
             st.session_state["vista"] = "ari"
             st.rerun()
         if st.button("🏠 Inicio"):
@@ -2855,10 +2944,14 @@ def main():
         vista_directorio()
     elif vista == "emergencia":
         vista_contacto_emergencia()
+    elif vista == "toma_lista_cm":
+        vista_toma_lista_cm()
     elif vista == "calendario":
         vista_calendario()
     elif vista == "nomina":
         vista_nomina()
+    elif vista == "oficios":
+        render_oficios()
     elif st.session_state["rol"] == "admin":
         vista_admin()
     else:
