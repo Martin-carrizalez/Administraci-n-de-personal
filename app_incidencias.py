@@ -65,14 +65,30 @@ def formato_jefe_pdf(jefe_raw: str) -> str:
             return f"{nombre.strip()}<br/>{cargo.strip()}"
     return jefe_raw
 
-DIRECTORA_NOMBRE = "Claudia Gisela Ramírez Monroy"
-DIRECTORA_CARGO  = "Encargada del Despacho de la Dirección de Formación Continua"
+def _dato_institucional(clave: str, default: str = "") -> str:
+    """Dato institucional (nombre/cargo de la directora, etc.) leído de
+    secrets — NUNCA hardcodeado en el código que se sube a GitHub."""
+    try:
+        return str(st.secrets.get(clave, default)).strip()
+    except Exception:
+        return default
+
+# En secrets: directora_nombre, directora_cargo
+DIRECTORA_NOMBRE = _dato_institucional("directora_nombre", "(directora_nombre no configurado en secrets)")
+DIRECTORA_CARGO  = _dato_institucional("directora_cargo", "(directora_cargo no configurado en secrets)")
 NOMBRE_DIRECTORA = f"{DIRECTORA_NOMBRE}<br/>{DIRECTORA_CARGO}"
-DRIVE_ANEXOS_FOLDER = "1LnQjrhjEKgKxFTJD8USLoiCpCKQHfOQC"
-# Subcarpeta APARTE para las listas de asistencia mensual de Centros de
-# Maestros (no se mezclan con los anexos de incidencias). Crea la carpeta
-# dentro de tu unidad compartida y sustituye este ID por el real.
-DRIVE_ASISTENCIA_CM_FOLDER = "PON_AQUI_EL_ID_DE_LA_CARPETA_ASISTENCIA_CM"
+def _drive_folder(clave: str) -> str:
+    """ID de carpeta de Drive leído de secrets — nunca hardcodeado en el
+    código que se sube a GitHub. Si falta, devuelve '' (quien lo use debe
+    mostrar aviso claro, no tronar la app entera)."""
+    try:
+        return str(st.secrets.get(clave, "")).strip()
+    except Exception:
+        return ""
+
+# IDs reales van en secrets: drive_anexos_folder_id, drive_asistencia_cm_folder_id
+DRIVE_ANEXOS_FOLDER = _drive_folder("drive_anexos_folder_id")
+DRIVE_ASISTENCIA_CM_FOLDER = _drive_folder("drive_asistencia_cm_folder_id")
 
 COLUMNAS_HORARIO = {
     "LUN": ("ENTRADA_LUN", "SALIDA_LUN"),

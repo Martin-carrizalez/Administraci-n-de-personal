@@ -182,6 +182,9 @@ def _tab_asistencia_mensual(centro: str, rfc_actual: str):
     if archivo and st.button("📎 Subir lista de asistencia", type="primary", use_container_width=True):
         if not periodo.strip():
             st.warning("Indica a qué periodo corresponde la lista antes de subirla.")
+        elif not _deps.get("carpeta_asistencia_cm"):
+            st.error("Falta configurar 'drive_asistencia_cm_folder_id' en secrets. "
+                    "Avísale a RH antes de intentar de nuevo.")
         else:
             with st.spinner("Subiendo a la unidad compartida..."):
                 nombre_arch = f"Asistencia_{centro}_{periodo}_{rfc_actual}.pdf".replace(" ", "_")
