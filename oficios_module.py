@@ -18,6 +18,7 @@ Secrets requeridos:
 import streamlit as st
 import pandas as pd
 import hashlib
+import re
 from io import BytesIO
 from datetime import datetime
 
@@ -33,8 +34,13 @@ TAB_LOG = "log_oficios"
 COLUMNAS_OFICIOS = [
     "ID_OFICIO", "AÑO", "FOLIO", "FECHA_SOLICITUD", "FECHA_OFICIO",
     "EMISOR_RFC", "EMISOR_NOMBRE", "ASUNTO", "DIRIGIDO_A", "CARGO_DESTINO",
-    "ESTADO", "URL", "SHA256", "FECHA_ESCANEO", "OBSERVACIONES",
+    "ESTADO", "URL", "SHA256", "FECHA_ESCANEO", "OBSERVACIONES", "TOKEN",
 ]
+
+# Longitud del token opaco del QR. 12 caracteres base32 ≈ 60 bits: no es
+# enumerable, que es justo el punto — con el ID visible (DFC-2026-1009)
+# cualquiera podría probar 1010, 1011, 1012 y cosechar información.
+LONGITUD_TOKEN = 12
 
 COLUMNAS_LOG = [
     "TIMESTAMP", "ID_OFICIO", "ACCION", "RFC", "NOMBRE", "DETALLE",
@@ -116,18 +122,28 @@ def _error_amable(e: Exception, contexto: str = ""):
 # ─────────────────────────────────────────────
 # QR
 # ─────────────────────────────────────────────
-def generar_qr_png(id_oficio: str) -> bytes:
-    """QR con corrección de error alta (H): sobrevive sello, engrapado y dobleces."""
-    url = f"{URL_APP}/?validar_oficio={id_oficio}"
+def generar_token() -> str:
+    """Token aleatorio e irrepetible. Va en el QR en lugar del ID para que
+    la página de validación pueda mostrar datos sin quedar expuesta a que
+    alguien recorra folios consecutivos."""
+    import secrets
+    alfabeto = "abcdefghijkmnpqrstuvwxyz23456789"  # sin l, o, 0, 1: se confunden
+    return "".join(secrets.choice(alfabeto) for _ in range(LONGITUD_TOKEN))
+
+
+def generar_qr_png(token: str, color: str = "#888888") -> bytes:
+    """QR con corrección de error alta (H): sobrevive sello, engrapado y
+    dobleces. Lleva SOLO el token, no una URL: con menos datos el símbolo usa
+    menos módulos y se puede imprimir más pequeño sin perder legibilidad."""
     qr = qrcode.QRCode(
         version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_H,
         box_size=10,
         border=2,
     )
-    qr.add_data(url)
+    qr.add_data(token)
     qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
+    img = qr.make_image(fill_color=color, back_color="white")
     buf = BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)
@@ -163,16 +179,20 @@ POSICIONES_QR = {
 }
 
 
-def estampar_qr_pdf(pdf_bytes: bytes, id_oficio: str, posicion: str = "SD",
-                    lado_cm: float = 2.3, margen_cm: float = 1.0) -> bytes:
-    """Inserta el QR en la esquina indicada de la PRIMERA página y escribe el
-    ID en claro junto a él, por si el QR se destruye al engrapar.
-    La esquina se elige porque el membrete varía entre formatos de oficio.
-    Devuelve el PDF listo para imprimir y pasar a firma."""
+def estampar_qr_pdf(pdf_bytes: bytes, token: str, posicion: str = "ID",
+                    lado_cm: float = 1.6, margen_cm: float = 1.0,
+                    color: str = "#888888", etiqueta: str = "") -> bytes:
+    """Inserta el QR discreto en la esquina indicada de la PRIMERA página.
+
+    Medido sobre escaneo degradado a 150 dpi (contraste pobre, inclinación,
+    JPEG): con token de 12 caracteres, 1.3 cm es el mínimo fiable y 1.6 cm
+    deja margen. Por debajo de 1.3 cm no se lee. El color casi no afecta la
+    lectura, así que el gris permite discreción sin costo.
+    """
     if pymupdf is None:
         raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
 
-    png = generar_qr_png(id_oficio)
+    png = generar_qr_png(token, color)
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         pagina = doc[0]
@@ -180,12 +200,14 @@ def estampar_qr_pdf(pdf_bytes: bytes, id_oficio: str, posicion: str = "SD",
         ancho, alto = pagina.rect.width, pagina.rect.height
 
         x0 = margen if posicion in ("SI", "II") else ancho - margen - lado
-        # Abajo se reserva espacio extra para no pisar el pie de página legal.
-        y0 = margen if posicion in ("SI", "SD") else alto - margen - lado - 14
+        y0 = margen if posicion in ("SI", "SD") else alto - margen - lado
 
         rect = pymupdf.Rect(x0, y0, x0 + lado, y0 + lado)
         pagina.insert_image(rect, stream=png)
-        pagina.insert_text((rect.x0, rect.y1 + 7), id_oficio, fontsize=6)
+        if etiqueta:
+            # Respaldo por si el QR se destruye: permite buscar a mano.
+            pagina.insert_text((rect.x0, rect.y1 + 5), etiqueta, fontsize=4.5,
+                               color=(0.6, 0.6, 0.6))
         return doc.tobytes()
     finally:
         doc.close()
@@ -215,20 +237,26 @@ def extraer_texto_pdf(pdf_bytes: bytes, max_paginas: int = 2) -> str:
         doc.close()
 
 
-def leer_qr_pdf(archivo_bytes: bytes, nombre: str, dpi: int = 200) -> list[tuple[int, str]]:
-    """Devuelve [(num_pagina, ID_OFICIO), ...] de cada página donde haya un QR
-    del minutario. Es lo que permite procesar un escaneo en lote sin separadores."""
+_RE_TOKEN = re.compile(r"^[a-hjkmnp-z2-9]{" + str(LONGITUD_TOKEN) + r"}$")
+
+
+def leer_qr_pdf(archivo_bytes: bytes, nombre: str, dpi: int = 300) -> list[tuple[int, str]]:
+    """Devuelve [(num_pagina, token), ...] de cada página con un QR del
+    minutario. Es lo que permite procesar un escaneo en lote sin separadores.
+    300 dpi porque el QR es pequeño: a menos resolución se pierde."""
     if zxingcpp is None:
         raise RuntimeError(f"zxing-cpp no disponible: {_ERROR_ZX}")
 
     from PIL import Image
 
-    def _ids_de_imagen(img, num_pag):
+    def _tokens_de_imagen(img, num_pag):
         hallados = []
         for res in zxingcpp.read_barcodes(img):
-            texto = str(res.text)
-            if "validar_oficio=" in texto:
-                hallados.append((num_pag, texto.split("validar_oficio=")[-1].strip()))
+            texto = str(res.text).strip()
+            if "validar_oficio=" in texto:          # formato anterior
+                texto = texto.split("validar_oficio=")[-1].strip()
+            if _RE_TOKEN.match(texto):
+                hallados.append((num_pag, texto))
         return hallados
 
     encontrados = []
@@ -240,11 +268,11 @@ def leer_qr_pdf(archivo_bytes: bytes, nombre: str, dpi: int = 200) -> list[tuple
             for i in range(doc.page_count):
                 pix = doc[i].get_pixmap(dpi=dpi)
                 img = Image.open(BytesIO(pix.tobytes("png")))
-                encontrados.extend(_ids_de_imagen(img, i))
+                encontrados.extend(_tokens_de_imagen(img, i))
         finally:
             doc.close()
     else:
-        encontrados.extend(_ids_de_imagen(Image.open(BytesIO(archivo_bytes)), 0))
+        encontrados.extend(_tokens_de_imagen(Image.open(BytesIO(archivo_bytes)), 0))
     return encontrados
 
 
@@ -276,8 +304,6 @@ def partir_pdf_por_qr(pdf_bytes: bytes, marcas: list[tuple[int, str]]) -> dict[s
 # oficio institucional. Es determinista, auditable y NO envía el contenido
 # del oficio a ningún servicio externo. La IA queda como opción apagada.
 # ─────────────────────────────────────────────
-import re
-
 CAMPOS_EXTRAIBLES = ["folio", "fecha_oficio", "asunto", "dirigido_a", "cargo_destino"]
 
 MESES = {
@@ -463,7 +489,15 @@ def sha256_bytes(contenido: bytes) -> str:
     return hashlib.sha256(contenido).hexdigest()
 
 
-def reservar_oficio(get_client, datos: dict) -> tuple[bool, str]:
+def buscar_por_token(df: pd.DataFrame, token: str):
+    """Localiza el oficio por su token del QR. Devuelve la fila o None."""
+    if df.empty or "TOKEN" not in df.columns:
+        return None
+    hit = df[df["TOKEN"].astype(str).str.strip() == str(token).strip()]
+    return None if hit.empty else hit.iloc[0]
+
+
+def reservar_oficio(get_client, datos: dict) -> tuple[bool, str, str]:
     """Alta de un folio ya asignado por el minutario de la Dirección.
     Rechaza duplicados: es el único detector de que alguien copió mal
     el número del minutario."""
@@ -477,7 +511,13 @@ def reservar_oficio(get_client, datos: dict) -> tuple[bool, str]:
                 f"El folio {id_oficio} ya está registrado por "
                 f"{fila.get('EMISOR_NOMBRE', '?')} el {fila.get('FECHA_SOLICITUD', '?')} "
                 f"— asunto: {fila.get('ASUNTO', '?')}"
-            )
+            ), ""
+
+    token = generar_token()
+    if not df.empty and "TOKEN" in df.columns:
+        usados = set(df["TOKEN"].astype(str))
+        while token in usados:
+            token = generar_token()
 
     try:
         sh = _abrir_sheet(get_client)
@@ -496,12 +536,13 @@ def reservar_oficio(get_client, datos: dict) -> tuple[bool, str]:
             "RESERVADO",
             "", "", "",
             datos.get("observaciones", ""),
+            token,
         ], value_input_option="USER_ENTERED")
         st.cache_data.clear()
         _registrar_log(get_client, id_oficio, "RESERVADO", datos.get("asunto", ""))
-        return True, id_oficio
+        return True, id_oficio, token
     except Exception as e:
-        return False, f"Error al guardar: {e}"
+        return False, f"Error al guardar: {e}", ""
 
 
 def _actualizar_fila(get_client, id_oficio: str, cambios: dict) -> bool:
@@ -561,9 +602,14 @@ def detectar_huecos(df: pd.DataFrame, anio: str) -> list[int]:
 # ─────────────────────────────────────────────
 # VALIDACIÓN PÚBLICA (QR)
 # ─────────────────────────────────────────────
-def render_validacion_oficio(get_client, id_oficio: str):
-    """Vista que abre el QR. Muestra solo lo mínimo para confirmar
-    procedencia: sin nombres de destinatarios ni contenido del oficio."""
+def render_validacion_oficio(get_client, token: str):
+    """Vista que abre el QR. Muestra los datos que la persona puede CONTRASTAR
+    contra el papel que tiene enfrente: si alguien copió este QR a otro
+    documento, el asunto y el destinatario no van a coincidir.
+
+    Se accede por token opaco, no por ID: si la URL llevara DFC-2026-1009,
+    cualquiera podría recorrer 1010, 1011, 1012 y cosechar información.
+    """
     st.markdown("### 🔎 Verificación de oficio · RH · DFC")
     try:
         df = cargar_oficios(get_client)
@@ -571,25 +617,38 @@ def render_validacion_oficio(get_client, id_oficio: str):
         _error_amable(e, "al consultar el minutario")
         return
 
-    fila = pd.DataFrame()
-    if not df.empty and "ID_OFICIO" in df.columns:
-        fila = df[df["ID_OFICIO"].astype(str).str.strip() == str(id_oficio).strip()]
-
-    if fila.empty:
-        st.error(f"El identificador **{id_oficio}** no corresponde a ningún "
-                 "oficio emitido por Recursos Humanos de la DFC.")
+    r = buscar_por_token(df, token)
+    if r is None:
+        st.error("Este código **no corresponde** a ningún oficio emitido por "
+                 "Recursos Humanos de la Dirección de Formación Continua.")
         return
 
-    r = fila.iloc[0]
+    id_oficio = str(r.get("ID_OFICIO", ""))
     if str(r.get("ESTADO", "")) == "CANCELADO":
-        st.warning(f"El oficio **{id_oficio}** fue **cancelado** y no debe surtir efectos.")
+        st.warning(f"El oficio **{id_oficio}** fue **cancelado** "
+                   "y no debe surtir efectos.")
         return
 
     st.success(f"Oficio **{id_oficio}** emitido por Recursos Humanos de la DFC.")
-    st.write(f"**Fecha del oficio:** {r.get('FECHA_OFICIO') or r.get('FECHA_SOLICITUD', '—')}")
-    st.write(f"**Estado:** {r.get('ESTADO', '—')}")
-    st.caption("Esta verificación confirma únicamente la procedencia del folio. "
-               "No acredita el contenido del documento.")
+    st.info("**Compara estos datos con el documento impreso.** Si no coinciden, "
+            "el código fue copiado de otro oficio.")
+
+    c1, c2 = st.columns(2)
+    c1.markdown(f"**Fecha del oficio**  \n{r.get('FECHA_OFICIO') or '—'}")
+    c2.markdown(f"**Estado**  \n{r.get('ESTADO', '—')}")
+    st.markdown(f"**Asunto**  \n{r.get('ASUNTO') or '—'}")
+    st.markdown(f"**Dirigido a**  \n{r.get('DIRIGIDO_A') or '—'}"
+                + (f"  \n{r.get('CARGO_DESTINO')}" if r.get("CARGO_DESTINO") else ""))
+
+    url = str(r.get("URL", ""))
+    if url.startswith("http"):
+        st.markdown(f"[📄 Ver el documento resguardado]({url})")
+        st.caption("El acceso al archivo depende de los permisos de la unidad "
+                   "compartida de la Dirección.")
+
+    st.divider()
+    st.caption("Esta verificación acredita que el folio fue emitido por RH y "
+               "cuáles son sus datos registrados. Contrástalos con el papel.")
 
 
 # ─────────────────────────────────────────────
@@ -681,13 +740,17 @@ def render_oficios(deps: dict):
                 cp1, cp2 = st.columns([1, 2])
                 pos_nom = cp1.radio("Posición del QR",
                                     options=list(POSICIONES_QR.keys()),
-                                    index=0, key="of_pos",
-                                    help="Elige una zona libre de membrete, "
-                                         "sello y firma.")
+                                    index=3, key="of_pos",
+                                    help="Elige una zona libre de sello y firma.")
                 pos = POSICIONES_QR[pos_nom]
-                id_previo = construir_id(int(anio), folio or "0")
+                lado = cp1.slider("Tamaño (cm)", 1.3, 2.5, 1.6, 0.1, key="of_lado",
+                                  help="Por debajo de 1.3 cm el escáner deja "
+                                       "de leerlo de forma fiable.")
+                discreto = cp1.checkbox("Gris discreto", value=True, key="of_gris")
+                color = "#888888" if discreto else "#000000"
                 try:
-                    prev = vista_previa_pdf(estampar_qr_pdf(pdf_bytes, id_previo, pos))
+                    prev = vista_previa_pdf(estampar_qr_pdf(
+                        pdf_bytes, "abcdefghjkmn", pos, lado, color=color))
                     cp2.image(prev, caption="Vista previa · así se imprimirá",
                               use_container_width=True)
                 except Exception as e:
@@ -699,7 +762,7 @@ def render_oficios(deps: dict):
                     elif not asunto.strip() or not dirigido.strip():
                         st.warning("Asunto y destinatario son obligatorios.")
                     else:
-                        ok, resultado = reservar_oficio(get_client, {
+                        ok, resultado, token = reservar_oficio(get_client, {
                             "anio": int(anio),
                             "folio": folio,
                             "fecha_oficio": fecha_of.strftime("%Y-%m-%d"),
@@ -713,7 +776,8 @@ def render_oficios(deps: dict):
                         else:
                             try:
                                 with st.spinner("Estampando QR y resguardando..."):
-                                    sellado = estampar_qr_pdf(pdf_bytes, resultado, pos)
+                                    sellado = estampar_qr_pdf(
+                                        pdf_bytes, token, pos, lado, color=color)
                                     url = subir_bytes_drive(
                                         sellado, f"{resultado}_SINFIRMA.pdf",
                                         "application/pdf")
@@ -757,13 +821,17 @@ def render_oficios(deps: dict):
                     marcas = []
                     _error_amable(e, "al leer el QR")
 
-                conocidos = set(df["ID_OFICIO"].astype(str))
-                validas = [(p, i) for p, i in marcas if i in conocidos]
-                huerfanas = [i for _, i in marcas if i not in conocidos]
+                # El QR trae el token; se traduce al ID por el Sheet.
+                mapa = {}
+                if "TOKEN" in df.columns:
+                    mapa = dict(zip(df["TOKEN"].astype(str).str.strip(),
+                                    df["ID_OFICIO"].astype(str)))
+                validas = [(p, mapa[t]) for p, t in marcas if t in mapa]
+                huerfanas = [t for _, t in marcas if t not in mapa]
 
                 if huerfanas:
-                    st.error("QR que **no** corresponden a este minutario: "
-                             + ", ".join(sorted(set(huerfanas))))
+                    st.error(f"Se detectaron {len(huerfanas)} código(s) QR que "
+                             "**no** corresponden a este minutario.")
 
                 if not validas:
                     st.warning("No se detectó ningún QR del minutario. Verifica que el "
@@ -823,6 +891,26 @@ def render_oficios(deps: dict):
             )
 
             if es_admin:
+                sin_token = vista[
+                    vista.get("TOKEN", pd.Series(dtype=str)).astype(str).str.strip() == ""
+                ] if "TOKEN" in vista.columns else vista
+                if not sin_token.empty:
+                    with st.expander(f"⚠️ {len(sin_token)} oficio(s) sin código QR"):
+                        st.caption("Registrados antes de que existiera el token. "
+                                   "Genera el código y vuelve a estampar el PDF.")
+                        id_sin = st.selectbox(
+                            "Oficio", options=sin_token["ID_OFICIO"].astype(str).tolist(),
+                            key="of_sel_token")
+                        if st.button("Generar código", key="of_btn_token"):
+                            nuevo = generar_token()
+                            if _actualizar_fila(get_client, id_sin, {"TOKEN": nuevo}):
+                                _registrar_log(get_client, id_sin, "TOKEN_GENERADO", "")
+                                st.success(f"Código generado para {id_sin}. "
+                                           "Vuelve a estampar y reimprimir el oficio.")
+                                st.rerun()
+                            else:
+                                st.error("No se pudo guardar el código.")
+
                 huecos = detectar_huecos(df, anio_f)
                 if huecos:
                     st.warning(
