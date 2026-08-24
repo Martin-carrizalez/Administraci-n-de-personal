@@ -745,8 +745,10 @@ def render_oficios(deps: dict):
                                     help="Elige una zona libre de sello y firma.")
                 pos = POSICIONES_QR[pos_nom]
                 lado = cp1.slider("Tamaño (cm)", 0.8, 3.0, 2.3, 0.1, key="of_lado",
-                                  help="2.3 cm es el mínimo medido para que el "
-                                       "QR abra la página de validación.")
+                                  help="Medido: por debajo de 2.3 cm el QR deja "
+                                       "de leerse al escanear.")
+                if lado < 2.3:
+                    cp1.warning("A este tamaño el escáner no lo va a leer.")
                 discreto = cp1.checkbox("Gris discreto", value=True, key="of_gris")
                 color = "#888888" if discreto else "#000000"
                 try:
