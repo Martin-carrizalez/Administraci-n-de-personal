@@ -112,6 +112,22 @@ def _registrar_log(get_client, id_oficio: str, accion: str, detalle: str = ""):
         pass
 
 
+def _faltan_columnas(df: pd.DataFrame, requeridas: list, pestana: str) -> bool:
+    """Avisa qué encabezados faltan en lugar de dejar que pandas lance un
+    KeyError críptico. El Sheet se edita a mano, así que un encabezado mal
+    escrito o sin renombrar es la causa más probable de un fallo."""
+    faltantes = [c for c in requeridas if c not in df.columns]
+    if not faltantes:
+        return False
+    st.error(f"A la pestaña **{pestana}** del Sheet le faltan estos "
+             f"encabezados: **{', '.join(faltantes)}**")
+    st.caption("Agrégalos en la fila 1, respetando mayúsculas y acentos. "
+               "Si renombraste columnas, revisa que coincidan exactamente.")
+    if df.columns.tolist():
+        st.caption("Encabezados actuales: " + ", ".join(df.columns.tolist()))
+    return True
+
+
 def _error_amable(e: Exception, contexto: str = ""):
     if "429" in str(e) or "uota" in str(e):
         st.error("⏳ El sistema está ocupado. Espera 15 segundos y reintenta. "
@@ -838,6 +854,9 @@ def render_oficios(deps: dict):
         _error_amable(e, "al cargar el minutario")
         return
 
+    if not df.empty and _faltan_columnas(df, COLUMNAS_OFICIOS, TAB_OFICIOS):
+        return
+
     tab_reg, tab_esc, tab_cons, tab_acu = st.tabs(
         ["📤 Emitir oficio", "📎 Escaneo firmado", "📋 Consultar",
          "🗂️ Acuses sin folio"]
@@ -907,11 +926,10 @@ def render_oficios(deps: dict):
                                     options=list(POSICIONES_QR.keys()),
                                     index=3, key="of_pos",
                                     help="Elige una zona libre de sello y firma.")
-                lado = cp1.slider("Tamaño (cm)", 0.8, 3.0, 2.3, 0.1, key="of_lado",
-                                  help="Medido: por debajo de 2.3 cm el QR deja "
-                                       "de leerse al escanear.")
-                if lado < 2.3:
-                    cp1.warning("A este tamaño el escáner no lo va a leer.")
+                pos = POSICIONES_QR[pos_nom]
+                lado = cp1.slider("Tamaño (cm)", 2.3, 3.0, 2.3, 0.1, key="of_lado",
+                                  help="2.3 cm es el mínimo medido para que el "
+                                       "QR abra la página de validación.")
                 discreto = cp1.checkbox("Gris discreto", value=True, key="of_gris")
                 color = "#888888" if discreto else "#000000"
                 try:
@@ -1133,6 +1151,9 @@ def render_oficios(deps: dict):
         except Exception as e:
             df_acu = pd.DataFrame(columns=COLUMNAS_ACUSES)
             _error_amable(e, "al cargar los acuses")
+
+        if not df_acu.empty and _faltan_columnas(df_acu, COLUMNAS_ACUSES, TAB_ACUSES):
+            df_acu = pd.DataFrame(columns=COLUMNAS_ACUSES)
 
         sub_alta, sub_lista = st.tabs(["➕ Registrar acuse", "📋 Ver acuses"])
 
