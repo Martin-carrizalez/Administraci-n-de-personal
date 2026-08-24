@@ -34,7 +34,8 @@ TAB_LOG = "log_oficios"
 COLUMNAS_OFICIOS = [
     "ID_OFICIO", "AÑO", "FOLIO", "FECHA_SOLICITUD", "FECHA_OFICIO",
     "EMISOR_RFC", "EMISOR_NOMBRE", "ASUNTO", "DIRIGIDO_A", "CARGO_DESTINO",
-    "ESTADO", "URL", "SHA256", "FECHA_ESCANEO", "OBSERVACIONES", "TOKEN",
+    "ESTADO", "URL_EMITIDO", "SHA256_EMITIDO", "FECHA_ESCANEO",
+    "OBSERVACIONES", "TOKEN", "URL_ESCANEO", "SHA256_ESCANEO",
 ]
 
 # Longitud del token opaco del QR. 12 caracteres base32 ≈ 60 bits: no es
@@ -478,13 +479,6 @@ def subir_bytes_drive(contenido: bytes, nombre_archivo: str, mimetype: str) -> s
         return f"ERROR: {e}"
 
 
-def subir_oficio_drive(archivo, id_oficio: str) -> str:
-    """Sube un archivo cargado por la persona usuaria."""
-    ext = archivo.name.split(".")[-1].lower()
-    return subir_bytes_drive(archivo.getvalue(), f"{id_oficio}.{ext}",
-                             archivo.type or "application/octet-stream")
-
-
 def sha256_bytes(contenido: bytes) -> str:
     """Huella del archivo. Si alguien lo sustituye en Drive, deja de coincidir."""
     return hashlib.sha256(contenido).hexdigest()
@@ -538,6 +532,7 @@ def reservar_oficio(get_client, datos: dict) -> tuple[bool, str, str]:
             "", "", "",
             datos.get("observaciones", ""),
             token,
+            "", "",   # URL_ESCANEO, SHA256_ESCANEO
         ], value_input_option="USER_ENTERED")
         st.cache_data.clear()
         _registrar_log(get_client, id_oficio, "RESERVADO", datos.get("asunto", ""))
@@ -581,8 +576,99 @@ def cancelar_oficio(get_client, id_oficio: str, motivo: str) -> bool:
 
 
 # ─────────────────────────────────────────────
-# ANÁLISIS
+# ACUSES SIN FOLIO
+#
+# Documentos que NO llevan número de oficio de la DFC (propuestas de
+# interinos, asignaciones temporales, constancias laborales). Viven en su
+# propia pestaña del Sheet: mezclarlos con el minutario confundiría el
+# consecutivo oficial, que no es de RH sino de la Dirección.
 # ─────────────────────────────────────────────
+TAB_ACUSES = "acuses"
+
+COLUMNAS_ACUSES = [
+    "ID_ACUSE", "AÑO", "CONSECUTIVO", "TIPO", "REFERENCIA",
+    "FECHA_DOCUMENTO", "FECHA_REGISTRO", "REGISTRO_RFC", "REGISTRO_NOMBRE",
+    "DESCRIPCION", "RELACIONADO_CON", "URL", "SHA256", "OBSERVACIONES",
+]
+
+TIPOS_ACUSE = {
+    "Propuesta de interinos": "PROP",
+    "Asignación temporal": "ASIG",
+    "Constancia laboral": "CONS",
+    "Otro documento": "OTRO",
+}
+
+
+@st.cache_data(ttl=300)
+def _cargar_acuses_cached(_get_client) -> pd.DataFrame:
+    sh = _abrir_sheet(_get_client)
+    ws = sh.worksheet(TAB_ACUSES)
+    registros = ws.get_all_records(numericise_ignore=["all"])
+    if not registros:
+        return pd.DataFrame(columns=COLUMNAS_ACUSES)
+    return pd.DataFrame(registros)
+
+
+def cargar_acuses(get_client) -> pd.DataFrame:
+    return _cargar_acuses_cached(get_client)
+
+
+def siguiente_consecutivo(df: pd.DataFrame, anio, clave_tipo: str) -> int:
+    """Consecutivo interno por tipo y año. A diferencia del minutario, este
+    sí lo controla RH, así que se calcula aquí."""
+    if df.empty or "TIPO" not in df.columns:
+        return 1
+    prev = df[(df["AÑO"].astype(str) == str(anio)) &
+              (df["TIPO"].astype(str) == clave_tipo)]
+    if prev.empty:
+        return 1
+    nums = [int(c) for c in prev["CONSECUTIVO"].astype(str) if str(c).strip().isdigit()]
+    return (max(nums) + 1) if nums else 1
+
+
+def registrar_acuse(get_client, datos: dict, archivo) -> tuple[bool, str]:
+    """Registra un acuse y resguarda su escaneo. El documento ya viene
+    firmado, así que no se estampa QR: aquí el valor es el resguardo."""
+    df = cargar_acuses(get_client)
+    clave = datos["tipo"]
+    consecutivo = siguiente_consecutivo(df, datos["anio"], clave)
+    id_acuse = f"DFC-{datos['anio']}-{clave}-{consecutivo:04d}"
+
+    contenido = archivo.getvalue()
+    ext = archivo.name.split(".")[-1].lower()
+    url = subir_bytes_drive(contenido, f"{id_acuse}.{ext}",
+                            archivo.type or "application/octet-stream")
+    if url.startswith("ERROR:"):
+        return False, url
+
+    try:
+        sh = _abrir_sheet(get_client)
+        ws = sh.worksheet(TAB_ACUSES)
+        ws.append_row([
+            id_acuse,
+            str(datos["anio"]),
+            str(consecutivo).zfill(4),
+            clave,
+            datos.get("referencia", ""),
+            datos.get("fecha_documento", ""),
+            _hoy(),
+            str(st.session_state.get("rfc", "")).upper(),
+            st.session_state.get("nombre", ""),
+            datos.get("descripcion", ""),
+            datos.get("relacionado_con", ""),
+            url,
+            sha256_bytes(contenido),
+            datos.get("observaciones", ""),
+        ], value_input_option="USER_ENTERED")
+        st.cache_data.clear()
+        _registrar_log(get_client, id_acuse, "ACUSE_REGISTRADO",
+                       datos.get("descripcion", ""))
+        return True, id_acuse
+    except Exception as e:
+        return False, f"Error al guardar: {e}"
+
+
+
 def detectar_huecos(df: pd.DataFrame, anio: str) -> list[int]:
     """Folios faltantes dentro del rango que RH ha manejado este año.
     No implica error: pueden ser oficios de otras áreas de la DFC."""
@@ -598,6 +684,77 @@ def detectar_huecos(df: pd.DataFrame, anio: str) -> list[int]:
     if not nums:
         return []
     return [n for n in range(min(nums), max(nums) + 1) if n not in set(nums)]
+
+
+def ficha_trazabilidad(get_client, id_oficio: str) -> bytes:
+    """Hoja de una página con todo el rastro de un oficio, para presentar
+    cuando alguien cuestiona su procedencia. Prioriza lo que una persona
+    puede verificar (fechas, registro, resguardo) sobre lo criptográfico."""
+    if pymupdf is None:
+        raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
+
+    df = cargar_oficios(get_client)
+    fila = df[df["ID_OFICIO"].astype(str) == str(id_oficio)]
+    if fila.empty:
+        raise ValueError(f"No existe {id_oficio} en el minutario.")
+    r = fila.iloc[0]
+
+    doc = pymupdf.open()
+    pg = doc.new_page(width=612, height=792)
+    x, y = 60, 70
+
+    def linea(txt, tam=10, negrita=False, salto=16, gris=0.0):
+        nonlocal y
+        pg.insert_text((x, y), txt, fontsize=tam,
+                       fontname="Helvetica-Bold" if negrita else "Helvetica",
+                       color=(gris, gris, gris))
+        y += salto
+
+    linea("FICHA DE TRAZABILIDAD DE OFICIO", 15, True, 10)
+    linea("Recursos Humanos · Dirección de Formación Continua · SEJ", 9, False, 24, 0.4)
+    pg.draw_line(pymupdf.Point(x, y - 10), pymupdf.Point(552, y - 10),
+                 color=(0.7, 0.7, 0.7), width=0.7)
+
+    linea(str(r.get("ID_OFICIO", "")), 17, True, 26)
+
+    for etiqueta, valor in [
+        ("Folio del minutario", r.get("FOLIO", "")),
+        ("Fecha del oficio", r.get("FECHA_OFICIO", "")),
+        ("Registrado en el sistema", r.get("FECHA_SOLICITUD", "")),
+        ("Emitido por", r.get("EMISOR_NOMBRE", "")),
+        ("Asunto", r.get("ASUNTO", "")),
+        ("Dirigido a", r.get("DIRIGIDO_A", "")),
+        ("Cargo", r.get("CARGO_DESTINO", "")),
+        ("Estado", r.get("ESTADO", "")),
+        ("Fecha de escaneo", r.get("FECHA_ESCANEO", "") or "—"),
+    ]:
+        linea(f"{etiqueta}:", 9, True, 13, 0.35)
+        linea(str(valor or "—")[:95], 11, False, 20)
+
+    y += 8
+    pg.draw_line(pymupdf.Point(x, y), pymupdf.Point(552, y),
+                 color=(0.7, 0.7, 0.7), width=0.7)
+    y += 20
+    linea("ELEMENTOS DE VERIFICACIÓN", 11, True, 20)
+    linea("1. El ejemplar original resguardado el día de la emisión permite", 9, False, 12, 0.2)
+    linea("   comparar el texto contra cualquier documento cuestionado.", 9, False, 16, 0.2)
+    linea("2. El archivo en la unidad compartida conserva su fecha de creación.", 9, False, 16, 0.2)
+    linea("3. El folio puede contrastarse contra el minutario de la Dirección,", 9, False, 12, 0.2)
+    linea("   que es un registro independiente de este sistema.", 9, False, 16, 0.2)
+    linea("4. La bitácora del sistema conserva quién registró el oficio y cuándo.", 9, False, 20, 0.2)
+
+    linea("Huellas digitales de los archivos (SHA-256)", 9, True, 13, 0.35)
+    for et, h in [("Original emitido", r.get("SHA256_EMITIDO", "")),
+                  ("Ejemplar firmado", r.get("SHA256_ESCANEO", ""))]:
+        linea(f"{et}: {str(h or '—')[:64]}", 6.5, False, 11, 0.45)
+
+    y += 10
+    linea(f"Ficha generada el {_ahora()} · documento informativo interno",
+          7.5, False, 12, 0.5)
+
+    salida = doc.tobytes()
+    doc.close()
+    return salida
 
 
 # ─────────────────────────────────────────────
@@ -641,11 +798,17 @@ def render_validacion_oficio(get_client, token: str):
     st.markdown(f"**Dirigido a**  \n{r.get('DIRIGIDO_A') or '—'}"
                 + (f"  \n{r.get('CARGO_DESTINO')}" if r.get("CARGO_DESTINO") else ""))
 
-    url = str(r.get("URL", ""))
-    if url.startswith("http"):
-        st.markdown(f"[📄 Ver el documento resguardado]({url})")
-        st.caption("El acceso al archivo depende de los permisos de la unidad "
-                   "compartida de la Dirección.")
+    url_emitido = str(r.get("URL_EMITIDO", ""))
+    url_escaneo = str(r.get("URL_ESCANEO", ""))
+    if url_emitido.startswith("http") or url_escaneo.startswith("http"):
+        st.markdown("**Documentos resguardados**")
+        if url_emitido.startswith("http"):
+            st.markdown(f"📄 [Original emitido por RH]({url_emitido}) "
+                        "— la versión que salió de esta oficina")
+        if url_escaneo.startswith("http"):
+            st.markdown(f"🖊️ [Ejemplar firmado y sellado]({url_escaneo})")
+        st.caption("El acceso a los archivos depende de los permisos de la "
+                   "unidad compartida de la Dirección.")
 
     st.divider()
     st.caption("Esta verificación acredita que el folio fue emitido por RH y "
@@ -675,8 +838,9 @@ def render_oficios(deps: dict):
         _error_amable(e, "al cargar el minutario")
         return
 
-    tab_reg, tab_esc, tab_cons = st.tabs(
-        ["📤 Emitir oficio", "📎 Escaneo firmado", "📋 Consultar"]
+    tab_reg, tab_esc, tab_cons, tab_acu = st.tabs(
+        ["📤 Emitir oficio", "📎 Escaneo firmado", "📋 Consultar",
+         "🗂️ Acuses sin folio"]
     )
 
     # ── Emitir oficio ────────────────────────
@@ -743,7 +907,6 @@ def render_oficios(deps: dict):
                                     options=list(POSICIONES_QR.keys()),
                                     index=3, key="of_pos",
                                     help="Elige una zona libre de sello y firma.")
-                pos = POSICIONES_QR[pos_nom]
                 lado = cp1.slider("Tamaño (cm)", 0.8, 3.0, 2.3, 0.1, key="of_lado",
                                   help="Medido: por debajo de 2.3 cm el QR deja "
                                        "de leerse al escanear.")
@@ -786,7 +949,8 @@ def render_oficios(deps: dict):
                                         "application/pdf")
                                     _actualizar_fila(get_client, resultado, {
                                         "ESTADO": "EMITIDO",
-                                        "URL": url if not url.startswith("ERROR:") else "",
+                                        "URL_EMITIDO": url if not url.startswith("ERROR:") else "",
+                                        "SHA256_EMITIDO": sha256_bytes(sellado),
                                     })
                                     _registrar_log(get_client, resultado, "EMITIDO", url)
                                 st.success(f"**{resultado}** listo. Imprime este PDF "
@@ -858,8 +1022,8 @@ def render_oficios(deps: dict):
                                 st.error(f"{id_of}: {url}")
                             else:
                                 _actualizar_fila(get_client, id_of, {
-                                    "URL": url,
-                                    "SHA256": sha256_bytes(contenido),
+                                    "URL_ESCANEO": url,
+                                    "SHA256_ESCANEO": sha256_bytes(contenido),
                                     "FECHA_ESCANEO": _hoy(),
                                     "ESTADO": estado,
                                 })
@@ -883,17 +1047,33 @@ def render_oficios(deps: dict):
             m1, m2, m3 = st.columns(3)
             m1.metric("Oficios", len(vista))
             m2.metric("Con escaneo",
-                      int((vista["URL"].astype(str).str.startswith("http")).sum()))
+                      int((vista["URL_ESCANEO"].astype(str).str.startswith("http")).sum()))
             m3.metric("Cancelados",
                       int((vista["ESTADO"].astype(str) == "CANCELADO").sum()))
 
             st.dataframe(
                 vista[["ID_OFICIO", "FECHA_OFICIO", "EMISOR_NOMBRE", "ASUNTO",
-                       "DIRIGIDO_A", "ESTADO", "URL"]],
+                       "DIRIGIDO_A", "ESTADO", "URL_EMITIDO", "URL_ESCANEO"]],
                 use_container_width=True, hide_index=True,
             )
 
             if es_admin:
+                with st.expander("📑 Ficha de trazabilidad (para un reclamo)"):
+                    st.caption("Hoja con el rastro completo de un oficio, "
+                               "lista para imprimir y presentar.")
+                    id_ficha = st.selectbox(
+                        "Oficio", options=vista["ID_OFICIO"].astype(str).tolist(),
+                        key="of_sel_ficha")
+                    if st.button("Generar ficha", key="of_btn_ficha"):
+                        try:
+                            pdf_ficha = ficha_trazabilidad(get_client, id_ficha)
+                            st.download_button(
+                                "⬇️ Descargar ficha", data=pdf_ficha,
+                                file_name=f"FICHA_{id_ficha}.pdf",
+                                mime="application/pdf", key="of_dl_ficha")
+                        except Exception as e:
+                            _error_amable(e, "al generar la ficha")
+
                 sin_token = vista[
                     vista.get("TOKEN", pd.Series(dtype=str)).astype(str).str.strip() == ""
                 ] if "TOKEN" in vista.columns else vista
@@ -941,3 +1121,92 @@ def render_oficios(deps: dict):
                                 st.rerun()
                             else:
                                 st.error("No se pudo cancelar.")
+
+    # ── Acuses sin folio ─────────────────────
+    with tab_acu:
+        st.caption("Documentos sin número de oficio de la DFC: propuestas de "
+                   "interinos, asignaciones temporales, constancias laborales. "
+                   "Llevan consecutivo propio de RH.")
+
+        try:
+            df_acu = cargar_acuses(get_client)
+        except Exception as e:
+            df_acu = pd.DataFrame(columns=COLUMNAS_ACUSES)
+            _error_amable(e, "al cargar los acuses")
+
+        sub_alta, sub_lista = st.tabs(["➕ Registrar acuse", "📋 Ver acuses"])
+
+        with sub_alta:
+            ca1, ca2 = st.columns([2, 1])
+            tipo_nom = ca1.selectbox("Tipo de documento",
+                                     options=list(TIPOS_ACUSE.keys()),
+                                     key="ac_tipo")
+            clave = TIPOS_ACUSE[tipo_nom]
+            anio_a = ca2.number_input("Año", min_value=2020, max_value=2100,
+                                      value=datetime.now(TZ).year, step=1,
+                                      key="ac_anio")
+
+            prox = siguiente_consecutivo(df_acu, int(anio_a), clave)
+            st.caption(f"Se registrará como **DFC-{int(anio_a)}-{clave}-{prox:04d}**")
+
+            desc = st.text_input("Descripción", key="ac_desc",
+                                 help="De qué se trata el documento.")
+            cb1, cb2 = st.columns(2)
+            ref = cb1.text_input("Referencia externa", key="ac_ref",
+                                 help="Folio o identificador propio del "
+                                      "documento, si lo tiene. Opcional.")
+            fecha_doc = cb2.date_input("Fecha del documento", key="ac_fecha")
+            relac = st.text_input("Relacionado con", key="ac_rel",
+                                  help="Persona, Centro de Maestros o proceso "
+                                       "al que corresponde. Opcional.")
+            obs_a = st.text_area("Observaciones", key="ac_obs", height=68)
+
+            arch = st.file_uploader("Escaneo del acuse (PDF o imagen)",
+                                    type=["pdf", "jpg", "jpeg", "png"],
+                                    key="ac_file")
+
+            if st.button("Registrar acuse", type="primary", key="ac_btn"):
+                if arch is None:
+                    st.warning("Falta el escaneo del documento.")
+                elif not desc.strip():
+                    st.warning("La descripción es obligatoria.")
+                else:
+                    with st.spinner("Resguardando en Drive..."):
+                        ok, res = registrar_acuse(get_client, {
+                            "anio": int(anio_a),
+                            "tipo": clave,
+                            "referencia": ref.strip(),
+                            "fecha_documento": fecha_doc.strftime("%Y-%m-%d"),
+                            "descripcion": desc.strip(),
+                            "relacionado_con": relac.strip(),
+                            "observaciones": obs_a.strip(),
+                        }, arch)
+                    if ok:
+                        st.success(f"Registrado como **{res}**")
+                        st.rerun()
+                    else:
+                        st.error(res)
+
+        with sub_lista:
+            if df_acu.empty:
+                st.info("Aún no hay acuses registrados.")
+            else:
+                cf1, cf2 = st.columns(2)
+                anios_a = sorted(df_acu["AÑO"].astype(str).unique(), reverse=True)
+                anio_fa = cf1.selectbox("Año", options=anios_a, key="ac_anio_f")
+                tipos_f = cf2.multiselect(
+                    "Tipo", options=list(TIPOS_ACUSE.keys()),
+                    default=list(TIPOS_ACUSE.keys()), key="ac_tipo_f")
+                claves_f = [TIPOS_ACUSE[t] for t in tipos_f]
+
+                va = df_acu[(df_acu["AÑO"].astype(str) == anio_fa) &
+                            (df_acu["TIPO"].astype(str).isin(claves_f))].copy()
+                if not es_admin:
+                    va = va[va["REGISTRO_RFC"].astype(str).str.upper() == rfc_actual]
+
+                st.metric("Acuses", len(va))
+                st.dataframe(
+                    va[["ID_ACUSE", "FECHA_DOCUMENTO", "TIPO", "DESCRIPCION",
+                        "RELACIONADO_CON", "REGISTRO_NOMBRE", "URL"]],
+                    use_container_width=True, hide_index=True,
+                )
