@@ -47,7 +47,11 @@ COLUMNAS_LOG = [
     "TIMESTAMP", "ID_OFICIO", "ACCION", "RFC", "NOMBRE", "DETALLE",
 ]
 
-ESTADOS = ["RESERVADO", "EMITIDO", "ESCANEADO", "ACUSE", "CANCELADO"]
+ESTADOS = ["RESERVADO", "EMITIDO", "ESCANEADO", "ACUSE", "CANCELADO", "HISTORICO"]
+
+# Oficios emitidos antes de que existiera este sistema. No llevan QR: el
+# papel ya circuló y estamparlo en una copia no protegería al original.
+ESTADO_HISTORICO = "HISTORICO"
 
 URL_APP = "https://gestion-personal-dfc.streamlit.app"
 
@@ -352,7 +356,10 @@ _RE_FECHA_TEXTO = re.compile(
     r"\b(\d{1,2})\s+de\s+([a-záéíóú]+)\s+(?:de|del)\s+(\d{4})", re.IGNORECASE
 )
 _RE_FECHA_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
-_RE_ASUNTO = re.compile(r"^\s*asunto\s*:?\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+# [ \t]* y no \s*: \s incluye el salto de línea y se comería el fragmento
+# siguiente cuando el PDF parte "Asunto:" y su contenido en dos líneas.
+_RE_ASUNTO = re.compile(r"^[ \t]*asunto[ \t]*:?[ \t]*(\S.*)$",
+                        re.IGNORECASE | re.MULTILINE)
 _RE_PRESENTE = re.compile(r"^\s*P\s*R\s*E\s*S\s*E\s*N\s*T\s*E\s*\.?\s*$", re.IGNORECASE)
 # Líneas que pertenecen al encabezado y por tanto NO son del destinatario.
 _RE_ENCABEZADO = re.compile(
@@ -364,6 +371,91 @@ _RE_ENCABEZADO = re.compile(
 
 def _limpiar(texto: str) -> str:
     return re.sub(r"\s+", " ", str(texto or "")).strip(" .:,;-")
+
+
+# Palabras con que arranca el cargo del destinatario. Sirven para separar
+# nombre y cargo cuando el PDF los entrega pegados ("BELTRÁNJEFA DEL...").
+INICIOS_CARGO = (
+    "JEFA", "JEFE", "DIRECTOR", "DIRECTORA", "ENCARGADO", "ENCARGADA",
+    "COORDINADOR", "COORDINADORA", "SUBDIRECTOR", "SUBDIRECTORA",
+    "TITULAR", "SECRETARIO", "SECRETARIA", "DELEGADO", "DELEGADA",
+    "SUPERVISOR", "SUPERVISORA", "RESPONSABLE", "ASESOR", "ASESORA",
+    "ADMINISTRADOR", "ADMINISTRADORA", "PRESIDENTE", "PRESIDENTA",
+)
+
+# Sobre texto aplanado los espacios son poco fiables, así que todo separador
+# se trata como opcional (\s*) en vez de obligatorio.
+_RE_P_FOLIO = re.compile(
+    r"oficio\s*(?::|n[uú]m\.?(?:ero)?|n[oº°]\.?|#)?\s*"
+    r"([\d\s]{1,10}?)\s*/\s*(?:[\dA-Za-z]{1,8}\s*/\s*)?(\d{4})",
+    re.IGNORECASE,
+)
+_RE_P_FECHA = re.compile(
+    r"(\d{1,2})\s*de\s*([a-záéíóúñ]+?)\s*de\s*l?\s*(\d{4})", re.IGNORECASE
+)
+_RE_P_ASUNTO = re.compile(r"asunto\s*:?\s*(.{3,200}?)\s*\.", re.IGNORECASE)
+_RE_P_PRESENTE = re.compile(r"P\s*R\s*E\s*S\s*E\s*N\s*T\s*E", re.IGNORECASE)
+
+
+def _aplanar(texto: str) -> str:
+    """Une las líneas SIN separador. Suena contraintuitivo, pero los PDFs
+    rotos parten los números a media cifra ('de 202' + '6'); unir con espacio
+    los dejaría irreparables ('202 6'), mientras que unir sin él los repara."""
+    return "".join(texto.splitlines())
+
+
+def _separar_nombre_cargo(bloque: str) -> tuple[str, str]:
+    """Parte 'ROSA ESTELA MATA BELTRÁNJEFA DEL DEPARTAMENTO...' en nombre y
+    cargo, buscando dónde empieza una palabra de cargo conocida."""
+    bloque = _limpiar(bloque)
+    mejor = None
+    for palabra in INICIOS_CARGO:
+        pos = bloque.upper().find(palabra)
+        if pos > 0 and (mejor is None or pos < mejor):
+            mejor = pos
+    if mejor:
+        return _limpiar(bloque[:mejor]), _limpiar(bloque[mejor:])
+    return bloque, ""
+
+
+def extraer_datos_plano(texto: str) -> dict:
+    """Respaldo para PDFs cuya capa de texto viene fragmentada. No sustituye
+    al extractor por líneas: solo rellena lo que aquel dejó vacío."""
+    datos = {c: "" for c in CAMPOS_EXTRAIBLES}
+    plano = _aplanar(texto)
+    if not plano.strip():
+        return datos
+
+    m = _RE_P_FOLIO.search(plano)
+    if m:
+        digitos = re.sub(r"\s+", "", m.group(1))
+        if digitos.isdigit():
+            datos["folio"] = digitos.zfill(4)
+
+    m = _RE_P_FECHA.search(plano[:600]) or _RE_P_FECHA.search(plano)
+    if m:
+        mes = MESES.get(m.group(2).lower())
+        if mes:
+            datos["fecha_oficio"] = f"{m.group(3)}-{mes:02d}-{int(m.group(1)):02d}"
+
+    m = _RE_P_ASUNTO.search(plano)
+    if m:
+        datos["asunto"] = _limpiar(m.group(1))[:250]
+
+    # El destinatario vive entre el asunto y la línea "P R E S E N T E".
+    m_pres = _RE_P_PRESENTE.search(plano)
+    if m_pres:
+        inicio = 0
+        m_as = re.search(r"asunto\s*:?\s*.{3,200}?\.", plano, re.IGNORECASE)
+        if m_as:
+            inicio = m_as.end()
+        bloque = plano[inicio:m_pres.start()]
+        if 4 < len(bloque) < 300:
+            nombre, cargo = _separar_nombre_cargo(bloque)
+            datos["dirigido_a"] = nombre[:120]
+            datos["cargo_destino"] = cargo[:200]
+
+    return datos
 
 
 def extraer_datos_regex(texto: str) -> dict:
@@ -381,7 +473,12 @@ def extraer_datos_regex(texto: str) -> dict:
         datos["folio"] = m.group(1).zfill(4)
 
     # ── Fecha ──
-    m = _RE_FECHA_TEXTO.search(texto)
+    # Se lee del encabezado APLANADO y en un tramo corto. Dos razones:
+    #   1. El cuerpo cita otras fechas (los días que se justifican) y ganarían.
+    #   2. En PDFs fragmentados la fecha del encabezado viene partida a media
+    #      cifra ("de 202" + "6") y solo se recompone al aplanar.
+    encabezado = _aplanar(texto)[:400]
+    m = _RE_P_FECHA.search(encabezado)
     if m:
         mes = MESES.get(m.group(2).lower())
         if mes:
@@ -458,6 +555,16 @@ def extraer_datos_oficio(texto: str) -> tuple[dict, str]:
     si está habilitada explícitamente en secrets."""
     datos = extraer_datos_regex(texto)
     metodo = "reglas"
+
+    # PDFs con capa de texto rota: el extractor por líneas falla, el plano no.
+    faltantes = [c for c in CAMPOS_EXTRAIBLES if not datos[c]]
+    if faltantes:
+        plano = extraer_datos_plano(texto)
+        rellenados = [c for c in faltantes if plano.get(c)]
+        if rellenados:
+            for c in rellenados:
+                datos[c] = plano[c]
+            metodo = "reglas (texto fragmentado)"
 
     faltantes = [c for c in CAMPOS_EXTRAIBLES if not datos[c]]
     if faltantes and st.secrets.get("usar_ia_oficios", False):
@@ -555,6 +662,55 @@ def reservar_oficio(get_client, datos: dict) -> tuple[bool, str, str]:
         return True, id_oficio, token
     except Exception as e:
         return False, f"Error al guardar: {e}", ""
+
+
+def registrar_oficio_historico(get_client, datos: dict, archivo=None) -> tuple[bool, str]:
+    """Alta de un oficio emitido antes de este sistema. No genera token ni
+    estampa QR: el papel ya circuló. El escaneo del acuse es opcional para
+    que se pueda capturar el registro completo primero y subir después."""
+    id_oficio = construir_id(datos["anio"], datos["folio"])
+
+    df = cargar_oficios(get_client)
+    if not df.empty and "ID_OFICIO" in df.columns:
+        if id_oficio in df["ID_OFICIO"].astype(str).values:
+            return False, f"El folio {id_oficio} ya está registrado."
+
+    url, huella = "", ""
+    if archivo is not None:
+        contenido = archivo.getvalue()
+        ext = archivo.name.split(".")[-1].lower()
+        url = subir_bytes_drive(contenido, f"{id_oficio}_ACUSE.{ext}",
+                                archivo.type or "application/octet-stream")
+        if url.startswith("ERROR:"):
+            return False, url
+        huella = sha256_bytes(contenido)
+
+    try:
+        sh = _abrir_sheet(get_client)
+        ws = sh.worksheet(TAB_OFICIOS)
+        ws.append_row([
+            id_oficio,
+            str(datos["anio"]),
+            str(datos["folio"]).strip().zfill(4),
+            _hoy(),
+            datos.get("fecha_oficio", ""),
+            str(st.session_state.get("rfc", "")).upper(),
+            st.session_state.get("nombre", ""),
+            datos.get("asunto", ""),
+            datos.get("dirigido_a", ""),
+            datos.get("cargo_destino", ""),
+            ESTADO_HISTORICO,
+            "", "",                                   # URL_EMITIDO, SHA256_EMITIDO
+            _hoy() if url else "",                    # FECHA_ESCANEO
+            datos.get("observaciones", ""),
+            "",                                       # TOKEN: los históricos no llevan
+            url, huella,                              # URL_ESCANEO, SHA256_ESCANEO
+        ], value_input_option="USER_ENTERED")
+        st.cache_data.clear()
+        _registrar_log(get_client, id_oficio, "HISTORICO", datos.get("asunto", ""))
+        return True, id_oficio
+    except Exception as e:
+        return False, f"Error al guardar: {e}"
 
 
 def _actualizar_fila(get_client, id_oficio: str, cambios: dict) -> bool:
@@ -683,23 +839,6 @@ def registrar_acuse(get_client, datos: dict, archivo) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Error al guardar: {e}"
 
-
-
-def detectar_huecos(df: pd.DataFrame, anio: str) -> list[int]:
-    """Folios faltantes dentro del rango que RH ha manejado este año.
-    No implica error: pueden ser oficios de otras áreas de la DFC."""
-    if df.empty or "AÑO" not in df.columns:
-        return []
-    del_anio = df[df["AÑO"].astype(str) == str(anio)]
-    if del_anio.empty:
-        return []
-    nums = sorted(
-        int(f) for f in del_anio["FOLIO"].astype(str)
-        if str(f).strip().isdigit()
-    )
-    if not nums:
-        return []
-    return [n for n in range(min(nums), max(nums) + 1) if n not in set(nums)]
 
 
 def ficha_trazabilidad(get_client, id_oficio: str) -> bytes:
@@ -834,6 +973,58 @@ def render_validacion_oficio(get_client, token: str):
 # ─────────────────────────────────────────────
 # VISTA PRINCIPAL
 # ─────────────────────────────────────────────
+def _tab_historico(get_client):
+    """Captura de oficios anteriores a este sistema. Diseñada para cargar
+    varios seguidos: el escaneo es opcional y el formulario se limpia solo,
+    de modo que se pueda capturar todo el año y subir acuses después."""
+    st.caption("Oficios emitidos antes de este sistema. Quedan registrados con "
+               "estado HISTORICO, sin QR: el papel ya circuló.")
+
+    anio_actual = datetime.now(TZ).year
+    h1, h2, h3 = st.columns([1, 1, 2])
+    anio_h = h1.number_input("Año", min_value=2020, max_value=2100,
+                             value=anio_actual, step=1, key="oh_anio")
+    folio_h = h2.text_input("Folio", key="oh_folio")
+    fecha_h = h3.date_input("Fecha del oficio", key="oh_fecha")
+
+    asunto_h = st.text_input("Asunto", key="oh_asunto")
+    h4, h5 = st.columns(2)
+    dirig_h = h4.text_input("Dirigido a", key="oh_dirigido")
+    cargo_h = h5.text_input("Cargo del destinatario", key="oh_cargo")
+    obs_h = st.text_area("Observaciones", key="oh_obs", height=68)
+
+    arch_h = st.file_uploader("Acuse escaneado (opcional)",
+                              type=["pdf", "jpg", "jpeg", "png"], key="oh_file")
+    st.caption("Puedes capturar solo los datos ahora y subir los acuses después.")
+
+    if st.button("Registrar oficio histórico", type="primary", key="oh_btn"):
+        if not str(folio_h).strip().isdigit():
+            st.warning("El folio debe ser numérico.")
+        elif not asunto_h.strip() or not dirig_h.strip():
+            st.warning("Asunto y destinatario son obligatorios.")
+        else:
+            with st.spinner("Registrando..."):
+                ok, res = registrar_oficio_historico(get_client, {
+                    "anio": int(anio_h),
+                    "folio": folio_h,
+                    "fecha_oficio": fecha_h.strftime("%Y-%m-%d"),
+                    "asunto": asunto_h.strip(),
+                    "dirigido_a": dirig_h.strip(),
+                    "cargo_destino": cargo_h.strip(),
+                    "observaciones": obs_h.strip(),
+                }, arch_h)
+            if ok:
+                st.success(f"Registrado: **{res}**")
+                # Se limpian los campos del documento, no el año: al capturar
+                # en serie casi siempre es el mismo ejercicio.
+                for k in ("oh_folio", "oh_asunto", "oh_dirigido",
+                          "oh_cargo", "oh_obs"):
+                    st.session_state.pop(k, None)
+                st.rerun()
+            else:
+                st.error(res)
+
+
 def render_oficios(deps: dict):
     get_client = deps["get_client"]
     rfcs_autorizados = deps.get("rfcs_autorizados", [])
@@ -864,7 +1055,18 @@ def render_oficios(deps: dict):
 
     # ── Emitir oficio ────────────────────────
     with tab_reg:
-        if pymupdf is None:
+        modo = st.radio(
+            "¿Qué vas a registrar?",
+            ["Oficio nuevo (se le estampa QR)",
+             "Oficio histórico (ya firmado y entregado)"],
+            key="of_modo", horizontal=True,
+            help="Los históricos son los emitidos antes de este sistema: se "
+                 "registran para tener el año completo, pero no llevan QR.")
+        st.divider()
+
+        if modo.startswith("Oficio histórico"):
+            _tab_historico(get_client)
+        elif pymupdf is None:
             st.error(f"Falta PyMuPDF: {_ERROR_PDF}")
         else:
             st.markdown("**1.** Sube el oficio en PDF · **2.** Confirma los datos · "
@@ -927,11 +1129,9 @@ def render_oficios(deps: dict):
                                     index=3, key="of_pos",
                                     help="Elige una zona libre de sello y firma.")
                 pos = POSICIONES_QR[pos_nom]
-                lado = cp1.slider("Tamaño (cm)", 0.8, 3.0, 2.3, 0.1, key="of_lado",
-                                  help="Medido: por debajo de 2.3 cm el QR deja "
-                                       "de leerse al escanear.")
-                if lado < 2.3:
-                    cp1.warning("A este tamaño el escáner no lo va a leer.")
+                lado = cp1.slider("Tamaño (cm)", 2.3, 3.0, 2.3, 0.1, key="of_lado",
+                                  help="2.3 cm es el mínimo medido para que el "
+                                       "QR abra la página de validación.")
                 discreto = cp1.checkbox("Gris discreto", value=True, key="of_gris")
                 color = "#888888" if discreto else "#000000"
                 try:
@@ -959,6 +1159,29 @@ def render_oficios(deps: dict):
                         })
                         if not ok:
                             st.error(resultado)
+                            # Registrado pero sin PDF en mano (p. ej. se perdió
+                            # la descarga): se re-estampa con el token que ya
+                            # tiene, sin duplicar el registro ni cambiar el QR.
+                            id_dup = construir_id(int(anio), folio)
+                            fila_dup = df[df["ID_OFICIO"].astype(str) == id_dup] \
+                                if "ID_OFICIO" in df.columns else pd.DataFrame()
+                            tok_dup = (str(fila_dup.iloc[0].get("TOKEN", ""))
+                                       if not fila_dup.empty else "")
+                            if tok_dup:
+                                if st.button("Volver a estampar y descargar este oficio",
+                                             key="of_btn_reestampar"):
+                                    try:
+                                        st.session_state["_of_pdf_listo"] = estampar_qr_pdf(
+                                            pdf_bytes, tok_dup, pos, lado, color=color)
+                                        st.session_state["_of_pdf_nombre"] = id_dup
+                                        _registrar_log(get_client, id_dup,
+                                                       "REESTAMPADO", "")
+                                        st.rerun()
+                                    except Exception as e:
+                                        _error_amable(e, "al re-estampar")
+                            else:
+                                st.caption("Ese folio no tiene código QR "
+                                           "(es histórico o se registró sin token).")
                         else:
                             try:
                                 with st.spinner("Estampando QR y resguardando..."):
@@ -973,18 +1196,26 @@ def render_oficios(deps: dict):
                                         "SHA256_EMITIDO": sha256_bytes(sellado),
                                     })
                                     _registrar_log(get_client, resultado, "EMITIDO", url)
-                                st.success(f"**{resultado}** listo. Imprime este PDF "
-                                           "y pásalo a firma.")
-                                st.download_button(
-                                    "⬇️ Descargar PDF con QR",
-                                    data=sellado,
-                                    file_name=f"{resultado}_conQR.pdf",
-                                    mime="application/pdf", key="of_dl_pdf",
-                                )
+                                st.session_state["_of_pdf_listo"] = sellado
+                                st.session_state["_of_pdf_nombre"] = resultado
                                 if url.startswith("ERROR:"):
                                     st.warning(f"Se registró, pero falló Drive: {url}")
                             except Exception as e:
                                 _error_amable(e, "al estampar el QR")
+
+                # El PDF vive en sesión, no dentro del if del botón: al
+                # presionar "Descargar" Streamlit relanza el script y el
+                # archivo se perdería si dependiera de la ejecución anterior.
+                if st.session_state.get("_of_pdf_listo"):
+                    nombre_listo = st.session_state.get("_of_pdf_nombre", "oficio")
+                    st.success(f"**{nombre_listo}** listo. Imprime este PDF "
+                               "y pásalo a firma.")
+                    st.download_button(
+                        "⬇️ Descargar PDF con QR",
+                        data=st.session_state["_of_pdf_listo"],
+                        file_name=f"{nombre_listo}_conQR.pdf",
+                        mime="application/pdf", key="of_dl_pdf",
+                    )
 
     # ── Escaneo firmado ──────────────────────
     with tab_esc:
@@ -1094,9 +1325,14 @@ def render_oficios(deps: dict):
                         except Exception as e:
                             _error_amable(e, "al generar la ficha")
 
-                sin_token = vista[
-                    vista.get("TOKEN", pd.Series(dtype=str)).astype(str).str.strip() == ""
-                ] if "TOKEN" in vista.columns else vista
+                # Los HISTORICO no llevan token por diseño: no deben aparecer aquí.
+                if "TOKEN" in vista.columns:
+                    sin_token = vista[
+                        (vista["TOKEN"].astype(str).str.strip() == "") &
+                        (vista["ESTADO"].astype(str) != ESTADO_HISTORICO)
+                    ]
+                else:
+                    sin_token = vista[vista["ESTADO"].astype(str) != ESTADO_HISTORICO]
                 if not sin_token.empty:
                     with st.expander(f"⚠️ {len(sin_token)} oficio(s) sin código QR"):
                         st.caption("Registrados antes de que existiera el token. "
@@ -1113,15 +1349,6 @@ def render_oficios(deps: dict):
                                 st.rerun()
                             else:
                                 st.error("No se pudo guardar el código.")
-
-                huecos = detectar_huecos(df, anio_f)
-                if huecos:
-                    st.warning(
-                        f"**Folios ausentes en el rango de RH ({anio_f}):** "
-                        + ", ".join(str(h).zfill(4) for h in huecos)
-                    )
-                    st.caption("Pueden pertenecer a otras áreas de la DFC. "
-                               "Contrástalos contra el minutario de la Dirección.")
 
                 st.divider()
                 with st.expander("Cancelar un folio"):
