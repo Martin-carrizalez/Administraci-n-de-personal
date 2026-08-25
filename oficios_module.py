@@ -246,6 +246,17 @@ def vista_previa_pdf(pdf_bytes: bytes, dpi: int = 90) -> bytes:
         doc.close()
 
 
+def _pagina_png(pdf_bytes: bytes, indice: int = 0, dpi: int = 110) -> bytes:
+    """PNG de una página concreta, para revisar el documento mientras se
+    capturan sus datos."""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        i = max(0, min(indice, doc.page_count - 1))
+        return doc[i].get_pixmap(dpi=dpi).tobytes("png")
+    finally:
+        doc.close()
+
+
 def extraer_texto_pdf(pdf_bytes: bytes, max_paginas: int = 2) -> str:
     """Texto de las primeras páginas. Los oficios salen de Word, así que
     traen capa de texto: no hace falta OCR."""
@@ -980,22 +991,73 @@ def _tab_historico(get_client):
     st.caption("Oficios emitidos antes de este sistema. Quedan registrados con "
                "estado HISTORICO, sin QR: el papel ya circuló.")
 
-    anio_actual = datetime.now(TZ).year
-    h1, h2, h3 = st.columns([1, 1, 2])
-    anio_h = h1.number_input("Año", min_value=2020, max_value=2100,
-                             value=anio_actual, step=1, key="oh_anio")
-    folio_h = h2.text_input("Folio", key="oh_folio")
-    fecha_h = h3.date_input("Fecha del oficio", key="oh_fecha")
-
-    asunto_h = st.text_input("Asunto", key="oh_asunto")
-    h4, h5 = st.columns(2)
-    dirig_h = h4.text_input("Dirigido a", key="oh_dirigido")
-    cargo_h = h5.text_input("Cargo del destinatario", key="oh_cargo")
-    obs_h = st.text_area("Observaciones", key="oh_obs", height=68)
-
+    # El archivo va PRIMERO: al capturar históricos se leen los datos del
+    # propio documento, así que conviene tenerlo a la vista mientras se llena.
     arch_h = st.file_uploader("Acuse escaneado (opcional)",
                               type=["pdf", "jpg", "jpeg", "png"], key="oh_file")
     st.caption("Puedes capturar solo los datos ahora y subir los acuses después.")
+
+    sug_h = {c: "" for c in CAMPOS_EXTRAIBLES}
+    col_form, col_vista = st.columns([3, 2])
+
+    if arch_h is not None:
+        bytes_h = arch_h.getvalue()
+        es_pdf_h = arch_h.name.lower().endswith(".pdf")
+
+        with col_vista:
+            if es_pdf_h and pymupdf is not None:
+                try:
+                    doc_h = pymupdf.open(stream=bytes_h, filetype="pdf")
+                    n_pag = doc_h.page_count
+                    doc_h.close()
+                    pag = 1
+                    if n_pag > 1:
+                        pag = st.number_input("Página", 1, n_pag, 1, 1,
+                                              key="oh_pag")
+                        st.caption(f"{n_pag} páginas en este archivo.")
+                    st.image(_pagina_png(bytes_h, int(pag) - 1),
+                             use_container_width=True)
+                except Exception as e:
+                    st.warning(f"No se pudo mostrar el documento: {e}")
+            else:
+                st.image(bytes_h, use_container_width=True)
+
+        # Un acuse escaneado no trae capa de texto, pero si el archivo es el
+        # PDF original de Word sí: intentarlo no cuesta y ahorra la captura.
+        if es_pdf_h:
+            huella_h = hashlib.md5(bytes_h).hexdigest()
+            if st.session_state.get("_oh_huella") != huella_h:
+                texto_h = extraer_texto_pdf(bytes_h)
+                st.session_state["_oh_sug"] = (extraer_datos_oficio(texto_h)[0]
+                                               if texto_h.strip() else
+                                               {c: "" for c in CAMPOS_EXTRAIBLES})
+                st.session_state["_oh_huella"] = huella_h
+            sug_h = st.session_state.get("_oh_sug", sug_h)
+            if any(sug_h.values()):
+                col_form.info("Datos detectados en el archivo. Revísalos.")
+
+    with col_form:
+        anio_actual = datetime.now(TZ).year
+        h1, h2 = st.columns(2)
+        anio_h = h1.number_input("Año", min_value=2020, max_value=2100,
+                                 value=anio_actual, step=1, key="oh_anio")
+        folio_h = h2.text_input("Folio", value=sug_h.get("folio", ""),
+                                key="oh_folio")
+        try:
+            f_def_h = datetime.strptime(sug_h.get("fecha_oficio", ""),
+                                        "%Y-%m-%d").date()
+        except Exception:
+            f_def_h = datetime.now(TZ).date()
+        fecha_h = st.date_input("Fecha del oficio", value=f_def_h, key="oh_fecha")
+
+        asunto_h = st.text_input("Asunto", value=sug_h.get("asunto", ""),
+                                 key="oh_asunto")
+        dirig_h = st.text_input("Dirigido a", value=sug_h.get("dirigido_a", ""),
+                                key="oh_dirigido")
+        cargo_h = st.text_input("Cargo del destinatario",
+                                value=sug_h.get("cargo_destino", ""),
+                                key="oh_cargo")
+        obs_h = st.text_area("Observaciones", key="oh_obs", height=68)
 
     if st.button("Registrar oficio histórico", type="primary", key="oh_btn"):
         if not str(folio_h).strip().isdigit():
