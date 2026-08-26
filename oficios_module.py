@@ -152,7 +152,7 @@ def generar_token() -> str:
     return "".join(secrets.choice(alfabeto) for _ in range(LONGITUD_TOKEN))
 
 
-def generar_qr_png(token: str, color: str = "#888888") -> bytes:
+def generar_qr_png(token: str, color: str = "#000000") -> bytes:
     """QR con corrección de error alta (H): sobrevive sello, engrapado y
     dobleces. Lleva la URL completa con el token para que al escanearlo con
     el celular abra directo la página de validación. Eso obliga a 2.0 cm
@@ -202,8 +202,8 @@ POSICIONES_QR = {
 
 
 def estampar_qr_pdf(pdf_bytes: bytes, token: str, posicion: str = "ID",
-                    lado_cm: float = 2.3, margen_cm: float = 1.0,
-                    color: str = "#888888", etiqueta: str = "") -> bytes:
+                    lado_cm: float = 1.5, margen_cm: float = 1.0,
+                    color: str = "#000000", etiqueta: str = "") -> bytes:
     """Inserta el QR discreto en la esquina indicada de la PRIMERA página.
 
     Medido sobre escaneo degradado a 150 dpi (contraste pobre, inclinación,
@@ -255,6 +255,28 @@ def _pagina_png(pdf_bytes: bytes, indice: int = 0, dpi: int = 110) -> bytes:
         return doc[i].get_pixmap(dpi=dpi).tobytes("png")
     finally:
         doc.close()
+
+
+def _visor_documento(contenido: bytes, nombre: str, prefijo: str):
+    """Muestra el documento subido para capturar sus datos sin cambiar de
+    ventana. Con PDFs de varias páginas ofrece selector de página."""
+    if not nombre.lower().endswith(".pdf"):
+        st.image(contenido, use_container_width=True)
+        return
+    if pymupdf is None:
+        st.caption("Vista previa no disponible (falta PyMuPDF).")
+        return
+    try:
+        doc = pymupdf.open(stream=contenido, filetype="pdf")
+        n_pag = doc.page_count
+        doc.close()
+        pag = 1
+        if n_pag > 1:
+            pag = st.number_input("Página", 1, n_pag, 1, 1, key=f"{prefijo}_pag")
+            st.caption(f"{n_pag} páginas en este archivo.")
+        st.image(_pagina_png(contenido, int(pag) - 1), use_container_width=True)
+    except Exception as e:
+        st.warning(f"No se pudo mostrar el documento: {e}")
 
 
 def extraer_texto_pdf(pdf_bytes: bytes, max_paginas: int = 2) -> str:
@@ -1005,22 +1027,7 @@ def _tab_historico(get_client):
         es_pdf_h = arch_h.name.lower().endswith(".pdf")
 
         with col_vista:
-            if es_pdf_h and pymupdf is not None:
-                try:
-                    doc_h = pymupdf.open(stream=bytes_h, filetype="pdf")
-                    n_pag = doc_h.page_count
-                    doc_h.close()
-                    pag = 1
-                    if n_pag > 1:
-                        pag = st.number_input("Página", 1, n_pag, 1, 1,
-                                              key="oh_pag")
-                        st.caption(f"{n_pag} páginas en este archivo.")
-                    st.image(_pagina_png(bytes_h, int(pag) - 1),
-                             use_container_width=True)
-                except Exception as e:
-                    st.warning(f"No se pudo mostrar el documento: {e}")
-            else:
-                st.image(bytes_h, use_container_width=True)
+            _visor_documento(bytes_h, arch_h.name, "oh")
 
         # Un acuse escaneado no trae capa de texto, pero si el archivo es el
         # PDF original de Word sí: intentarlo no cuesta y ahorra la captura.
@@ -1191,12 +1198,13 @@ def render_oficios(deps: dict):
                                     index=3, key="of_pos",
                                     help="Elige una zona libre de sello y firma.")
                 pos = POSICIONES_QR[pos_nom]
-                lado = cp1.slider("Tamaño (cm)", 0.8, 3.0, 2.3, 0.1, key="of_lado",
-                                  help="Medido: por debajo de 2.3 cm el QR deja "
-                                       "de leerse al escanear.")
+                lado = cp1.slider("Tamaño (cm)", 0.8, 3.0, 1.5, 0.1, key="of_lado",
+                                  help="Medido en escaneo degradado: por debajo "
+                                       "de 2.3 cm el QR deja de leerse.")
                 if lado < 2.3:
-                    cp1.warning("A este tamaño el escáner no lo va a leer.")
-                discreto = cp1.checkbox("Gris discreto", value=True, key="of_gris")
+                    cp1.warning("Bajo condiciones de escaneo malas el lector "
+                                "puede no alcanzarlo a este tamaño.")
+                discreto = cp1.checkbox("Gris discreto", value=False, key="of_gris")
                 color = "#888888" if discreto else "#000000"
                 try:
                     prev = vista_previa_pdf(estampar_qr_pdf(
@@ -1451,33 +1459,41 @@ def render_oficios(deps: dict):
         sub_alta, sub_lista = st.tabs(["➕ Registrar acuse", "📋 Ver acuses"])
 
         with sub_alta:
-            ca1, ca2 = st.columns([2, 1])
-            tipo_nom = ca1.selectbox("Tipo de documento",
-                                     options=list(TIPOS_ACUSE.keys()),
-                                     key="ac_tipo")
-            clave = TIPOS_ACUSE[tipo_nom]
-            anio_a = ca2.number_input("Año", min_value=2020, max_value=2100,
-                                      value=datetime.now(TZ).year, step=1,
-                                      key="ac_anio")
-
-            prox = siguiente_consecutivo(df_acu, int(anio_a), clave)
-            st.caption(f"Se registrará como **DFC-{int(anio_a)}-{clave}-{prox:04d}**")
-
-            desc = st.text_input("Descripción", key="ac_desc",
-                                 help="De qué se trata el documento.")
-            cb1, cb2 = st.columns(2)
-            ref = cb1.text_input("Referencia externa", key="ac_ref",
-                                 help="Folio o identificador propio del "
-                                      "documento, si lo tiene. Opcional.")
-            fecha_doc = cb2.date_input("Fecha del documento", key="ac_fecha")
-            relac = st.text_input("Relacionado con", key="ac_rel",
-                                  help="Persona, Centro de Maestros o proceso "
-                                       "al que corresponde. Opcional.")
-            obs_a = st.text_area("Observaciones", key="ac_obs", height=68)
-
+            # El archivo va primero: los datos se leen del propio documento,
+            # así que conviene tenerlo a la vista mientras se captura.
             arch = st.file_uploader("Escaneo del acuse (PDF o imagen)",
                                     type=["pdf", "jpg", "jpeg", "png"],
                                     key="ac_file")
+
+            col_form_a, col_vista_a = st.columns([3, 2])
+            if arch is not None:
+                with col_vista_a:
+                    _visor_documento(arch.getvalue(), arch.name, "ac")
+
+            with col_form_a:
+                ca1, ca2 = st.columns([2, 1])
+                tipo_nom = ca1.selectbox("Tipo de documento",
+                                         options=list(TIPOS_ACUSE.keys()),
+                                         key="ac_tipo")
+                clave = TIPOS_ACUSE[tipo_nom]
+                anio_a = ca2.number_input("Año", min_value=2020, max_value=2100,
+                                          value=datetime.now(TZ).year, step=1,
+                                          key="ac_anio")
+
+                prox = siguiente_consecutivo(df_acu, int(anio_a), clave)
+                st.caption(f"Se registrará como "
+                           f"**DFC-{int(anio_a)}-{clave}-{prox:04d}**")
+
+                desc = st.text_input("Descripción", key="ac_desc",
+                                     help="De qué se trata el documento.")
+                ref = st.text_input("Referencia externa", key="ac_ref",
+                                    help="Folio o identificador propio del "
+                                         "documento, si lo tiene. Opcional.")
+                fecha_doc = st.date_input("Fecha del documento", key="ac_fecha")
+                relac = st.text_input("Relacionado con", key="ac_rel",
+                                      help="Persona, Centro de Maestros o "
+                                           "proceso al que corresponde. Opcional.")
+                obs_a = st.text_area("Observaciones", key="ac_obs", height=68)
 
             if st.button("Registrar acuse", type="primary", key="ac_btn"):
                 if arch is None:
