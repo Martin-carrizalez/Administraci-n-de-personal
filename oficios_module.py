@@ -1192,15 +1192,15 @@ def _datos_de_ocr(texto: str) -> dict:
     return d
 
 
-def analizar_lote_historico(pdf_bytes: bytes, callback=None,
-                            una_por_pagina: bool = False) -> list[dict]:
-    """Recorre el PDF, lee el folio de cada página y agrupa las consecutivas
-    que comparten folio. Devuelve un documento por grupo.
+def analizar_lote_historico(pdf_bytes: bytes, callback=None) -> list[dict]:
+    """Lee el encabezado de CADA página y devuelve una fila por página.
 
-    una_por_pagina=True desactiva el agrupado: cada página es un oficio. Es
-    lo correcto cuando el escaneo se preparó sin anexos, porque el OCR no
-    siempre alcanza a leer el folio y las páginas mudas se pegarían a la
-    anterior."""
+    No agrupa. El agrupado automático se quitó a propósito: cuando el OCR no
+    alcanzaba a leer un folio, esa página se pegaba a la anterior y el oficio
+    correspondiente desaparecía de la tabla, sin forma de recuperarlo. Con una
+    fila por página nunca se pierde nada: lo que el OCR no lea se captura a
+    mano, y los anexos se marcan con la columna 'Va con la anterior'.
+    """
     if pymupdf is None:
         raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
 
@@ -1208,36 +1208,90 @@ def analizar_lote_historico(pdf_bytes: bytes, callback=None,
     total = doc.page_count
     doc.close()
 
-    paginas = []
+    filas = []
     for i in range(total):
         try:
-            datos = _datos_de_ocr(ocr_encabezado(pdf_bytes, i))
+            d = _datos_de_ocr(ocr_encabezado(pdf_bytes, i))
         except Exception:
-            datos = {c: "" for c in CAMPOS_EXTRAIBLES}
-        datos["pagina"] = i
-        paginas.append(datos)
+            d = {c: "" for c in CAMPOS_EXTRAIBLES}
+        filas.append({
+            "pagina": i,
+            "folio": d.get("folio", ""),
+            "anio": d.get("_anio", "") or str(datetime.now(TZ).year),
+            "fecha_oficio": d.get("fecha_oficio", ""),
+            "asunto": d.get("asunto", ""),
+            "dirigido_a": d.get("dirigido_a", ""),
+            "cargo_destino": d.get("cargo_destino", ""),
+            # Sin folio propio, lo más probable es que sea anexo del anterior.
+            # Es solo una propuesta: la columna es editable.
+            "anexo": bool(i > 0 and not d.get("folio", "")),
+        })
         if callback:
             callback((i + 1) / total)
+    return filas
 
-    grupos = []
-    for pg in paginas:
-        folio = pg.get("folio", "")
-        # Sin folio legible, la página se anexa al documento anterior: es lo
-        # más probable en un oficio de varias hojas.
-        if (not una_por_pagina and grupos
-                and (folio == grupos[-1]["folio"] or not folio)):
-            grupos[-1]["paginas"].append(pg["pagina"])
+
+def agrupar_paginas(filas: list[dict]) -> tuple[list[dict], list[str]]:
+    """Convierte las filas de la tabla en documentos a guardar.
+
+    Cada fila marcada como anexo se suma al documento abierto antes que ella.
+    Devuelve (documentos, avisos). Valida los casos que rompen:
+      · anexo sin oficio previo al cual pegarse
+      · folio vacío o no numérico
+      · folio repetido dentro del mismo lote
+      · filas totalmente vacías (se ignoran en silencio)
+    """
+    docs, avisos = [], []
+    vistos = {}
+
+    for fila in filas:
+        pagina = fila.get("pagina")
+        if pagina is None:
             continue
-        grupos.append({
+
+        folio = str(fila.get("folio", "") or "").strip()
+        es_anexo = bool(fila.get("anexo"))
+
+        # Fila vacía: ni folio ni marca de anexo. No es error, se ignora.
+        if not folio and not es_anexo:
+            avisos.append(f"Página {pagina + 1}: sin folio, se omite.")
+            continue
+
+        if es_anexo:
+            if not docs:
+                avisos.append(f"Página {pagina + 1}: marcada como anexo pero no "
+                              "hay oficio antes. Se omite.")
+                continue
+            docs[-1]["paginas"].append(pagina)
+            continue
+
+        if not folio.isdigit():
+            avisos.append(f"Página {pagina + 1}: folio {folio!r} no es numérico. "
+                          "Se omite.")
+            continue
+
+        anio = str(fila.get("anio", "") or "").strip()
+        if not anio.isdigit():
+            anio = str(datetime.now(TZ).year)
+
+        clave = (anio, folio.zfill(4))
+        if clave in vistos:
+            avisos.append(f"Página {pagina + 1}: el folio {folio} ya aparece en "
+                          f"la página {vistos[clave] + 1}. Se omite el repetido.")
+            continue
+        vistos[clave] = pagina
+
+        docs.append({
             "folio": folio,
-            "anio": pg.get("_anio", "") or str(datetime.now(TZ).year),
-            "fecha_oficio": pg.get("fecha_oficio", ""),
-            "asunto": pg.get("asunto", ""),
-            "dirigido_a": pg.get("dirigido_a", ""),
-            "cargo_destino": pg.get("cargo_destino", ""),
-            "paginas": [pg["pagina"]],
+            "anio": int(anio),
+            "fecha_oficio": str(fila.get("fecha_oficio", "") or "").strip(),
+            "asunto": str(fila.get("asunto", "") or "").strip(),
+            "dirigido_a": str(fila.get("dirigido_a", "") or "").strip(),
+            "cargo_destino": str(fila.get("cargo_destino", "") or "").strip(),
+            "paginas": [pagina],
         })
-    return grupos
+
+    return docs, avisos
 
 
 class ArchivoEnMemoria:
@@ -1292,17 +1346,20 @@ def extraer_paginas(pdf_bytes: bytes, paginas: list[int]) -> bytes:
 
 
 def _tab_lote_historico(get_client):
-    """Carga masiva: un solo PDF con muchos oficios escaneados. El sistema
-    los separa por folio y presenta una tabla editable antes de guardar."""
+    """Carga masiva: un solo PDF con muchos oficios escaneados.
+
+    La tabla muestra UNA FILA POR PÁGINA, siempre. Así ninguna página se
+    pierde cuando el OCR no logra leer su folio: esa fila aparece vacía y se
+    captura a mano. Los anexos se marcan con la casilla 'Anexo'.
+    """
     if pytesseract is None:
         st.error(f"Falta pytesseract: {_ERROR_OCR}")
         st.caption("Agrega `pytesseract` a requirements.txt y `tesseract-ocr` "
                    "más `tesseract-ocr-spa` a packages.txt.")
         return
 
-    st.caption("Sube un PDF con varios oficios escaneados. Se lee el folio del "
-               "encabezado de cada página y se agrupan las que pertenecen al "
-               "mismo oficio.")
+    st.caption("Sube un PDF con varios oficios escaneados. Se lee el "
+               "encabezado de cada página y se arma una tabla para revisar.")
 
     lote = st.file_uploader("PDF con varios oficios", type=["pdf"], key="ol_file")
     if lote is None:
@@ -1311,100 +1368,108 @@ def _tab_lote_historico(get_client):
     lote_bytes = lote.getvalue()
     huella_l = hashlib.md5(lote_bytes).hexdigest()
 
-    una_pag = st.checkbox(
-        "Cada página es un oficio distinto (sin anexos)", key="ol_una_pag",
-        help="Márcalo si separaste los oficios para que ocupen una hoja cada "
-             "uno. Evita que las páginas cuyo folio no se lea se peguen a la "
-             "anterior.")
-
-    if st.session_state.get("_ol_huella") != huella_l or \
-            st.session_state.get("_ol_una_pag_usada") != una_pag:
-        if st.button("Analizar documento", type="primary", key="ol_btn_an"):
-            barra = st.progress(0.0, text="Leyendo encabezados...")
-            try:
-                grupos = analizar_lote_historico(
-                    lote_bytes, lambda f: barra.progress(f, text=f"Leyendo... {f:.0%}"),
-                    una_por_pagina=una_pag)
-            except Exception as e:
-                _error_amable(e, "al analizar el lote")
-                return
-            barra.empty()
-            st.session_state["_ol_grupos"] = grupos
-            st.session_state["_ol_huella"] = huella_l
-            st.session_state["_ol_una_pag_usada"] = una_pag
-            st.rerun()
-        else:
-            st.info("El análisis toma unos 2 segundos por página.")
+    if st.session_state.get("_ol_huella") != huella_l:
+        doc_i = pymupdf.open(stream=lote_bytes, filetype="pdf")
+        n_tot = doc_i.page_count
+        doc_i.close()
+        st.info(f"{n_tot} páginas. El análisis toma unos 2 segundos por página.")
+        if not st.button("Analizar documento", type="primary", key="ol_btn_an"):
             return
+        barra = st.progress(0.0, text="Leyendo encabezados...")
+        try:
+            filas = analizar_lote_historico(
+                lote_bytes,
+                lambda f: barra.progress(f, text=f"Leyendo... {f:.0%}"))
+        except Exception as e:
+            _error_amable(e, "al analizar el lote")
+            return
+        barra.empty()
+        st.session_state["_ol_filas"] = filas
+        st.session_state["_ol_huella"] = huella_l
+        st.rerun()
 
-    grupos = st.session_state.get("_ol_grupos", [])
-    if not grupos:
-        st.warning("No se detectó ningún oficio.")
+    filas = st.session_state.get("_ol_filas", [])
+    if not filas:
+        st.warning("No se pudo leer ninguna página.")
         return
 
-    st.success(f"**{len(grupos)} oficio(s) detectado(s).** Revisa y corrige "
-               "antes de guardar: el OCR se equivoca.")
+    sin_folio = sum(1 for f in filas if not f["folio"])
+    st.success(f"**{len(filas)} páginas leídas.** "
+               f"{len(filas) - sin_folio} con folio detectado.")
+    st.caption("Una fila por página. Marca **Anexo** en las páginas que "
+               "pertenecen al oficio de arriba. Las que no sean anexo ni "
+               "tengan folio se omiten.")
 
     tabla = pd.DataFrame([{
-        "Guardar": bool(g["folio"]),
-        "Folio": g["folio"],
-        "Año": g["anio"],
-        "Fecha": g["fecha_oficio"],
-        "Asunto": g["asunto"],
-        "Dirigido a": g["dirigido_a"],
-        "Cargo": g["cargo_destino"],
-        "Páginas": ", ".join(str(p + 1) for p in g["paginas"]),
-    } for g in grupos])
-
-    st.caption("La columna **Páginas** es editable: corrige ahí si el OCR "
-               "agrupó mal. Escribe los números separados por coma (1, 2, 3).")
+        "Pág": f["pagina"] + 1,
+        "Anexo": f["anexo"],
+        "Folio": f["folio"],
+        "Año": f["anio"],
+        "Fecha": f["fecha_oficio"],
+        "Asunto": f["asunto"],
+        "Dirigido a": f["dirigido_a"],
+        "Cargo": f["cargo_destino"],
+    } for f in filas])
 
     editada = st.data_editor(
         tabla, use_container_width=True, hide_index=True, key="ol_editor",
-        num_rows="dynamic",
+        num_rows="fixed", disabled=["Pág"],
         column_config={
-            "Guardar": st.column_config.CheckboxColumn(width="small"),
-            "Páginas": st.column_config.TextColumn(
-                width="small", help="Páginas de este oficio, base 1."),
+            "Pág": st.column_config.NumberColumn(width="small"),
+            "Anexo": st.column_config.CheckboxColumn(
+                width="small", help="Esta página va con el oficio de arriba."),
+            "Folio": st.column_config.TextColumn(width="small"),
+            "Año": st.column_config.TextColumn(width="small"),
         })
 
-    sin_folio = int((editada["Folio"].astype(str).str.strip() == "").sum())
-    if sin_folio:
-        st.warning(f"{sin_folio} fila(s) sin folio legible. Captúralo a mano "
-                   "o desmárcalas.")
+    # Vista previa del agrupado ANTES de guardar: es la única forma de que se
+    # note un anexo mal marcado sin tener que deshacer registros después.
+    filas_ed = [{
+        "pagina": int(r["Pág"]) - 1,
+        "anexo": bool(r["Anexo"]),
+        "folio": r["Folio"],
+        "anio": r["Año"],
+        "fecha_oficio": r["Fecha"],
+        "asunto": r["Asunto"],
+        "dirigido_a": r["Dirigido a"],
+        "cargo_destino": r["Cargo"],
+    } for _, r in editada.iterrows()]
 
-    if st.button("Guardar los marcados", type="primary", key="ol_btn_guardar"):
-        marcadas = editada[editada["Guardar"] == True]  # noqa: E712
-        if marcadas.empty:
-            st.warning("No hay filas marcadas.")
-            return
+    docs, avisos = agrupar_paginas(filas_ed)
+
+    st.divider()
+    if docs:
+        st.markdown(f"**Se guardarán {len(docs)} oficio(s):**")
+        st.dataframe(pd.DataFrame([{
+            "Oficio": construir_id(d["anio"], d["folio"]),
+            "Páginas": ", ".join(str(p + 1) for p in d["paginas"]),
+            "Asunto": d["asunto"][:60],
+            "Dirigido a": d["dirigido_a"][:40],
+        } for d in docs]), use_container_width=True, hide_index=True)
+    else:
+        st.warning("Con la configuración actual no se guardaría ningún oficio.")
+
+    if avisos:
+        with st.expander(f"⚠️ {len(avisos)} página(s) se omitirán"):
+            for a in avisos:
+                st.write(f"• {a}")
+
+    if not docs:
+        return
+
+    if st.button(f"Guardar {len(docs)} oficio(s)", type="primary",
+                 key="ol_btn_guardar"):
         barra = st.progress(0.0, text="Preparando...")
-        doc_tmp = pymupdf.open(stream=lote_bytes, filetype="pdf")
-        total_pag = doc_tmp.page_count
-        doc_tmp.close()
-
-        pendientes, sin_paginas = [], []
-        for idx, fila in marcadas.iterrows():
-            # Las páginas salen de la tabla editada, no de la detección
-            # automática: el usuario pudo corregir el agrupado.
-            pags = parsear_paginas(fila["Páginas"], total_pag)
-            if not pags:
-                sin_paginas.append(str(fila["Folio"]))
-                continue
-            pendientes.append({
-                "anio": int(str(fila["Año"]).strip() or datetime.now(TZ).year),
-                "folio": str(fila["Folio"]).strip(),
-                "fecha_oficio": str(fila["Fecha"]).strip(),
-                "asunto": str(fila["Asunto"]).strip(),
-                "dirigido_a": str(fila["Dirigido a"]).strip(),
-                "cargo_destino": str(fila["Cargo"]).strip(),
-                "observaciones": "Carga en lote",
-                "contenido": extraer_paginas(lote_bytes, pags),
-            })
-
-        if sin_paginas:
-            st.warning("Sin páginas válidas, se omitieron: "
-                       + ", ".join(sin_paginas))
+        pendientes = [{
+            "anio": d["anio"],
+            "folio": d["folio"],
+            "fecha_oficio": d["fecha_oficio"],
+            "asunto": d["asunto"],
+            "dirigido_a": d["dirigido_a"],
+            "cargo_destino": d["cargo_destino"],
+            "observaciones": "Carga en lote",
+            "contenido": extraer_paginas(lote_bytes, d["paginas"]),
+        } for d in docs]
 
         ok_n, errores = registrar_historicos_lote(
             get_client, pendientes,
@@ -1417,7 +1482,7 @@ def _tab_lote_historico(get_client):
                 for e in errores:
                     st.write(f"• {e}")
         if ok_n:
-            for k in ("_ol_grupos", "_ol_huella"):
+            for k in ("_ol_filas", "_ol_huella"):
                 st.session_state.pop(k, None)
 
 
