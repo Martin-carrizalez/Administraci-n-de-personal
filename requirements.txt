@@ -12,3 +12,4 @@ pytz
 google-generativeai
 PyMuPDF
 zxing-cpp
+pytesseract

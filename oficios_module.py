@@ -1006,12 +1006,280 @@ def render_validacion_oficio(get_client, token: str):
 # ─────────────────────────────────────────────
 # VISTA PRINCIPAL
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# CARGA EN LOTE DE HISTÓRICOS (OCR del encabezado)
+#
+# Un acuse escaneado es imagen: no hay capa de texto ni QR que separe los
+# documentos. Lo único común a todos es el folio del encabezado, así que se
+# lee por OCR y se usa para agrupar páginas. Páginas seguidas con el mismo
+# folio pertenecen al mismo oficio.
+# ─────────────────────────────────────────────
+try:
+    import pytesseract
+    _ERROR_OCR = ""
+except Exception as _e_ocr:  # pragma: no cover
+    pytesseract = None
+    _ERROR_OCR = str(_e_ocr)
+
+# El encabezado vive en el tercio superior. Recortar reduce ruido y tiempo.
+FRACCION_ENCABEZADO = 0.32
+
+_RE_OCR_FOLIO = re.compile(
+    r"oficio\s*[:.]?\s*(\d{1,6})\s*/\s*(?:[\dA-Za-z]{1,8}\s*/\s*)?(\d{4})",
+    re.IGNORECASE)
+_RE_OCR_ASUNTO = re.compile(r"asunto\s*:?\s*(.{3,150}?)\s*\.", re.IGNORECASE)
+
+
+def ocr_encabezado(pdf_bytes: bytes, pagina: int, dpi: int = 300) -> str:
+    """Texto del encabezado de una página escaneada."""
+    if pytesseract is None:
+        raise RuntimeError(f"pytesseract no disponible: {_ERROR_OCR}")
+    if pymupdf is None:
+        raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
+    from PIL import Image
+
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        p = doc[pagina]
+        r = p.rect
+        recorte = pymupdf.Rect(r.x0, r.y0, r.x1,
+                               r.y0 + r.height * FRACCION_ENCABEZADO)
+        pix = p.get_pixmap(dpi=dpi, clip=recorte)
+        img = Image.open(BytesIO(pix.tobytes("png")))
+    finally:
+        doc.close()
+    try:
+        return pytesseract.image_to_string(img, lang="spa")
+    except Exception:
+        # Sin el diccionario español el OCR sigue sirviendo: pierde acentos,
+        # no los números del folio, que es lo que se usa para agrupar.
+        return pytesseract.image_to_string(img)
+
+
+def _datos_de_ocr(texto: str) -> dict:
+    """Campos del encabezado a partir del texto OCR, que trae más ruido que
+    un PDF digital: por eso reglas propias y no las del extractor normal."""
+    d = {c: "" for c in CAMPOS_EXTRAIBLES}
+
+    m = _RE_OCR_FOLIO.search(texto)
+    if m:
+        d["folio"] = m.group(1).zfill(4)
+        d["_anio"] = m.group(2)
+
+    m = _RE_P_FECHA.search(texto.replace("\n", " "))
+    if m:
+        mes = MESES.get(m.group(2).lower())
+        if mes:
+            d["fecha_oficio"] = f"{m.group(3)}-{mes:02d}-{int(m.group(1)):02d}"
+
+    m = _RE_OCR_ASUNTO.search(texto)
+    if m:
+        d["asunto"] = _limpiar(m.group(1))[:250]
+
+    m_pres = _RE_P_PRESENTE.search(texto)
+    if m_pres:
+        inicio = 0
+        m_as = re.search(r"asunto\s*:?\s*.{3,150}?\.", texto, re.IGNORECASE)
+        if m_as:
+            inicio = m_as.end()
+        bloque = texto[inicio:m_pres.start()]
+        if 4 < len(bloque) < 400:
+            nombre, cargo = _separar_nombre_cargo(bloque.replace("\n", " "))
+            d["dirigido_a"] = nombre[:120]
+            d["cargo_destino"] = cargo[:200]
+    return d
+
+
+def analizar_lote_historico(pdf_bytes: bytes, callback=None) -> list[dict]:
+    """Recorre el PDF, lee el folio de cada página y agrupa las consecutivas
+    que comparten folio. Devuelve un documento por grupo."""
+    if pymupdf is None:
+        raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
+
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    total = doc.page_count
+    doc.close()
+
+    paginas = []
+    for i in range(total):
+        try:
+            datos = _datos_de_ocr(ocr_encabezado(pdf_bytes, i))
+        except Exception:
+            datos = {c: "" for c in CAMPOS_EXTRAIBLES}
+        datos["pagina"] = i
+        paginas.append(datos)
+        if callback:
+            callback((i + 1) / total)
+
+    grupos = []
+    for pg in paginas:
+        folio = pg.get("folio", "")
+        # Sin folio legible, la página se anexa al documento anterior: es lo
+        # más probable en un oficio de varias hojas.
+        if grupos and (folio == grupos[-1]["folio"] or not folio):
+            grupos[-1]["paginas"].append(pg["pagina"])
+            continue
+        grupos.append({
+            "folio": folio,
+            "anio": pg.get("_anio", "") or str(datetime.now(TZ).year),
+            "fecha_oficio": pg.get("fecha_oficio", ""),
+            "asunto": pg.get("asunto", ""),
+            "dirigido_a": pg.get("dirigido_a", ""),
+            "cargo_destino": pg.get("cargo_destino", ""),
+            "paginas": [pg["pagina"]],
+        })
+    return grupos
+
+
+class ArchivoEnMemoria:
+    """Imita lo mínimo de un archivo de Streamlit (getvalue/name/type) para
+    reutilizar las funciones de registro con páginas recortadas de un lote."""
+
+    def __init__(self, contenido: bytes, name: str, type: str = "application/pdf"):
+        self._contenido = contenido
+        self.name = name
+        self.type = type
+
+    def getvalue(self) -> bytes:
+        return self._contenido
+
+
+def extraer_paginas(pdf_bytes: bytes, paginas: list[int]) -> bytes:
+    """Saca un documento nuevo con las páginas indicadas."""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        nuevo = pymupdf.open()
+        for i in sorted(paginas):
+            nuevo.insert_pdf(doc, from_page=i, to_page=i)
+        salida = nuevo.tobytes()
+        nuevo.close()
+        return salida
+    finally:
+        doc.close()
+
+
+def _tab_lote_historico(get_client):
+    """Carga masiva: un solo PDF con muchos oficios escaneados. El sistema
+    los separa por folio y presenta una tabla editable antes de guardar."""
+    if pytesseract is None:
+        st.error(f"Falta pytesseract: {_ERROR_OCR}")
+        st.caption("Agrega `pytesseract` a requirements.txt y `tesseract-ocr` "
+                   "más `tesseract-ocr-spa` a packages.txt.")
+        return
+
+    st.caption("Sube un PDF con varios oficios escaneados. Se lee el folio del "
+               "encabezado de cada página y se agrupan las que pertenecen al "
+               "mismo oficio.")
+
+    lote = st.file_uploader("PDF con varios oficios", type=["pdf"], key="ol_file")
+    if lote is None:
+        return
+
+    lote_bytes = lote.getvalue()
+    huella_l = hashlib.md5(lote_bytes).hexdigest()
+
+    if st.session_state.get("_ol_huella") != huella_l:
+        if st.button("Analizar documento", type="primary", key="ol_btn_an"):
+            barra = st.progress(0.0, text="Leyendo encabezados...")
+            try:
+                grupos = analizar_lote_historico(
+                    lote_bytes, lambda f: barra.progress(f, text=f"Leyendo... {f:.0%}"))
+            except Exception as e:
+                _error_amable(e, "al analizar el lote")
+                return
+            barra.empty()
+            st.session_state["_ol_grupos"] = grupos
+            st.session_state["_ol_huella"] = huella_l
+            st.rerun()
+        else:
+            st.info("El análisis toma unos 2 segundos por página.")
+            return
+
+    grupos = st.session_state.get("_ol_grupos", [])
+    if not grupos:
+        st.warning("No se detectó ningún oficio.")
+        return
+
+    st.success(f"**{len(grupos)} oficio(s) detectado(s).** Revisa y corrige "
+               "antes de guardar: el OCR se equivoca.")
+
+    tabla = pd.DataFrame([{
+        "Guardar": bool(g["folio"]),
+        "Folio": g["folio"],
+        "Año": g["anio"],
+        "Fecha": g["fecha_oficio"],
+        "Asunto": g["asunto"],
+        "Dirigido a": g["dirigido_a"],
+        "Cargo": g["cargo_destino"],
+        "Páginas": ", ".join(str(p + 1) for p in g["paginas"]),
+    } for g in grupos])
+
+    editada = st.data_editor(
+        tabla, use_container_width=True, hide_index=True, key="ol_editor",
+        disabled=["Páginas"],
+        column_config={
+            "Guardar": st.column_config.CheckboxColumn(width="small"),
+            "Páginas": st.column_config.TextColumn(width="small"),
+        })
+
+    sin_folio = int((editada["Folio"].astype(str).str.strip() == "").sum())
+    if sin_folio:
+        st.warning(f"{sin_folio} fila(s) sin folio legible. Captúralo a mano "
+                   "o desmárcalas.")
+
+    if st.button("Guardar los marcados", type="primary", key="ol_btn_guardar"):
+        marcadas = editada[editada["Guardar"] == True]  # noqa: E712
+        if marcadas.empty:
+            st.warning("No hay filas marcadas.")
+            return
+        barra = st.progress(0.0)
+        ok_n, errores = 0, []
+        for n, (idx, fila) in enumerate(marcadas.iterrows(), start=1):
+            folio_f = str(fila["Folio"]).strip()
+            if not folio_f.isdigit():
+                errores.append(f"Fila {idx + 1}: folio inválido")
+                barra.progress(n / len(marcadas))
+                continue
+            sub = extraer_paginas(lote_bytes, grupos[idx]["paginas"])
+            ok, res = registrar_oficio_historico(get_client, {
+                "anio": int(str(fila["Año"]).strip() or datetime.now(TZ).year),
+                "folio": folio_f,
+                "fecha_oficio": str(fila["Fecha"]).strip(),
+                "asunto": str(fila["Asunto"]).strip(),
+                "dirigido_a": str(fila["Dirigido a"]).strip(),
+                "cargo_destino": str(fila["Cargo"]).strip(),
+                "observaciones": "Carga en lote",
+            }, ArchivoEnMemoria(sub, f"{folio_f}.pdf"))
+            if ok:
+                ok_n += 1
+            else:
+                errores.append(f"{folio_f}: {res}")
+            barra.progress(n / len(marcadas))
+
+        st.success(f"{ok_n} oficio(s) registrado(s).")
+        if errores:
+            with st.expander(f"{len(errores)} con problema"):
+                for e in errores:
+                    st.write(f"• {e}")
+        if ok_n:
+            for k in ("_ol_grupos", "_ol_huella"):
+                st.session_state.pop(k, None)
+
+
 def _tab_historico(get_client):
     """Captura de oficios anteriores a este sistema. Diseñada para cargar
     varios seguidos: el escaneo es opcional y el formulario se limpia solo,
     de modo que se pueda capturar todo el año y subir acuses después."""
     st.caption("Oficios emitidos antes de este sistema. Quedan registrados con "
                "estado HISTORICO, sin QR: el papel ya circuló.")
+
+    via = st.radio("Forma de captura",
+                   ["Uno por uno", "Carga en lote (un PDF con varios oficios)"],
+                   key="oh_via", horizontal=True)
+    st.divider()
+    if via.startswith("Carga en lote"):
+        _tab_lote_historico(get_client)
+        return
 
     # El archivo va PRIMERO: al capturar históricos se leen los datos del
     # propio documento, así que conviene tenerlo a la vista mientras se llena.
