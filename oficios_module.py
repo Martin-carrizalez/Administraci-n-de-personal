@@ -746,6 +746,102 @@ def registrar_oficio_historico(get_client, datos: dict, archivo=None) -> tuple[b
         return False, f"Error al guardar: {e}"
 
 
+def registrar_historicos_lote(get_client, registros: list[dict],
+                              callback=None) -> tuple[int, list[str]]:
+    """Alta masiva de históricos con el mínimo de llamadas a Sheets.
+
+    La versión de uno en uno relee el Sheet en cada alta para detectar
+    duplicados; con decenas de oficios eso agota la cuota de lecturas por
+    minuto. Aquí se lee UNA vez, se valida todo contra esa foto y se escribe
+    en una sola operación.
+
+    registros: [{anio, folio, fecha_oficio, asunto, dirigido_a,
+                 cargo_destino, observaciones, contenido, nombre}]
+    Devuelve (cuántos se guardaron, lista de errores).
+    """
+    errores = []
+
+    # ── Una sola lectura ──
+    try:
+        sh = _abrir_sheet(get_client)
+        ws = sh.worksheet(TAB_OFICIOS)
+        ws_log = sh.worksheet(TAB_LOG)
+        existentes = {str(r.get("ID_OFICIO", "")).strip()
+                      for r in ws.get_all_records(numericise_ignore=["all"])}
+    except Exception as e:
+        return 0, [f"No se pudo leer el minutario: {e}"]
+
+    rfc = str(st.session_state.get("rfc", "")).upper()
+    nombre_usr = st.session_state.get("nombre", "")
+    hoy = _hoy()
+    ahora = _ahora()
+
+    filas, filas_log = [], []
+    total = len(registros)
+
+    for n, reg in enumerate(registros, start=1):
+        folio = str(reg.get("folio", "")).strip()
+        if not folio.isdigit():
+            errores.append(f"Folio inválido: {folio!r}")
+            if callback:
+                callback(n / total)
+            continue
+
+        id_oficio = construir_id(reg["anio"], folio)
+        if id_oficio in existentes:
+            errores.append(f"{id_oficio}: ya estaba registrado")
+            if callback:
+                callback(n / total)
+            continue
+
+        # Drive tiene cuota aparte de Sheets: subir aquí no afecta el límite.
+        url, huella = "", ""
+        contenido = reg.get("contenido")
+        if contenido:
+            url = subir_bytes_drive(contenido, f"{id_oficio}_ACUSE.pdf",
+                                    "application/pdf")
+            if url.startswith("ERROR:"):
+                errores.append(f"{id_oficio}: {url}")
+                if callback:
+                    callback(n / total)
+                continue
+            huella = sha256_bytes(contenido)
+
+        filas.append([
+            id_oficio, str(reg["anio"]), folio.zfill(4), hoy,
+            reg.get("fecha_oficio", ""), rfc, nombre_usr,
+            reg.get("asunto", ""), reg.get("dirigido_a", ""),
+            reg.get("cargo_destino", ""), ESTADO_HISTORICO,
+            "", "",                              # URL_EMITIDO, SHA256_EMITIDO
+            hoy if url else "",                  # FECHA_ESCANEO
+            reg.get("observaciones", ""),
+            "",                                  # TOKEN: los históricos no llevan
+            url, huella,                         # URL_ESCANEO, SHA256_ESCANEO
+        ])
+        filas_log.append([ahora, id_oficio, "HISTORICO_LOTE", rfc, nombre_usr,
+                          reg.get("asunto", "")])
+        existentes.add(id_oficio)   # evita duplicados dentro del mismo lote
+        if callback:
+            callback(n / total)
+
+    if not filas:
+        return 0, errores
+
+    # ── Una sola escritura ──
+    try:
+        ws.append_rows(filas, value_input_option="USER_ENTERED")
+    except Exception as e:
+        return 0, errores + [f"No se pudo escribir: {e}"]
+
+    try:
+        ws_log.append_rows(filas_log, value_input_option="USER_ENTERED")
+    except Exception:
+        pass   # la bitácora nunca debe tumbar la operación principal
+
+    st.cache_data.clear()
+    return len(filas), errores
+
+
 def _actualizar_fila(get_client, id_oficio: str, cambios: dict) -> bool:
     """Actualiza celdas por nombre de columna, sin asumir el orden del Sheet."""
     from gspread.cell import Cell
@@ -1025,7 +1121,8 @@ except Exception as _e_ocr:  # pragma: no cover
 FRACCION_ENCABEZADO = 0.32
 
 _RE_OCR_FOLIO = re.compile(
-    r"oficio\s*[:.]?\s*(\d{1,6})\s*/\s*(?:[\dA-Za-z]{1,8}\s*/\s*)?(\d{4})",
+    r"(?:n[oº°]\.?\s*de\s*)?oficio\s*[:.]?\s*"
+    r"(\d{1,6})\s*/\s*(?:[\dA-Za-z]{1,8}\s*/\s*)?(\d{4})",
     re.IGNORECASE)
 _RE_OCR_ASUNTO = re.compile(r"asunto\s*:?\s*(.{3,150}?)\s*\.", re.IGNORECASE)
 
@@ -1078,21 +1175,32 @@ def _datos_de_ocr(texto: str) -> dict:
 
     m_pres = _RE_P_PRESENTE.search(texto)
     if m_pres:
-        inicio = 0
-        m_as = re.search(r"asunto\s*:?\s*.{3,150}?\.", texto, re.IGNORECASE)
-        if m_as:
-            inicio = m_as.end()
-        bloque = texto[inicio:m_pres.start()]
-        if 4 < len(bloque) < 400:
-            nombre, cargo = _separar_nombre_cargo(bloque.replace("\n", " "))
+        previas = [l.strip() for l in texto[:m_pres.start()].splitlines()
+                   if l.strip()]
+        # Solo las líneas inmediatamente anteriores a PRESENTE, y se corta al
+        # topar con encabezado: si no, el membrete entero acaba de nombre.
+        bloque_ls = []
+        for linea in reversed(previas[-6:]):
+            if _RE_ENCABEZADO.search(linea) or _RE_OCR_FOLIO.search(linea):
+                break
+            bloque_ls.insert(0, linea)
+        bloque = " ".join(bloque_ls)
+        if 4 < len(bloque) < 300:
+            nombre, cargo = _separar_nombre_cargo(bloque)
             d["dirigido_a"] = nombre[:120]
             d["cargo_destino"] = cargo[:200]
     return d
 
 
-def analizar_lote_historico(pdf_bytes: bytes, callback=None) -> list[dict]:
+def analizar_lote_historico(pdf_bytes: bytes, callback=None,
+                            una_por_pagina: bool = False) -> list[dict]:
     """Recorre el PDF, lee el folio de cada página y agrupa las consecutivas
-    que comparten folio. Devuelve un documento por grupo."""
+    que comparten folio. Devuelve un documento por grupo.
+
+    una_por_pagina=True desactiva el agrupado: cada página es un oficio. Es
+    lo correcto cuando el escaneo se preparó sin anexos, porque el OCR no
+    siempre alcanza a leer el folio y las páginas mudas se pegarían a la
+    anterior."""
     if pymupdf is None:
         raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
 
@@ -1116,7 +1224,8 @@ def analizar_lote_historico(pdf_bytes: bytes, callback=None) -> list[dict]:
         folio = pg.get("folio", "")
         # Sin folio legible, la página se anexa al documento anterior: es lo
         # más probable en un oficio de varias hojas.
-        if grupos and (folio == grupos[-1]["folio"] or not folio):
+        if (not una_por_pagina and grupos
+                and (folio == grupos[-1]["folio"] or not folio)):
             grupos[-1]["paginas"].append(pg["pagina"])
             continue
         grupos.append({
@@ -1142,6 +1251,30 @@ class ArchivoEnMemoria:
 
     def getvalue(self) -> bytes:
         return self._contenido
+
+
+def parsear_paginas(texto: str, total: int) -> list[int]:
+    """Convierte '3, 4, 5' o '3-5' en índices base 0 válidos. Ignora lo que
+    no sea número o quede fuera del documento, en vez de reventar."""
+    indices = []
+    for parte in str(texto).replace(";", ",").split(","):
+        parte = parte.strip()
+        if not parte:
+            continue
+        if "-" in parte:
+            extremos = parte.split("-", 1)
+            if extremos[0].strip().isdigit() and extremos[1].strip().isdigit():
+                a, b = int(extremos[0]), int(extremos[1])
+                indices.extend(range(min(a, b), max(a, b) + 1))
+        elif parte.isdigit():
+            indices.append(int(parte))
+    vistos, salida = set(), []
+    for n in indices:
+        i = n - 1
+        if 0 <= i < total and i not in vistos:
+            vistos.add(i)
+            salida.append(i)
+    return salida
 
 
 def extraer_paginas(pdf_bytes: bytes, paginas: list[int]) -> bytes:
@@ -1178,18 +1311,27 @@ def _tab_lote_historico(get_client):
     lote_bytes = lote.getvalue()
     huella_l = hashlib.md5(lote_bytes).hexdigest()
 
-    if st.session_state.get("_ol_huella") != huella_l:
+    una_pag = st.checkbox(
+        "Cada página es un oficio distinto (sin anexos)", key="ol_una_pag",
+        help="Márcalo si separaste los oficios para que ocupen una hoja cada "
+             "uno. Evita que las páginas cuyo folio no se lea se peguen a la "
+             "anterior.")
+
+    if st.session_state.get("_ol_huella") != huella_l or \
+            st.session_state.get("_ol_una_pag_usada") != una_pag:
         if st.button("Analizar documento", type="primary", key="ol_btn_an"):
             barra = st.progress(0.0, text="Leyendo encabezados...")
             try:
                 grupos = analizar_lote_historico(
-                    lote_bytes, lambda f: barra.progress(f, text=f"Leyendo... {f:.0%}"))
+                    lote_bytes, lambda f: barra.progress(f, text=f"Leyendo... {f:.0%}"),
+                    una_por_pagina=una_pag)
             except Exception as e:
                 _error_amable(e, "al analizar el lote")
                 return
             barra.empty()
             st.session_state["_ol_grupos"] = grupos
             st.session_state["_ol_huella"] = huella_l
+            st.session_state["_ol_una_pag_usada"] = una_pag
             st.rerun()
         else:
             st.info("El análisis toma unos 2 segundos por página.")
@@ -1214,12 +1356,16 @@ def _tab_lote_historico(get_client):
         "Páginas": ", ".join(str(p + 1) for p in g["paginas"]),
     } for g in grupos])
 
+    st.caption("La columna **Páginas** es editable: corrige ahí si el OCR "
+               "agrupó mal. Escribe los números separados por coma (1, 2, 3).")
+
     editada = st.data_editor(
         tabla, use_container_width=True, hide_index=True, key="ol_editor",
-        disabled=["Páginas"],
+        num_rows="dynamic",
         column_config={
             "Guardar": st.column_config.CheckboxColumn(width="small"),
-            "Páginas": st.column_config.TextColumn(width="small"),
+            "Páginas": st.column_config.TextColumn(
+                width="small", help="Páginas de este oficio, base 1."),
         })
 
     sin_folio = int((editada["Folio"].astype(str).str.strip() == "").sum())
@@ -1232,29 +1378,38 @@ def _tab_lote_historico(get_client):
         if marcadas.empty:
             st.warning("No hay filas marcadas.")
             return
-        barra = st.progress(0.0)
-        ok_n, errores = 0, []
-        for n, (idx, fila) in enumerate(marcadas.iterrows(), start=1):
-            folio_f = str(fila["Folio"]).strip()
-            if not folio_f.isdigit():
-                errores.append(f"Fila {idx + 1}: folio inválido")
-                barra.progress(n / len(marcadas))
+        barra = st.progress(0.0, text="Preparando...")
+        doc_tmp = pymupdf.open(stream=lote_bytes, filetype="pdf")
+        total_pag = doc_tmp.page_count
+        doc_tmp.close()
+
+        pendientes, sin_paginas = [], []
+        for idx, fila in marcadas.iterrows():
+            # Las páginas salen de la tabla editada, no de la detección
+            # automática: el usuario pudo corregir el agrupado.
+            pags = parsear_paginas(fila["Páginas"], total_pag)
+            if not pags:
+                sin_paginas.append(str(fila["Folio"]))
                 continue
-            sub = extraer_paginas(lote_bytes, grupos[idx]["paginas"])
-            ok, res = registrar_oficio_historico(get_client, {
+            pendientes.append({
                 "anio": int(str(fila["Año"]).strip() or datetime.now(TZ).year),
-                "folio": folio_f,
+                "folio": str(fila["Folio"]).strip(),
                 "fecha_oficio": str(fila["Fecha"]).strip(),
                 "asunto": str(fila["Asunto"]).strip(),
                 "dirigido_a": str(fila["Dirigido a"]).strip(),
                 "cargo_destino": str(fila["Cargo"]).strip(),
                 "observaciones": "Carga en lote",
-            }, ArchivoEnMemoria(sub, f"{folio_f}.pdf"))
-            if ok:
-                ok_n += 1
-            else:
-                errores.append(f"{folio_f}: {res}")
-            barra.progress(n / len(marcadas))
+                "contenido": extraer_paginas(lote_bytes, pags),
+            })
+
+        if sin_paginas:
+            st.warning("Sin páginas válidas, se omitieron: "
+                       + ", ".join(sin_paginas))
+
+        ok_n, errores = registrar_historicos_lote(
+            get_client, pendientes,
+            lambda f: barra.progress(f, text=f"Guardando... {f:.0%}"))
+        barra.empty()
 
         st.success(f"{ok_n} oficio(s) registrado(s).")
         if errores:
@@ -1297,19 +1452,36 @@ def _tab_historico(get_client):
         with col_vista:
             _visor_documento(bytes_h, arch_h.name, "oh")
 
-        # Un acuse escaneado no trae capa de texto, pero si el archivo es el
-        # PDF original de Word sí: intentarlo no cuesta y ahorra la captura.
+        # Primero la capa de texto (si el archivo es el PDF original de Word);
+        # si no la trae, OCR del encabezado, igual que en la carga en lote.
         if es_pdf_h:
             huella_h = hashlib.md5(bytes_h).hexdigest()
             if st.session_state.get("_oh_huella") != huella_h:
+                vacio_h = {c: "" for c in CAMPOS_EXTRAIBLES}
                 texto_h = extraer_texto_pdf(bytes_h)
-                st.session_state["_oh_sug"] = (extraer_datos_oficio(texto_h)[0]
-                                               if texto_h.strip() else
-                                               {c: "" for c in CAMPOS_EXTRAIBLES})
+                if texto_h.strip():
+                    st.session_state["_oh_sug"] = extraer_datos_oficio(texto_h)[0]
+                    st.session_state["_oh_fuente"] = "capa de texto"
+                elif pytesseract is not None:
+                    with st.spinner("Leyendo el documento escaneado..."):
+                        try:
+                            st.session_state["_oh_sug"] = _datos_de_ocr(
+                                ocr_encabezado(bytes_h, 0))
+                            st.session_state["_oh_fuente"] = "OCR"
+                        except Exception:
+                            st.session_state["_oh_sug"] = vacio_h
+                            st.session_state["_oh_fuente"] = ""
+                else:
+                    st.session_state["_oh_sug"] = vacio_h
+                    st.session_state["_oh_fuente"] = ""
                 st.session_state["_oh_huella"] = huella_h
+
             sug_h = st.session_state.get("_oh_sug", sug_h)
+            fuente_h = st.session_state.get("_oh_fuente", "")
             if any(sug_h.values()):
-                col_form.info("Datos detectados en el archivo. Revísalos.")
+                col_form.info(f"Datos detectados por **{fuente_h}**. Revísalos.")
+            elif fuente_h == "OCR":
+                col_form.warning("No se reconoció el encabezado. Captura a mano.")
 
     with col_form:
         anio_actual = datetime.now(TZ).year
