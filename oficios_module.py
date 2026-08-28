@@ -43,6 +43,9 @@ COLUMNAS_OFICIOS = [
 # cualquiera podría probar 1010, 1011, 1012 y cosechar información.
 LONGITUD_TOKEN = 12
 
+# Sin l, o, 0 ni 1: se confunden entre sí al leerlos o teclearlos a mano.
+ALFABETO_TOKEN = "abcdefghijkmnpqrstuvwxyz23456789"
+
 COLUMNAS_LOG = [
     "TIMESTAMP", "ID_OFICIO", "ACCION", "RFC", "NOMBRE", "DETALLE",
 ]
@@ -148,8 +151,8 @@ def generar_token() -> str:
     la página de validación pueda mostrar datos sin quedar expuesta a que
     alguien recorra folios consecutivos."""
     import secrets
-    alfabeto = "abcdefghijkmnpqrstuvwxyz23456789"  # sin l, o, 0, 1: se confunden
-    return "".join(secrets.choice(alfabeto) for _ in range(LONGITUD_TOKEN))
+    return "".join(secrets.choice(ALFABETO_TOKEN)
+                   for _ in range(LONGITUD_TOKEN))
 
 
 def generar_qr_png(token: str, color: str = "#000000") -> bytes:
@@ -257,6 +260,26 @@ def _pagina_png(pdf_bytes: bytes, indice: int = 0, dpi: int = 110) -> bytes:
         doc.close()
 
 
+def leer_subida(archivo):
+    """Bytes de un archivo subido, o None si viene vacío.
+
+    Streamlit descarta el buffer del cargador tras algunos reruns (por
+    ejemplo después de guardar un lote): getvalue() devuelve b"" y cualquier
+    intento de abrirlo revienta. Se pide volver a subirlo en vez de fallar.
+    """
+    if archivo is None:
+        return None
+    try:
+        datos = archivo.getvalue()
+    except Exception:
+        datos = b""
+    if not datos:
+        st.warning("El archivo se perdió al recargar la página. "
+                   "Vuelve a subirlo.")
+        return None
+    return datos
+
+
 def _visor_documento(contenido: bytes, nombre: str, prefijo: str):
     """Muestra el documento subido para capturar sus datos sin cambiar de
     ventana. Con PDFs de varias páginas ofrece selector de página."""
@@ -292,7 +315,12 @@ def extraer_texto_pdf(pdf_bytes: bytes, max_paginas: int = 2) -> str:
         doc.close()
 
 
-_RE_TOKEN = re.compile(r"^[a-hjkmnp-z2-9]{" + str(LONGITUD_TOKEN) + r"}$")
+# Se construye a partir de ALFABETO_TOKEN a propósito. Escrita a mano se
+# desincronizó del alfabeto (excluía la "i", que sí se generaba) y un tercio
+# de los tokens se descartaba al leer el QR como si no perteneciera al
+# minutario. Derivarla hace imposible que vuelvan a separarse.
+_RE_TOKEN = re.compile(
+    r"^[" + re.escape(ALFABETO_TOKEN) + r"]{" + str(LONGITUD_TOKEN) + r"}$")
 
 
 def leer_qr_pdf(archivo_bytes: bytes, nombre: str, dpi: int = 300) -> list[tuple[int, str]]:
@@ -310,7 +338,10 @@ def leer_qr_pdf(archivo_bytes: bytes, nombre: str, dpi: int = 300) -> list[tuple
             texto = str(res.text).strip()
             if "validar_oficio=" in texto:
                 texto = texto.split("validar_oficio=")[-1].strip()
-            if _RE_TOKEN.match(texto):
+            # Se acepta el token actual y también el ID (DFC-2026-1009), que
+            # es lo que llevaban los QR estampados antes del token opaco.
+            if _RE_TOKEN.match(texto) or re.match(r"^DFC-\d{4}-\d{3,6}$",
+                                                  texto, re.IGNORECASE):
                 hallados.append((num_pag, texto))
         return hallados
 
@@ -842,6 +873,148 @@ def registrar_historicos_lote(get_client, registros: list[dict],
     return len(filas), errores
 
 
+def paginas_con_contenido(pdf_bytes: bytes, umbral_tinta: float = 0.0008) -> list[int]:
+    """Índices de las páginas que llevan algo impreso.
+
+    Al generar muchas comisiones en un solo archivo se cuelan páginas en
+    blanco por los saltos del documento. Esas no son un oficio y no deben
+    consumir folio ni recibir QR.
+    """
+    if pymupdf is None:
+        raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
+    from PIL import Image
+    import numpy as np
+
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        utiles = []
+        for i in range(doc.page_count):
+            p = doc[i]
+            if p.get_text().strip() or p.get_images():
+                utiles.append(i)
+                continue
+            # Sin texto ni imágenes puede quedar dibujo vectorial: se mide
+            # cuánta tinta hay en una miniatura antes de descartarla.
+            pix = p.get_pixmap(dpi=50)
+            gris = np.array(Image.open(BytesIO(pix.tobytes("png"))).convert("L"))
+            if (gris < 200).mean() >= umbral_tinta:
+                utiles.append(i)
+        return utiles
+    finally:
+        doc.close()
+
+
+def estampar_lote_pdf(pdf_bytes: bytes, asignaciones: dict,
+                      posicion: str = "ID", lado_cm: float = 1.5,
+                      margen_cm: float = 1.0, color: str = "#000000") -> bytes:
+    """Estampa un QR distinto en cada página indicada y devuelve UN solo PDF.
+
+    asignaciones: {índice_de_página: token}. Se conserva el documento entero,
+    páginas en blanco incluidas, para que al imprimir salga igual que el
+    original y no se descuadre el orden.
+    """
+    if pymupdf is None:
+        raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
+
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        lado, margen = lado_cm * CM, margen_cm * CM
+        for indice, token in asignaciones.items():
+            if not (0 <= indice < doc.page_count):
+                continue
+            pagina = doc[indice]
+            ancho, alto = pagina.rect.width, pagina.rect.height
+            x0 = margen if posicion in ("SI", "II") else ancho - margen - lado
+            y0 = margen if posicion in ("SI", "SD") else alto - margen - lado
+            pagina.insert_image(pymupdf.Rect(x0, y0, x0 + lado, y0 + lado),
+                                stream=generar_qr_png(token, color))
+        return doc.tobytes()
+    finally:
+        doc.close()
+
+
+def registrar_emitidos_lote(get_client, registros: list[dict],
+                            callback=None) -> tuple[list[dict], list[str]]:
+    """Alta masiva de oficios nuevos con token. Una sola lectura y una sola
+    escritura, por la cuota de Sheets.
+
+    registros: [{anio, folio, fecha_oficio, asunto, dirigido_a,
+                 cargo_destino, observaciones, pagina}]
+    Devuelve (aceptados con su token asignado, errores).
+    """
+    errores = []
+    try:
+        sh = _abrir_sheet(get_client)
+        ws = sh.worksheet(TAB_OFICIOS)
+        ws_log = sh.worksheet(TAB_LOG)
+        previos = ws.get_all_records(numericise_ignore=["all"])
+    except Exception as e:
+        return [], [f"No se pudo leer el minutario: {e}"]
+
+    existentes = {str(r.get("ID_OFICIO", "")).strip() for r in previos}
+    tokens_usados = {str(r.get("TOKEN", "")).strip() for r in previos}
+
+    rfc = str(st.session_state.get("rfc", "")).upper()
+    nombre_usr = st.session_state.get("nombre", "")
+    hoy = _hoy()
+    ahora = _ahora()
+
+    filas, filas_log, aceptados = [], [], []
+    total = max(1, len(registros))
+
+    for n, reg in enumerate(registros, start=1):
+        folio = str(reg.get("folio", "")).strip()
+        if not folio.isdigit():
+            errores.append(f"Página {reg.get('pagina', 0) + 1}: folio inválido")
+            if callback:
+                callback(n / total)
+            continue
+
+        id_oficio = construir_id(reg["anio"], folio)
+        if id_oficio in existentes:
+            errores.append(f"{id_oficio}: ya estaba registrado")
+            if callback:
+                callback(n / total)
+            continue
+
+        token = generar_token()
+        while token in tokens_usados:
+            token = generar_token()
+        tokens_usados.add(token)
+        existentes.add(id_oficio)
+
+        filas.append([
+            id_oficio, str(reg["anio"]), folio.zfill(4), hoy,
+            reg.get("fecha_oficio", ""), rfc, nombre_usr,
+            reg.get("asunto", ""), reg.get("dirigido_a", ""),
+            reg.get("cargo_destino", ""), "EMITIDO",
+            "", "", "",                       # URL/SHA emitido, FECHA_ESCANEO
+            reg.get("observaciones", ""),
+            token, "", "",                    # TOKEN, URL/SHA escaneo
+        ])
+        filas_log.append([ahora, id_oficio, "EMITIDO_LOTE", rfc, nombre_usr,
+                          reg.get("asunto", "")])
+        aceptados.append({**reg, "id_oficio": id_oficio, "token": token})
+        if callback:
+            callback(n / total)
+
+    if not filas:
+        return [], errores
+
+    try:
+        ws.append_rows(filas, value_input_option="USER_ENTERED")
+    except Exception as e:
+        return [], errores + [f"No se pudo escribir: {e}"]
+
+    try:
+        ws_log.append_rows(filas_log, value_input_option="USER_ENTERED")
+    except Exception:
+        pass
+
+    st.cache_data.clear()
+    return aceptados, errores
+
+
 def _actualizar_fila(get_client, id_oficio: str, cambios: dict) -> bool:
     """Actualiza celdas por nombre de columna, sin asumir el orden del Sheet."""
     from gspread.cell import Cell
@@ -1365,7 +1538,9 @@ def _tab_lote_historico(get_client):
     if lote is None:
         return
 
-    lote_bytes = lote.getvalue()
+    lote_bytes = leer_subida(lote)
+    if lote_bytes is None:
+        return
     huella_l = hashlib.md5(lote_bytes).hexdigest()
 
     if st.session_state.get("_ol_huella") != huella_l:
@@ -1486,6 +1661,148 @@ def _tab_lote_historico(get_client):
                 st.session_state.pop(k, None)
 
 
+def _tab_lote_emision(get_client):
+    """Muchos oficios nuevos en un solo PDF (típicamente comisiones).
+
+    Se apoya en dos hechos del caso real: la estructura de todos es idéntica
+    y los folios son consecutivos. Por eso basta con el folio inicial: las
+    páginas en blanco se detectan y se saltan solas, sin gastar folio.
+    """
+    if pymupdf is None:
+        st.error(f"Falta PyMuPDF: {_ERROR_PDF}")
+        return
+
+    st.caption("Un PDF con varios oficios del mismo tipo y folios "
+               "consecutivos. Las páginas en blanco se detectan y se omiten.")
+
+    lote_e = st.file_uploader("PDF con varios oficios", type=["pdf"],
+                              key="le_file")
+    if lote_e is None:
+        return
+    bytes_e = leer_subida(lote_e)
+    if bytes_e is None:
+        return
+
+    try:
+        utiles = paginas_con_contenido(bytes_e)
+    except Exception as e:
+        _error_amable(e, "al revisar el documento")
+        return
+
+    doc_e = pymupdf.open(stream=bytes_e, filetype="pdf")
+    n_tot_e = doc_e.page_count
+    doc_e.close()
+
+    if not utiles:
+        st.warning("Todas las páginas parecen estar en blanco.")
+        return
+
+    st.success(f"**{n_tot_e} páginas**, de las cuales **{len(utiles)} "
+               f"con contenido**. Se generarán {len(utiles)} oficios.")
+    if n_tot_e != len(utiles):
+        omitidas = [str(i + 1) for i in range(n_tot_e) if i not in utiles]
+        st.caption("Páginas en blanco que se omiten: " + ", ".join(omitidas))
+
+    e1, e2, e3 = st.columns([1, 1, 2])
+    anio_e = e1.number_input("Año", min_value=2020, max_value=2100,
+                             value=datetime.now(TZ).year, step=1, key="le_anio")
+    folio_ini = e2.text_input("Folio inicial", key="le_folio_ini",
+                              help="El primero del bloque que te asignaron.")
+    fecha_e = e3.date_input("Fecha de los oficios", key="le_fecha")
+
+    asunto_e = st.text_input("Asunto (igual para todos)", key="le_asunto")
+    obs_e = st.text_input("Observaciones", key="le_obs", value="Lote de emisión")
+
+    if not str(folio_ini).strip().isdigit():
+        st.info("Captura el folio inicial para continuar.")
+        return
+
+    ini = int(str(folio_ini).strip())
+    tabla_e = pd.DataFrame([{
+        "Pág": p + 1,
+        "Folio": str(ini + n).zfill(4),
+        "Dirigido a": "",
+        "Cargo": "",
+    } for n, p in enumerate(utiles)])
+
+    st.caption("Folios asignados consecutivamente. Corrige el destinatario de "
+               "cada oficio si lo necesitas; puedes dejarlo vacío.")
+    editada_e = st.data_editor(
+        tabla_e, use_container_width=True, hide_index=True, key="le_editor",
+        num_rows="fixed", disabled=["Pág"],
+        column_config={"Pág": st.column_config.NumberColumn(width="small"),
+                       "Folio": st.column_config.TextColumn(width="small")})
+
+    p1, p2 = st.columns([1, 2])
+    pos_nom_e = p1.radio("Posición del QR", options=list(POSICIONES_QR.keys()),
+                         index=3, key="le_pos")
+    pos_e = POSICIONES_QR[pos_nom_e]
+    lado_e = p1.slider("Tamaño (cm)", 0.8, 3.0, 1.5, 0.1, key="le_lado")
+    gris_e = p1.checkbox("Gris discreto", value=False, key="le_gris")
+    color_e = "#888888" if gris_e else "#000000"
+    try:
+        p2.image(vista_previa_pdf(estampar_lote_pdf(
+            bytes_e, {utiles[0]: "abcdefghjkmn"}, pos_e, lado_e, color=color_e)),
+            caption=f"Vista previa · página {utiles[0] + 1}",
+            use_container_width=True)
+    except Exception as e:
+        p2.warning(f"No se pudo generar la vista previa: {e}")
+
+    if st.button(f"Registrar y estampar {len(editada_e)} oficios",
+                 type="primary", key="le_btn"):
+        pendientes_e = [{
+            "anio": int(anio_e),
+            "folio": str(r["Folio"]).strip(),
+            "fecha_oficio": fecha_e.strftime("%Y-%m-%d"),
+            "asunto": asunto_e.strip(),
+            "dirigido_a": str(r["Dirigido a"]).strip(),
+            "cargo_destino": str(r["Cargo"]).strip(),
+            "observaciones": obs_e.strip(),
+            "pagina": int(r["Pág"]) - 1,
+        } for _, r in editada_e.iterrows()]
+
+        barra_e = st.progress(0.0, text="Registrando...")
+        aceptados, errores_e = registrar_emitidos_lote(
+            get_client, pendientes_e,
+            lambda f: barra_e.progress(f, text=f"Registrando... {f:.0%}"))
+        barra_e.empty()
+
+        if not aceptados:
+            st.error("No se registró ningún oficio.")
+            for e in errores_e:
+                st.write(f"• {e}")
+            return
+
+        # El QR se estampa DESPUÉS del registro: solo llevan código los
+        # oficios que quedaron guardados, nunca uno que falló.
+        with st.spinner("Estampando códigos..."):
+            asignaciones = {a["pagina"]: a["token"] for a in aceptados}
+            sellado_e = estampar_lote_pdf(bytes_e, asignaciones, pos_e,
+                                          lado_e, color=color_e)
+            url_e = subir_bytes_drive(
+                sellado_e,
+                f"LOTE_{anio_e}_{aceptados[0]['folio']}-{aceptados[-1]['folio']}.pdf",
+                "application/pdf")
+
+        st.session_state["_le_pdf"] = sellado_e
+        st.session_state["_le_nombre"] = (f"oficios_{aceptados[0]['folio']}"
+                                          f"-{aceptados[-1]['folio']}")
+        st.success(f"{len(aceptados)} oficio(s) registrados y estampados.")
+        if url_e.startswith("ERROR:"):
+            st.warning(f"Se registraron, pero falló Drive: {url_e}")
+        if errores_e:
+            with st.expander(f"{len(errores_e)} con problema"):
+                for e in errores_e:
+                    st.write(f"• {e}")
+
+    if st.session_state.get("_le_pdf"):
+        st.download_button(
+            "⬇️ Descargar PDF con todos los QR",
+            data=st.session_state["_le_pdf"],
+            file_name=f"{st.session_state.get('_le_nombre', 'oficios')}.pdf",
+            mime="application/pdf", key="le_dl")
+
+
 def _tab_historico(get_client):
     """Captura de oficios anteriores a este sistema. Diseñada para cargar
     varios seguidos: el escaneo es opcional y el formulario se limpia solo,
@@ -1511,11 +1828,12 @@ def _tab_historico(get_client):
     col_form, col_vista = st.columns([3, 2])
 
     if arch_h is not None:
-        bytes_h = arch_h.getvalue()
-        es_pdf_h = arch_h.name.lower().endswith(".pdf")
+        bytes_h = leer_subida(arch_h)
+        es_pdf_h = bytes_h is not None and arch_h.name.lower().endswith(".pdf")
 
         with col_vista:
-            _visor_documento(bytes_h, arch_h.name, "oh")
+            if bytes_h is not None:
+                _visor_documento(bytes_h, arch_h.name, "oh")
 
         # Primero la capa de texto (si el archivo es el PDF original de Word);
         # si no la trae, OCR del encabezado, igual que en la carga en lote.
@@ -1632,6 +1950,7 @@ def render_oficios(deps: dict):
         modo = st.radio(
             "¿Qué vas a registrar?",
             ["Oficio nuevo (se le estampa QR)",
+             "Lote de oficios nuevos (varios en un PDF)",
              "Oficio histórico (ya firmado y entregado)"],
             key="of_modo", horizontal=True,
             help="Los históricos son los emitidos antes de este sistema: se "
@@ -1640,6 +1959,8 @@ def render_oficios(deps: dict):
 
         if modo.startswith("Oficio histórico"):
             _tab_historico(get_client)
+        elif modo.startswith("Lote de oficios nuevos"):
+            _tab_lote_emision(get_client)
         elif pymupdf is None:
             st.error(f"Falta PyMuPDF: {_ERROR_PDF}")
         else:
@@ -1649,7 +1970,7 @@ def render_oficios(deps: dict):
             pdf_in = st.file_uploader("Oficio en PDF (sin firmar)", type=["pdf"],
                                       key="of_pdf_in")
 
-            if pdf_in is not None:
+            if pdf_in is not None and leer_subida(pdf_in) is not None:
                 pdf_bytes = pdf_in.getvalue()
 
                 huella = hashlib.md5(pdf_bytes).hexdigest()
@@ -1807,7 +2128,7 @@ def render_oficios(deps: dict):
             scan = st.file_uploader("Escaneo (PDF de uno o varios oficios, o imagen)",
                                     type=["pdf", "jpg", "jpeg", "png"], key="of_file")
 
-            if scan is not None:
+            if scan is not None and leer_subida(scan) is not None:
                 scan_bytes = scan.getvalue()
                 try:
                     with st.spinner("Buscando códigos QR..."):
@@ -1816,17 +2137,28 @@ def render_oficios(deps: dict):
                     marcas = []
                     _error_amable(e, "al leer el QR")
 
-                # El QR trae el token; se traduce al ID por el Sheet.
+                # El QR trae el token (o el ID, si se estampó antes de que
+                # existiera el token). Ambos se traducen al ID vía el Sheet.
                 mapa = {}
                 if "TOKEN" in df.columns:
-                    mapa = dict(zip(df["TOKEN"].astype(str).str.strip(),
-                                    df["ID_OFICIO"].astype(str)))
-                validas = [(p, mapa[t]) for p, t in marcas if t in mapa]
-                huerfanas = [t for _, t in marcas if t not in mapa]
+                    mapa.update({t: i for t, i in zip(
+                        df["TOKEN"].astype(str).str.strip(),
+                        df["ID_OFICIO"].astype(str)) if t})
+                mapa.update({i.strip().upper(): i.strip()
+                             for i in df["ID_OFICIO"].astype(str)})
+
+                def _buscar(t):
+                    return mapa.get(t) or mapa.get(t.strip().upper())
+
+                validas = [(p, _buscar(t)) for p, t in marcas if _buscar(t)]
+                huerfanas = [t for _, t in marcas if not _buscar(t)]
 
                 if huerfanas:
-                    st.error(f"Se detectaron {len(huerfanas)} código(s) QR que "
-                             "**no** corresponden a este minutario.")
+                    st.error("Se leyó el QR, pero su código no aparece en el "
+                             "minutario: " + ", ".join(f"`{h}`" for h in huerfanas))
+                    st.caption("Busca ese código en la columna TOKEN del Sheet. "
+                               "Si no está, el oficio se registró sin token o "
+                               "el PDF se estampó con otra versión del sistema.")
 
                 if not validas:
                     st.warning("No se detectó ningún QR del minutario. Verifica que el "
@@ -1973,7 +2305,9 @@ def render_oficios(deps: dict):
             col_form_a, col_vista_a = st.columns([3, 2])
             if arch is not None:
                 with col_vista_a:
-                    _visor_documento(arch.getvalue(), arch.name, "ac")
+                    _bytes_ac = leer_subida(arch)
+                    if _bytes_ac:
+                        _visor_documento(_bytes_ac, arch.name, "ac")
 
             with col_form_a:
                 ca1, ca2 = st.columns([2, 1])
