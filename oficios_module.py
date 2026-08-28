@@ -1023,6 +1023,48 @@ def registrar_emitidos_lote(get_client, registros: list[dict],
     return aceptados, errores
 
 
+def actualizar_filas_lote(get_client, cambios_por_id: dict) -> tuple[int, list[str]]:
+    """Actualiza varias filas de golpe.
+
+    cambios_por_id: {ID_OFICIO: {columna: valor}}
+    Una lectura para ubicar las filas y UNA escritura para todas: hacerlo de
+    a una agota la cuota de Sheets con lotes de decenas de oficios.
+    """
+    from gspread.cell import Cell
+
+    try:
+        sh = _abrir_sheet(get_client)
+        ws = sh.worksheet(TAB_OFICIOS)
+        headers = ws.row_values(1)
+        registros = ws.get_all_records(numericise_ignore=["all"])
+    except Exception as e:
+        return 0, [f"No se pudo leer el minutario: {e}"]
+
+    posicion = {str(r.get("ID_OFICIO", "")).strip(): i
+                for i, r in enumerate(registros, start=2)}
+
+    celdas, errores = [], []
+    for id_oficio, cambios in cambios_por_id.items():
+        fila = posicion.get(str(id_oficio).strip())
+        if fila is None:
+            errores.append(f"{id_oficio}: no se encontró en el minutario")
+            continue
+        for col, valor in cambios.items():
+            if col in headers:
+                celdas.append(Cell(fila, headers.index(col) + 1, valor))
+
+    if not celdas:
+        return 0, errores
+
+    try:
+        ws.update_cells(celdas, value_input_option="USER_ENTERED")
+    except Exception as e:
+        return 0, errores + [f"No se pudo escribir: {e}"]
+
+    st.cache_data.clear()
+    return len(cambios_por_id) - len(errores), errores
+
+
 def _actualizar_fila(get_client, id_oficio: str, cambios: dict) -> bool:
     """Actualiza celdas por nombre de columna, sin asumir el orden del Sheet."""
     from gspread.cell import Cell
@@ -1799,20 +1841,41 @@ def _tab_lote_emision(get_client):
             asignaciones = {a["pagina"]: a["token"] for a in aceptados}
             sellado_e = estampar_lote_pdf(bytes_e, asignaciones, pos_e,
                                           lado_e, color=color_e)
-            url_e = subir_bytes_drive(
-                sellado_e,
-                f"LOTE_{anio_e}_{aceptados[0]['folio']}-{aceptados[-1]['folio']}.pdf",
-                "application/pdf")
 
         st.session_state["_le_pdf"] = sellado_e
         st.session_state["_le_nombre"] = (f"oficios_{aceptados[0]['folio']}"
                                           f"-{aceptados[-1]['folio']}")
-        st.success(f"{len(aceptados)} oficio(s) registrados y estampados.")
-        if url_e.startswith("ERROR:"):
-            st.warning(f"Se registraron, pero falló Drive: {url_e}")
-        if errores_e:
-            with st.expander(f"{len(errores_e)} con problema"):
-                for e in errores_e:
+
+        # Cada oficio guarda SU propia página, no el lote entero: el original
+        # resguardado por oficio es lo que permite comparar después contra un
+        # documento cuestionado.
+        barra_d = st.progress(0.0, text="Resguardando cada oficio...")
+        cambios, fallos_drive = {}, []
+        for n, a in enumerate(aceptados, start=1):
+            hoja = extraer_paginas(sellado_e, [a["pagina"]])
+            url_i = subir_bytes_drive(hoja, f"{a['id_oficio']}_SINFIRMA.pdf",
+                                      "application/pdf")
+            if url_i.startswith("ERROR:"):
+                fallos_drive.append(f"{a['id_oficio']}: {url_i}")
+            else:
+                cambios[a["id_oficio"]] = {
+                    "URL_EMITIDO": url_i,
+                    "SHA256_EMITIDO": sha256_bytes(hoja),
+                }
+            barra_d.progress(n / len(aceptados),
+                             text=f"Resguardando... {n}/{len(aceptados)}")
+        barra_d.empty()
+
+        n_act, errores_act = (actualizar_filas_lote(get_client, cambios)
+                              if cambios else (0, []))
+
+        st.success(f"{len(aceptados)} oficio(s) registrados y estampados. "
+                   f"{n_act} con su PDF resguardado en Drive.")
+
+        problemas = errores_e + fallos_drive + errores_act
+        if problemas:
+            with st.expander(f"{len(problemas)} con problema"):
+                for e in problemas:
                     st.write(f"• {e}")
 
     if st.session_state.get("_le_pdf"):
