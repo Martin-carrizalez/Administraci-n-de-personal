@@ -873,12 +873,18 @@ def registrar_historicos_lote(get_client, registros: list[dict],
     return len(filas), errores
 
 
-def paginas_con_contenido(pdf_bytes: bytes, umbral_tinta: float = 0.0008) -> list[int]:
-    """Índices de las páginas que llevan algo impreso.
+# Franja vertical que se considera "cuerpo" del oficio. El membrete y el pie
+# institucional aparecen en TODAS las páginas, así que medir la hoja completa
+# da siempre "tiene contenido" y las páginas de relleno no se detectan.
+CUERPO_DESDE, CUERPO_HASTA = 0.20, 0.76
 
-    Al generar muchas comisiones en un solo archivo se cuelan páginas en
-    blanco por los saltos del documento. Esas no son un oficio y no deben
-    consumir folio ni recibir QR.
+
+def paginas_con_contenido(pdf_bytes: bytes, umbral_tinta: float = 0.0015,
+                          minimo_caracteres: int = 40) -> list[int]:
+    """Índices de las páginas que llevan un oficio de verdad.
+
+    Solo mira la franja central: encabezado y pie institucional se repiten en
+    cada hoja y no distinguen una página real de una de relleno.
     """
     if pymupdf is None:
         raise RuntimeError(f"PyMuPDF no disponible: {_ERROR_PDF}")
@@ -890,14 +896,16 @@ def paginas_con_contenido(pdf_bytes: bytes, umbral_tinta: float = 0.0008) -> lis
         utiles = []
         for i in range(doc.page_count):
             p = doc[i]
-            if p.get_text().strip() or p.get_images():
+            r = p.rect
+            cuerpo = pymupdf.Rect(r.x0, r.y0 + r.height * CUERPO_DESDE,
+                                  r.x1, r.y0 + r.height * CUERPO_HASTA)
+            if len(p.get_text(clip=cuerpo).strip()) >= minimo_caracteres:
                 utiles.append(i)
                 continue
-            # Sin texto ni imágenes puede quedar dibujo vectorial: se mide
-            # cuánta tinta hay en una miniatura antes de descartarla.
-            pix = p.get_pixmap(dpi=50)
+            # Sin capa de texto (escaneos) se mide la tinta del cuerpo.
+            pix = p.get_pixmap(dpi=50, clip=cuerpo)
             gris = np.array(Image.open(BytesIO(pix.tobytes("png"))).convert("L"))
-            if (gris < 200).mean() >= umbral_tinta:
+            if gris.size and (gris < 200).mean() >= umbral_tinta:
                 utiles.append(i)
         return utiles
     finally:
@@ -1693,15 +1701,7 @@ def _tab_lote_emision(get_client):
     n_tot_e = doc_e.page_count
     doc_e.close()
 
-    if not utiles:
-        st.warning("Todas las páginas parecen estar en blanco.")
-        return
-
-    st.success(f"**{n_tot_e} páginas**, de las cuales **{len(utiles)} "
-               f"con contenido**. Se generarán {len(utiles)} oficios.")
-    if n_tot_e != len(utiles):
-        omitidas = [str(i + 1) for i in range(n_tot_e) if i not in utiles]
-        st.caption("Páginas en blanco que se omiten: " + ", ".join(omitidas))
+    st.info(f"**{n_tot_e} páginas.** Se detectaron {len(utiles)} con oficio.")
 
     e1, e2, e3 = st.columns([1, 1, 2])
     anio_e = e1.number_input("Año", min_value=2020, max_value=2100,
@@ -1718,20 +1718,39 @@ def _tab_lote_emision(get_client):
         return
 
     ini = int(str(folio_ini).strip())
-    tabla_e = pd.DataFrame([{
-        "Pág": p + 1,
-        "Folio": str(ini + n).zfill(4),
-        "Dirigido a": "",
-        "Cargo": "",
-    } for n, p in enumerate(utiles)])
 
-    st.caption("Folios asignados consecutivamente. Corrige el destinatario de "
-               "cada oficio si lo necesitas; puedes dejarlo vacío.")
+    # Se listan TODAS las páginas, no solo las detectadas: la detección se
+    # equivoca cuando el membrete llena la hoja, y una página omitida en
+    # silencio es un oficio perdido. La casilla manda sobre la detección.
+    filas_e, consec = [], 0
+    for i in range(n_tot_e):
+        lleva = i in utiles
+        filas_e.append({
+            "Pág": i + 1,
+            "Generar": lleva,
+            "Folio": str(ini + consec).zfill(4) if lleva else "",
+            "Dirigido a": "",
+            "Cargo": "",
+        })
+        if lleva:
+            consec += 1
+
+    st.caption("Desmarca **Generar** en las hojas de relleno y márcala en las "
+               "que falten. Los folios van consecutivos; si cambias alguno, "
+               "corrige los de abajo.")
     editada_e = st.data_editor(
-        tabla_e, use_container_width=True, hide_index=True, key="le_editor",
-        num_rows="fixed", disabled=["Pág"],
-        column_config={"Pág": st.column_config.NumberColumn(width="small"),
-                       "Folio": st.column_config.TextColumn(width="small")})
+        pd.DataFrame(filas_e), use_container_width=True, hide_index=True,
+        key="le_editor", num_rows="fixed", disabled=["Pág"],
+        column_config={
+            "Pág": st.column_config.NumberColumn(width="small"),
+            "Generar": st.column_config.CheckboxColumn(width="small"),
+            "Folio": st.column_config.TextColumn(width="small")})
+
+    marcadas_e = editada_e[editada_e["Generar"] == True]  # noqa: E712
+    if marcadas_e.empty:
+        st.warning("No hay ninguna página marcada.")
+        return
+    st.caption(f"Se generarán **{len(marcadas_e)} oficios**.")
 
     p1, p2 = st.columns([1, 2])
     pos_nom_e = p1.radio("Posición del QR", options=list(POSICIONES_QR.keys()),
@@ -1742,13 +1761,14 @@ def _tab_lote_emision(get_client):
     color_e = "#888888" if gris_e else "#000000"
     try:
         p2.image(vista_previa_pdf(estampar_lote_pdf(
-            bytes_e, {utiles[0]: "abcdefghjkmn"}, pos_e, lado_e, color=color_e)),
-            caption=f"Vista previa · página {utiles[0] + 1}",
+            bytes_e, {int(marcadas_e.iloc[0]["Pág"]) - 1: "abcdefghjkmn"},
+            pos_e, lado_e, color=color_e)),
+            caption=f"Vista previa · página {int(marcadas_e.iloc[0]['Pág'])}",
             use_container_width=True)
     except Exception as e:
         p2.warning(f"No se pudo generar la vista previa: {e}")
 
-    if st.button(f"Registrar y estampar {len(editada_e)} oficios",
+    if st.button(f"Registrar y estampar {len(marcadas_e)} oficios",
                  type="primary", key="le_btn"):
         pendientes_e = [{
             "anio": int(anio_e),
@@ -1759,7 +1779,7 @@ def _tab_lote_emision(get_client):
             "cargo_destino": str(r["Cargo"]).strip(),
             "observaciones": obs_e.strip(),
             "pagina": int(r["Pág"]) - 1,
-        } for _, r in editada_e.iterrows()]
+        } for _, r in marcadas_e.iterrows()]
 
         barra_e = st.progress(0.0, text="Registrando...")
         aceptados, errores_e = registrar_emitidos_lote(
