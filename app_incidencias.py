@@ -1512,9 +1512,15 @@ def vista_empleado():
         if modo == "Rango continuo":
             col1, col2 = st.columns(2)
             with col1:
-                fi = st.date_input("Fecha inicio", value=date.today())
+                fi = st.date_input("Fecha inicio", value=None, format="DD/MM/YYYY")
             with col2:
-                ff = st.date_input("Fecha fin",    value=date.today())
+                ff = st.date_input("Fecha fin",    value=None, format="DD/MM/YYYY")
+            # Las fechas nacen VACÍAS a propósito. Cuando venían precargadas
+            # con hoy, el formulario era válido desde que cargaba y bastaba
+            # un clic distraído para generar un folio con la fecha de hoy.
+            if not fi or not ff:
+                st.info("Selecciona las fechas de tu solicitud para continuar.")
+                return
             if ff < fi:
                 st.error("La fecha fin no puede ser anterior a la fecha inicio.")
                 return
@@ -1577,7 +1583,10 @@ def vista_empleado():
     elif tipo in ["PSE", "PSR", "PEN"]:
         # El tipo ya define el subtipo
         subtipo = TIPO_LABELS[tipo]
-        fecha   = st.date_input("Fecha del pase", value=date.today())
+        fecha   = st.date_input("Fecha del pase", value=None, format="DD/MM/YYYY")
+        if not fecha:
+            st.info("Selecciona la fecha del pase para continuar.")
+            return
 
         col1, col2 = st.columns(2)
         hora_salida = hora_entrada = hora_retorno = None
@@ -1653,9 +1662,12 @@ def vista_empleado():
     elif tipo == "COM":
         col1, col2 = st.columns(2)
         with col1:
-            fi = st.date_input("Fecha inicio comisión", value=date.today())
+            fi = st.date_input("Fecha inicio comisión", value=None, format="DD/MM/YYYY")
         with col2:
-            ff = st.date_input("Fecha fin comisión",    value=date.today())
+            ff = st.date_input("Fecha fin comisión",    value=None, format="DD/MM/YYYY")
+        if not fi or not ff:
+            st.info("Selecciona las fechas de tu solicitud para continuar.")
+            return
         if ff < fi:
             st.error("La fecha fin no puede ser anterior a la fecha inicio.")
         else:
@@ -1674,9 +1686,12 @@ def vista_empleado():
         st.info("Captura los días que repones a cambio de guardia(s) previamente realizada(s).")
         col1, col2 = st.columns(2)
         with col1:
-            fi = st.date_input("Fecha inicio reposición", value=date.today())
+            fi = st.date_input("Fecha inicio reposición", value=None, format="DD/MM/YYYY")
         with col2:
-            ff = st.date_input("Fecha fin reposición", value=date.today())
+            ff = st.date_input("Fecha fin reposición", value=None, format="DD/MM/YYYY")
+        if not fi or not ff:
+            st.info("Selecciona las fechas de tu solicitud para continuar.")
+            return
         dias_hab = 0
         if ff < fi:
             st.error("La fecha fin no puede ser anterior a la fecha inicio.")
@@ -1705,7 +1720,10 @@ def vista_empleado():
                          motivo_rgu, tiene_anexo, incidencias, archivo_anexo, jefe_inmediato=jefe_pdf)
     # ── CAMBIO DE HORARIO ───────────────────────
     elif tipo == "CHO":
-        fecha_inicio_cho = st.date_input("¿A partir de qué fecha aplica el cambio?", value=date.today())
+        fecha_inicio_cho = st.date_input("¿A partir de qué fecha aplica el cambio?", value=None, format="DD/MM/YYYY")
+        if not fecha_inicio_cho:
+            st.info("Selecciona la fecha en que aplica el cambio para continuar.")
+            return
         motivo      = st.text_area("Motivo del cambio de horario", max_chars=300)
         tiene_anexo = st.checkbox("¿Traerás documento de soporte (oficio, etc.)?")
         st.markdown("**Horario solicitado:**")
@@ -1745,24 +1763,72 @@ def vista_empleado():
 
 
 def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_anexo, incidencias_df, archivo_anexo=None, subtipo_label=None, hora_retorno="", jefe_inmediato=""):
-    key_btn = f"btn_registrar_{tipo}_{str(fi)}_{str(ff)}"
-    if st.button("Registrar solicitud", type="primary", key=key_btn):
-        if st.session_state.get(f"registrado_{key_btn}"):
-            st.warning("Esta solicitud ya fue registrada.")
-            return
+    # Identidad de la solicitud: misma persona, mismo tipo, mismas fechas.
+    clave    = f"{tipo}_{rfc}_{fi}_{ff}"
+    key_btn  = f"btn_registrar_{clave}"
+    key_ok   = f"registrado_{clave}"
 
-        # Validar duplicado: mismo tipo y misma fecha
-        if not incidencias_df.empty:
+    # ── Si ya se registró en esta sesión, NO se vuelve a dibujar el botón ──
+    # Antes el éxito se mostraba solo en el run del clic: al descargar el PDF
+    # o al mover cualquier campo, el mensaje desaparecía y el botón volvía a
+    # verse disponible. De ahí venían los folios dobles.
+    ya = st.session_state.get(key_ok)
+    if ya:
+        st.success(f"✅ Esta solicitud ya quedó registrada con folio **{ya['folio']}**")
+        st.download_button(
+            label="⬇️ Descargar comprobante PDF",
+            data=ya["pdf"],
+            file_name=f"Comprobante_{ya['folio']}.pdf",
+            mime="application/pdf",
+            key=f"dl_{clave}",
+        )
+        st.info("Imprime tu comprobante y preséntalo en RH junto con el documento físico original.")
+        st.caption("Si necesitas otra solicitud, cambia las fechas o vuelve al menú principal.")
+        return
+
+    # Resumen ANTES del botón: la persona ve exactamente qué fechas va a
+    # registrar. Sin esto, un clic distraído generaba un folio con la fecha
+    # equivocada y había que rechazarlo a mano.
+    try:
+        _et = TIPO_LABELS.get(tipo, tipo)
+        if fi == ff:
+            _cuando = f"el **{fi.strftime('%d/%m/%Y')}**"
+        else:
+            _cuando = f"del **{fi.strftime('%d/%m/%Y')}** al **{ff.strftime('%d/%m/%Y')}**"
+        st.warning(f"Vas a registrar **{_et}** {_cuando}. Revisa las fechas antes de continuar.")
+    except Exception:
+        pass
+
+    if st.button("Registrar solicitud", type="primary", key=key_btn):
+        # Relectura EN VIVO: si la sesión se recicló (Streamlit Cloud tira la
+        # sesión tras unos minutos, o el usuario recargó con F5), los candados
+        # de session_state se perdieron y el Sheet es la única defensa real.
+        try:
+            incidencias_df = cargar_incidencias()
+        except Exception:
+            pass
+
+        # Validar duplicado: mismo RFC, mismo tipo y misma fecha de inicio.
+        # La comparación va normalizada a fecha: Google Sheets devuelve
+        # "15/01/2026" mientras que str(fi) da "2026-01-15", así que la
+        # comparación de texto plana NUNCA detectaba el duplicado.
+        if not incidencias_df.empty and "FECHA_INICIO" in incidencias_df.columns:
+            _fechas = pd.to_datetime(incidencias_df["FECHA_INICIO"],
+                                     errors="coerce", dayfirst=True).dt.date
+            _mismo_dia = (_fechas == fi) | (
+                incidencias_df["FECHA_INICIO"].astype(str).str.strip() == str(fi)
+            )
             dup = incidencias_df[
-                (incidencias_df["RFC"].astype(str).str.upper() == rfc.upper()) &
-                (incidencias_df["TIPO"].astype(str) == tipo) &
-                (incidencias_df["FECHA_INICIO"].astype(str) == str(fi))
+                (incidencias_df["RFC"].astype(str).str.strip().str.upper() == str(rfc).strip().upper()) &
+                (incidencias_df["TIPO"].astype(str).str.strip() == str(tipo).strip()) &
+                _mismo_dia
             ]
             if not dup.empty:
                 folio_dup = dup.iloc[0]["FOLIO"]
                 tipo_label_dup = TIPO_LABELS.get(tipo, tipo)
                 st.error(f"⚠️ Ya tienes una solicitud **{folio_dup}** de **{tipo_label_dup}** registrada para el **{fi.strftime('%d/%m/%Y')}**. No puedes registrar dos solicitudes del mismo tipo en la misma fecha.")
                 return
+
         # Validar duplicado en ECO
         if tipo == "ECO":
             try:
@@ -1771,9 +1837,9 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
                     col_rfc_eco = next((c for c in sol_eco.columns if c.upper() == "RFC"), None)
                     col_fi_eco  = next((c for c in sol_eco.columns if "INICIO" in c.upper()), None)
                     if col_rfc_eco and col_fi_eco:
-                        sol_eco["_FDT"] = pd.to_datetime(sol_eco[col_fi_eco], errors="coerce")
+                        sol_eco["_FDT"] = pd.to_datetime(sol_eco[col_fi_eco], errors="coerce", dayfirst=True)
                         dup_eco = sol_eco[
-                            (sol_eco[col_rfc_eco].astype(str).str.upper() == rfc.upper()) &
+                            (sol_eco[col_rfc_eco].astype(str).str.strip().str.upper() == str(rfc).strip().upper()) &
                             (sol_eco["_FDT"].dt.date == fi)
                         ]
                         if not dup_eco.empty:
@@ -1781,8 +1847,9 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
                             folio_dup = str(dup_eco.iloc[0].get(col_f, "ECO")) if col_f else "ECO"
                             st.error(f"⚠️ Ya tienes una solicitud **{folio_dup}** de **Día económico** registrada para el **{fi.strftime('%d/%m/%Y')}**. No puedes registrar dos días económicos para la misma fecha.")
                             return
-            except: pass
-        st.session_state[f"registrado_{key_btn}"] = True
+            except Exception:
+                pass
+
         folio     = generar_folio(tipo, incidencias_df)
         import pytz
         tz_mx = pytz.timezone("America/Mexico_City")
@@ -1811,24 +1878,24 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
             "hora_retorno":    hora_retorno,
         }
         _guardado_ok = False
-        try:
-            if tipo == "ECO":
-                _guardado_ok = guardar_dia_economico(datos)
-            else:
-                _guardado_ok = guardar_incidencia(datos)
-        except Exception as _e_save:
-            _error_amable(_e_save, "al registrar la solicitud")
+        with st.spinner("Registrando solicitud..."):
+            try:
+                if tipo == "ECO":
+                    _guardado_ok = guardar_dia_economico(datos)
+                else:
+                    _guardado_ok = guardar_incidencia(datos)
+            except Exception as _e_save:
+                _error_amable(_e_save, "al registrar la solicitud")
+
         if _guardado_ok:
             folio = datos["folio"]  # puede haberse recalculado en vivo al guardar
             pdf_bytes = generar_comprobante_pdf(datos)
-            st.success(f"✅ Solicitud registrada con folio **{folio}**")
-            st.download_button(
-                label="⬇️ Descargar comprobante PDF",
-                data=pdf_bytes,
-                file_name=f"Comprobante_{folio}.pdf",
-                mime="application/pdf",
-            )
-            st.info("Imprime tu comprobante y preséntalo en RH junto con el documento físico original.")
+            # La marca se pone SOLO si el guardado salió bien. Antes se ponía
+            # antes de guardar, así que un error de cuota de Google dejaba al
+            # usuario bloqueado sin haber registrado nada.
+            st.session_state[key_ok] = {"folio": folio, "pdf": pdf_bytes}
+            st.rerun()
+
 
 # ─────────────────────────────────────────────
 # VISTA ADMIN
