@@ -1886,6 +1886,169 @@ def _tab_lote_emision(get_client):
             mime="application/pdf", key="le_dl")
 
 
+# ─────────────────────────────────────────────
+# CRUCE CONTRA LA REFERENCIA DE LA DIRECCIÓN
+#
+# La Dirección lleva su propio control de los oficios que RH le solicitó.
+# Esa lista se pega en la pestaña `referencia_dgfc` y sirve de contraste:
+# es un registro independiente de este sistema, y ahí está su valor.
+# ─────────────────────────────────────────────
+TAB_REFERENCIA = "referencia_dgfc"
+
+COLUMNAS_REFERENCIA = ["FECHA", "FOLIO", "DIRIGIDO_A", "ASUNTO",
+                       "SOLICITO", "ACUSO"]
+
+
+@st.cache_data(ttl=300)
+def _cargar_referencia_cached(_get_client) -> pd.DataFrame:
+    sh = _abrir_sheet(_get_client)
+    try:
+        ws = sh.worksheet(TAB_REFERENCIA)
+    except Exception:
+        return pd.DataFrame(columns=COLUMNAS_REFERENCIA)
+    registros = ws.get_all_records(numericise_ignore=["all"])
+    if not registros:
+        return pd.DataFrame(columns=COLUMNAS_REFERENCIA)
+    return pd.DataFrame(registros)
+
+
+def cargar_referencia(get_client) -> pd.DataFrame:
+    return _cargar_referencia_cached(get_client)
+
+
+def normalizar_folio(valor) -> str:
+    """Folio a 4 dígitos. Los sufijos de letra (615-A, 755-B) se quedan solo
+    con el número: la Dirección los usa para desglosar un mismo folio."""
+    digitos = re.sub(r"\D", "", str(valor or ""))
+    return digitos.zfill(4) if digitos else ""
+
+
+def normalizar_persona(valor) -> str:
+    """Une variantes del mismo nombre (CARRIZALEZ / CARRIZALES) para que no
+    aparezca la misma persona dos veces al filtrar."""
+    t = re.sub(r"\s+", " ", str(valor or "").upper()).strip()
+    return t.replace("Z", "S")
+
+
+def cruzar_minutario(df_oficios: pd.DataFrame, df_ref: pd.DataFrame,
+                     anio: str) -> dict:
+    """Compara ambos registros y devuelve los tres desajustes que importan:
+
+    faltan_capturar : la Dirección lo tiene, tu minutario no
+    sin_acuse       : capturado, pero sin escaneo resguardado
+    no_reconocidos  : está en tu minutario y la Dirección no lo registra
+    """
+    ref = df_ref.copy()
+    if not ref.empty and "FOLIO" in ref.columns:
+        ref["_F"] = ref["FOLIO"].apply(normalizar_folio)
+        ref = ref[ref["_F"] != ""]
+        # El desglose 615-A..615-D colapsa en un solo folio.
+        ref = ref.drop_duplicates(subset=["_F"], keep="first")
+    else:
+        ref["_F"] = pd.Series(dtype=str)
+
+    mios = df_oficios.copy()
+    if not mios.empty and "AÑO" in mios.columns:
+        mios = mios[mios["AÑO"].astype(str) == str(anio)]
+        mios["_F"] = mios["FOLIO"].apply(normalizar_folio)
+        mios = mios[mios["ESTADO"].astype(str) != "CANCELADO"]
+    else:
+        mios["_F"] = pd.Series(dtype=str)
+
+    folios_mios = set(mios["_F"]) if not mios.empty else set()
+    folios_ref = set(ref["_F"]) if not ref.empty else set()
+
+    faltan = ref[~ref["_F"].isin(folios_mios)] if not ref.empty else ref
+
+    if not mios.empty and "URL_ESCANEO" in mios.columns:
+        sin_acuse = mios[~mios["URL_ESCANEO"].astype(str).str.startswith("http")]
+    else:
+        sin_acuse = mios.iloc[0:0]
+
+    no_recon = mios[~mios["_F"].isin(folios_ref)] if not mios.empty else mios
+
+    return {
+        "faltan_capturar": faltan,
+        "sin_acuse": sin_acuse,
+        "no_reconocidos": no_recon,
+        "total_referencia": len(ref),
+        "total_mios": len(mios),
+    }
+
+
+def _tab_cruce(get_client, df_oficios: pd.DataFrame, es_admin: bool):
+    st.caption("Contrasta tu minutario contra el control de la Dirección "
+               f"General, que se pega en la pestaña `{TAB_REFERENCIA}` "
+               "del Sheet.")
+
+    try:
+        df_ref = cargar_referencia(get_client)
+    except Exception as e:
+        _error_amable(e, "al cargar la referencia")
+        return
+
+    if df_ref.empty:
+        st.info(f"La pestaña `{TAB_REFERENCIA}` está vacía o no existe.")
+        st.caption("Créala con estos encabezados en la fila 1 y pega ahí el "
+                   "control que te envía la Dirección: "
+                   + " · ".join(COLUMNAS_REFERENCIA))
+        return
+
+    faltan_cols = [c for c in ("FOLIO",) if c not in df_ref.columns]
+    if faltan_cols:
+        st.error(f"A `{TAB_REFERENCIA}` le falta la columna **FOLIO**.")
+        st.caption("Encabezados actuales: " + ", ".join(df_ref.columns))
+        return
+
+    anios_c = sorted(df_oficios["AÑO"].astype(str).unique(), reverse=True) \
+        if not df_oficios.empty else [str(datetime.now(TZ).year)]
+    anio_c = st.selectbox("Año", options=anios_c, key="cr_anio")
+
+    r = cruzar_minutario(df_oficios, df_ref, anio_c)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("En la Dirección", r["total_referencia"])
+    c2.metric("En tu minutario", r["total_mios"])
+    c3.metric("Faltan capturar", len(r["faltan_capturar"]))
+    c4.metric("Sin acuse", len(r["sin_acuse"]))
+
+    st.divider()
+
+    if len(r["faltan_capturar"]):
+        st.warning(f"**{len(r['faltan_capturar'])} oficio(s) que la Dirección "
+                   "registra y tú no has capturado.**")
+        cols = [c for c in ("FOLIO", "FECHA", "DIRIGIDO_A", "ASUNTO", "SOLICITO")
+                if c in r["faltan_capturar"].columns]
+        st.dataframe(r["faltan_capturar"][cols], use_container_width=True,
+                     hide_index=True)
+    else:
+        st.success("No falta ninguno por capturar.")
+
+    if len(r["sin_acuse"]):
+        with st.expander(f"📎 {len(r['sin_acuse'])} capturado(s) sin acuse "
+                         "resguardado"):
+            st.caption("Registrados en tu minutario, pero sin el escaneo "
+                       "firmado. Súbelos en la pestaña de escaneo.")
+            cols = [c for c in ("ID_OFICIO", "FECHA_OFICIO", "ASUNTO",
+                                "DIRIGIDO_A", "ESTADO")
+                    if c in r["sin_acuse"].columns]
+            st.dataframe(r["sin_acuse"][cols], use_container_width=True,
+                         hide_index=True)
+
+    # Este es el caso que motivó todo el sistema: un folio a tu nombre que la
+    # Dirección no reconoce. Merece aviso aparte, no un renglón más.
+    if len(r["no_reconocidos"]) and es_admin:
+        st.error(f"**{len(r['no_reconocidos'])} oficio(s) en tu minutario que "
+                 "la Dirección NO registra.**")
+        st.caption("Revísalos: puede ser que la lista de la Dirección esté "
+                   "desactualizada, o que el folio no corresponda a RH.")
+        cols = [c for c in ("ID_OFICIO", "FECHA_OFICIO", "ASUNTO",
+                            "EMISOR_NOMBRE", "ESTADO")
+                if c in r["no_reconocidos"].columns]
+        st.dataframe(r["no_reconocidos"][cols], use_container_width=True,
+                     hide_index=True)
+
+
 def _tab_historico(get_client):
     """Captura de oficios anteriores a este sistema. Diseñada para cargar
     varios seguidos: el escaneo es opcional y el formulario se limpia solo,
@@ -2023,9 +2186,9 @@ def render_oficios(deps: dict):
     if not df.empty and _faltan_columnas(df, COLUMNAS_OFICIOS, TAB_OFICIOS):
         return
 
-    tab_reg, tab_esc, tab_cons, tab_acu = st.tabs(
+    tab_reg, tab_esc, tab_cons, tab_cruce, tab_acu = st.tabs(
         ["📤 Emitir oficio", "📎 Escaneo firmado", "📋 Consultar",
-         "🗂️ Acuses sin folio"]
+         "🔀 Cruce con la Dirección", "🗂️ Acuses sin folio"]
     )
 
     # ── Emitir oficio ────────────────────────
@@ -2360,6 +2523,10 @@ def render_oficios(deps: dict):
                                 st.rerun()
                             else:
                                 st.error("No se pudo cancelar.")
+
+    # ── Cruce con la Dirección ───────────────
+    with tab_cruce:
+        _tab_cruce(get_client, df, es_admin)
 
     # ── Acuses sin folio ─────────────────────
     with tab_acu:
