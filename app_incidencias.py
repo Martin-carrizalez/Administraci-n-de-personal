@@ -2652,13 +2652,16 @@ def vista_directorio():
             "Dir. Desarrollo Académico",
         ]
         ICONOS = {
-            "Despacho":                    "🏢",
-            "Recursos Humanos":            "👥",
-            "Viáticos":                    "🧾",
-            "Recursos Materiales":         "📦",
-            "Licitaciones y Presupuestos": "📋",
-            "Comunicación Social":         "📢",
-            "Dir. Desarrollo Académico":   "👩‍🏫",
+            "DESPACHO":                    "🏢",
+            "RECURSOS HUMANOS":            "👥",
+            "VIÁTICOS":                    "🧾",
+            "VIATICOS":                    "🧾",
+            "RECURSOS MATERIALES":         "📦",
+            "LICITACIONES Y PRESUPUESTOS": "📋",
+            "COMUNICACIÓN SOCIAL":         "📢",
+            "COMUNICACION SOCIAL":         "📢",
+            "DIR. DESARROLLO ACADÉMICO":   "👩‍🏫",
+            "DIR. DESARROLLO ACADEMICO":   "👩‍🏫",
         }
         # Normalizar: si DEPARTAMENTO está vacío usar AREA como dept
         df["DEPT_VISTA"] = df.apply(lambda r: r["DEPARTAMENTO"] if r["DEPARTAMENTO"] else r["AREA"], axis=1)
