@@ -153,19 +153,68 @@ def cargar_horarios():
     data = ws.get_all_records(numericise_ignore=["all"])
     return pd.DataFrame(data) if data else pd.DataFrame()
 
+COLS_NOMINA = ["ID", "NOMBRE_COMPLETO", "CORREO",
+               "JEFE_INMEDIATO", "CORREO_JEFE", "CC_FIJO"]
+
+
 @st.cache_data(ttl=300)
 def cargar_directorio_nomina():
-    """Lee la tab Directorio_Nomina del Sheet del checador.
-    Columnas esperadas: ID, NOMBRE_COMPLETO, CORREO, JEFE_INMEDIATO, CORREO_JEFE, CC_FIJO
-    El CC_FIJO solo se llena en las primeras filas (correos de asistentes)."""
-    client = get_client()
-    sh = client.open_by_key(st.secrets["sheet_checador_id"])
-    try:
-        ws = sh.worksheet("Directorio_Nomina")
-    except gspread.WorksheetNotFound:
-        return pd.DataFrame(columns=["ID","NOMBRE_COMPLETO","CORREO","JEFE_INMEDIATO","CORREO_JEFE","CC_FIJO"])
-    data = ws.get_all_records(numericise_ignore=["all"])
-    return pd.DataFrame(data) if data else pd.DataFrame(columns=["ID","NOMBRE_COMPLETO","CORREO","JEFE_INMEDIATO","CORREO_JEFE","CC_FIJO"])
+    """Personal que va en nómina de la DFC.
+
+    FASE 2 — Se deriva del padrón filtrando EN_NOMINA_DFC == "SI", en lugar de
+    leerse de una tab capturada a mano. Ese cambio es el que resuelve el
+    problema de que la lista se quedara corta: ya no puede desincronizarse del
+    padrón porque ES el padrón filtrado.
+
+    Requiere que el padrón traiga JEFE_INMEDIATO, CORREO_JEFE y CC_FIJO. Si
+    esas columnas están vacías o no existen, se usa la tab antigua: es
+    preferible la lista de siempre a una sin jefes ni copias.
+    """
+    def _tab_antigua():
+        client = get_client()
+        sh = client.open_by_key(st.secrets["sheet_checador_id"])
+        try:
+            ws = sh.worksheet("Directorio_Nomina")
+        except gspread.WorksheetNotFound:
+            return pd.DataFrame(columns=COLS_NOMINA)
+        data = ws.get_all_records(numericise_ignore=["all"])
+        return pd.DataFrame(data) if data else pd.DataFrame(columns=COLS_NOMINA)
+
+    padron = cargar_padron()
+    c_nom = _col(padron, *ALIAS_PADRON["NOMBRE"]) if not padron.empty else None
+    tiene_jefes = (c_nom is not None
+                   and "JEFE_INMEDIATO" in padron.columns
+                   and padron["JEFE_INMEDIATO"].astype(str).str.strip().ne("").any())
+
+    if not (c_nom and "EN_NOMINA_DFC" in padron.columns and tiene_jefes):
+        st.session_state["_fuente_nomina"] = "tab_Directorio_Nomina"
+        return _tab_antigua()
+
+    df = padron[padron["EN_NOMINA_DFC"].astype(str).str.upper().str.strip() == "SI"].copy()
+    df["NOMBRE_COMPLETO"] = df[c_nom]
+    for col in COLS_NOMINA:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[COLS_NOMINA].fillna("")
+
+    # CC_FIJO es una lista fija de correos en copia y no se deriva de ningún
+    # dato del padrón. Si viene vacía, se toma de la tab antigua: perder las
+    # copias sería una regresión silenciosa en los correos de nómina.
+    if df["CC_FIJO"].astype(str).str.strip().eq("").all():
+        try:
+            previo = _tab_antigua()
+            if not previo.empty and "CC_FIJO" in previo.columns:
+                cc = [c for c in previo["CC_FIJO"].astype(str) if c.strip()]
+                for i, valor in enumerate(cc):
+                    if i < len(df):
+                        df.iat[i, df.columns.get_loc("CC_FIJO")] = valor
+                st.session_state["_fuente_nomina"] = "padron (CC_FIJO de la tab antigua)"
+                return df
+        except Exception:
+            pass
+
+    st.session_state["_fuente_nomina"] = "padron"
+    return df
 
 @st.cache_data(ttl=300)
 def cargar_incidencias():
@@ -2487,6 +2536,7 @@ def vista_directorio():
     st.caption("Toca un área para ver su equipo · Busca por nombre, extensión o correo")
 
     df = cargar_directorio()
+    aviso_fuente_personal()
     if df.empty:
         st.warning("No se pudo cargar el directorio.")
         return
@@ -2653,47 +2703,87 @@ EMERGENCIA_HEADERS = ["ID", "CONSULTOR_RFC", "CONSULTOR_NOMBRE", "COMPAÑERO_CON
 
 PADRON_TAB = "Padron"
 
+# El padrón se armó con nombres propios (NOMBRE, ADSCRIPCION_REAL) y la app
+# nació esperando otros (NOMBRE_COMPLETO, UBICACION_FISICA). Se aceptan ambos
+# para que un renombrado en el Sheet no vuelva a dejar la migración muda.
+ALIAS_PADRON = {
+    "NOMBRE":      ("NOMBRE", "NOMBRE_COMPLETO"),
+    "AREA":        ("ADSCRIPCION_REAL", "UBICACION_FISICA", "AREA"),
+    "DEPARTAMENTO":("ROL", "DEPARTAMENTO"),
+}
+
+
+def _col(df, *candidatas):
+    """Primera columna existente de entre varias equivalentes."""
+    return next((c for c in candidatas if c in df.columns), None)
+
+
 @st.cache_data(ttl=300)
 def cargar_padron():
-    """Lee el PADRON_MAESTRO_DFC completo. Devuelve DataFrame vacío si no
-    está accesible (el consumidor decide su fallback)."""
+    """Lee el PADRON_MAESTRO_DFC completo. Devuelve DataFrame vacío si no está
+    accesible; cada consumidor decide su propio fallback.
+
+    NO filtra por ACTIVO: en el padrón esa columna es ACTIVO_CHECADOR y solo
+    indica quién marca en el reloj de piso 5 y 6. Filtrar con ella sacaría del
+    directorio a todo el personal de Centros de Maestros, que sí labora.
+    """
     try:
         client = get_client()
         sh = client.open_by_key(st.secrets["sheet_padron_id"])
         ws = sh.worksheet(PADRON_TAB)
         data = ws.get_all_records(numericise_ignore=["all"])
-        df = pd.DataFrame(data).fillna("")
-        if not df.empty and "ACTIVO" in df.columns:
-            df = df[df["ACTIVO"].astype(str).str.upper().str.strip() != "NO"]
-        return df
+        return pd.DataFrame(data).fillna("")
     except Exception:
         return pd.DataFrame()
 
+
+def padron_disponible() -> bool:
+    """True si el padrón se puede leer y trae la columna de nombre."""
+    p = cargar_padron()
+    return (not p.empty) and _col(p, *ALIAS_PADRON["NOMBRE"]) is not None
+
+
 def _directorio_unificado():
-    """Directorio para las vistas, derivado del PADRÓN cuando está disponible
-    (renombrando NOMBRE_COMPLETO→NOMBRE y UBICACION_FISICA→AREA para que las
-    pantallas actuales no noten el cambio), o de la tab Directorio si no."""
+    """Directorio derivado del padrón, o de la tab Directorio si no hay padrón.
+    Devuelve siempre las columnas que las pantallas ya esperan."""
     padron = cargar_padron()
-    if not padron.empty and "NOMBRE_COMPLETO" in padron.columns:
+    c_nom = _col(padron, *ALIAS_PADRON["NOMBRE"]) if not padron.empty else None
+
+    if c_nom:
         df = padron.copy()
-        df["NOMBRE"] = df["NOMBRE_COMPLETO"]
-        if "UBICACION_FISICA" in df.columns:
-            df["AREA"] = df["UBICACION_FISICA"]
-        if "DEPARTAMENTO" not in df.columns:
-            df["DEPARTAMENTO"] = ""
-        if "EXTENSION" not in df.columns:
-            df["EXTENSION"] = ""
-        if "CORREO" not in df.columns:
-            df["CORREO"] = ""
+        df["NOMBRE"] = df[c_nom]
+        c_area = _col(df, *ALIAS_PADRON["AREA"])
+        df["AREA"] = df[c_area] if c_area else ""
+        c_dep = _col(df, *ALIAS_PADRON["DEPARTAMENTO"])
+        df["DEPARTAMENTO"] = df[c_dep] if c_dep else ""
+        for col in ("EXTENSION", "CORREO",
+                    "CONTACTO_EMERGENCIA_NOMBRE", "CONTACTO_EMERGENCIA_TEL"):
+            if col not in df.columns:
+                df[col] = ""
         st.session_state["_fuente_directorio"] = "padron"
         return df.fillna("")
-    # Fallback: comportamiento idéntico al de siempre
+
     st.session_state["_fuente_directorio"] = "tab_directorio (padrón no accesible)"
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
     ws = sh.worksheet("Directorio")
     data = ws.get_all_records(numericise_ignore=["all"])
     return pd.DataFrame(data).fillna("")
+
+
+def aviso_fuente_personal():
+    """Deja ver de dónde salieron los datos. Sin esto la migración es muda: el
+    fallback hace que la app se vea idéntica aunque el padrón no se lea."""
+    fuente = st.session_state.get("_fuente_directorio", "")
+    nom = st.session_state.get("_fuente_nomina", "")
+    if fuente == "padron":
+        detalle = " · Nómina derivada del padrón." if nom.startswith("padron") else ""
+        st.caption(f"Datos de personal: **Padrón Maestro**.{detalle}")
+    elif fuente:
+        st.warning("El Padrón Maestro no está accesible: se están usando las "
+                   "tabs antiguas. Revisa el secret `sheet_padron_id` y que el "
+                   "Sheet esté compartido con la cuenta de servicio.")
+
 
 @st.cache_data(ttl=300)
 def _cargar_directorio_completo():
