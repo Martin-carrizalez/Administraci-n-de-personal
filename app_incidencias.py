@@ -2651,28 +2651,50 @@ def vista_directorio():
             "Comunicación Social",
             "Dir. Desarrollo Académico",
         ]
+        ORDEN_AREAS = [
+            "DESPACHO",
+            "RECURSOS HUMANOS",
+            "VIATICOS",
+            "VIÁTICOS",
+            "RECURSOS MATERIALES",
+            "LICITACIONES Y PRESUPUESTOS",
+            "COMUNICACION SOCIAL",
+            "COMUNICACIÓN SOCIAL",
+            "DIR. DESARROLLO ACADEMICO",
+            "DIR. DESARROLLO ACADÉMICO",
+        ]
+
         ICONOS = {
             "DESPACHO":                    "🏢",
             "RECURSOS HUMANOS":            "👥",
-            "VIÁTICOS":                    "🧾",
             "VIATICOS":                    "🧾",
+            "VIÁTICOS":                    "🧾",
             "RECURSOS MATERIALES":         "📦",
             "LICITACIONES Y PRESUPUESTOS": "📋",
-            "COMUNICACIÓN SOCIAL":         "📢",
             "COMUNICACION SOCIAL":         "📢",
-            "DIR. DESARROLLO ACADÉMICO":   "👩‍🏫",
+            "COMUNICACIÓN SOCIAL":         "📢",
             "DIR. DESARROLLO ACADEMICO":   "👩‍🏫",
+            "DIR. DESARROLLO ACADÉMICO":   "👩‍🏫",
         }
-        # Normalizar: si DEPARTAMENTO está vacío usar AREA como dept
+
         df["DEPT_VISTA"] = df.apply(lambda r: r["DEPARTAMENTO"] if r["DEPARTAMENTO"] else r["AREA"], axis=1)
 
+        # 1. Obtenemos los departamentos que realmente existen en tus datos
         depts_en_datos = df["DEPT_VISTA"].unique().tolist()
-        # Mostrar en orden acordado + cualquier otro que no esté en la lista
-        orden_final = [d for d in ORDEN_AREAS if d in depts_en_datos] + [d for d in depts_en_datos if d not in ORDEN_AREAS]
 
+        # 2. Reordenamos: primero los de ORDEN_AREAS y al final cualquier otro no contemplado
+        def obtener_posicion(dept):
+            d_norm = str(dept).upper().strip()
+            if d_norm in ORDEN_AREAS:
+                return ORDEN_AREAS.index(d_norm)
+            return 999  # Mandar al final los que no estén en la lista (como "COMISIONADO", etc.)
+
+        orden_final = sorted(depts_en_datos, key=obtener_posicion)
+
+        # 3. Dibujamos los desplegables en el nuevo orden
         for dept in orden_final:
             personas = df[df["DEPT_VISTA"] == dept]
-            icono = ICONOS.get(dept, "📁")
+            icono = ICONOS.get(str(dept).upper().strip(), "📁")
             bg, tc = color(df[df["DEPT_VISTA"]==dept]["AREA"].iloc[0])
             with st.expander(f"{icono} {dept}  ·  {len(personas)} personas"):
                 for _, row in personas.iterrows():
