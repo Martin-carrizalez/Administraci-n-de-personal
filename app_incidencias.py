@@ -2642,15 +2642,7 @@ def vista_directorio():
                 tarjeta(row)
     else:
         # Agrupar por DEPARTAMENTO como área visible (7 secciones)
-        ORDEN_AREAS = [
-            "Despacho",
-            "Recursos Humanos",
-            "Viáticos",
-            "Recursos Materiales",
-            "Licitaciones y Presupuestos",
-            "Comunicación Social",
-            "Dir. Desarrollo Académico",
-        ]
+       
         ORDEN_AREAS = [
             "DESPACHO",
             "RECURSOS HUMANOS",
@@ -2662,19 +2654,27 @@ def vista_directorio():
             "COMUNICACIÓN SOCIAL",
             "DIR. DESARROLLO ACADEMICO",
             "DIR. DESARROLLO ACADÉMICO",
+            "BASE DE DATOS Y DISENO INSTRUCCIONAL",
+            "BASE DE DATOS Y DISEÑO INSTRUCCIONAL",
+            "COMISIONADO A OTRA AREA",
+            "COMISIONADO A OTRA ÁREA",
         ]
 
         ICONOS = {
-            "DESPACHO":                    "🏢",
-            "RECURSOS HUMANOS":            "👥",
-            "VIATICOS":                    "🧾",
-            "VIÁTICOS":                    "🧾",
-            "RECURSOS MATERIALES":         "📦",
-            "LICITACIONES Y PRESUPUESTOS": "📋",
-            "COMUNICACION SOCIAL":         "📢",
-            "COMUNICACIÓN SOCIAL":         "📢",
-            "DIR. DESARROLLO ACADEMICO":   "👩‍🏫",
-            "DIR. DESARROLLO ACADÉMICO":   "👩‍🏫",
+            "DESPACHO":                             "🏢",
+            "RECURSOS HUMANOS":                     "👥",
+            "VIATICOS":                             "🧾",
+            "VIÁTICOS":                             "🧾",
+            "RECURSOS MATERIALES":                  "📦",
+            "LICITACIONES Y PRESUPUESTOS":          "📋",
+            "COMUNICACION SOCIAL":                  "📢",
+            "COMUNICACIÓN SOCIAL":                  "📢",
+            "DIR. DESARROLLO ACADEMICO":            "👩‍🏫",
+            "DIR. DESARROLLO ACADÉMICO":            "👩‍🏫",
+            "BASE DE DATOS Y DISENO INSTRUCCIONAL": "💽",
+            "BASE DE DATOS Y DISEÑO INSTRUCCIONAL": "💽",
+            "COMISIONADO A OTRA AREA":              "✈️",
+            "COMISIONADO A OTRA ÁREA":              "✈️",
         }
 
         df["DEPT_VISTA"] = df.apply(lambda r: r["DEPARTAMENTO"] if r["DEPARTAMENTO"] else r["AREA"], axis=1)
