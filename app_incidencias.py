@@ -129,13 +129,55 @@ def cargar_empleados():
         "CENTRO DE TRABAJO", "DIAS DISPONIBLES", "DIAS TOTALES"
     ])
 
+COL_CORREO_USR = "Correo electrónico institucional"
+
+
 @st.cache_data(ttl=300)
 def cargar_usuarios():
+    """Quién puede iniciar sesión.
+
+    FASE 3 — Se compone del padrón MÁS la tab Usuarios. La tab solo cubría al
+    personal de oficinas centrales: 73 de los 76 asesores de Centros de
+    Maestros no podían entrar, y sin sesión no pueden pedir un pase ni
+    registrar su asistencia. El padrón sí trae su correo institucional.
+
+    La tab Usuarios manda sobre el padrón cuando ambos tienen a la persona:
+    ahí es donde RH corrige un correo o un jefe sin esperar al padrón.
+    """
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
-    ws = sh.worksheet("Usuarios")
-    data = ws.get_all_records(numericise_ignore=["all"])
-    return pd.DataFrame(data) if data else pd.DataFrame(columns=["RFC", "Correo electrónico institucional"])
+    try:
+        ws = sh.worksheet("Usuarios")
+        data = ws.get_all_records(numericise_ignore=["all"])
+        tab = pd.DataFrame(data) if data else pd.DataFrame(columns=["RFC", COL_CORREO_USR])
+    except Exception:
+        tab = pd.DataFrame(columns=["RFC", COL_CORREO_USR])
+
+    padron = cargar_padron()
+    if padron.empty or "RFC" not in padron.columns or "CORREO" not in padron.columns:
+        st.session_state["_fuente_usuarios"] = "tab_Usuarios"
+        return tab
+
+    desde_padron = padron[padron["CORREO"].astype(str).str.strip() != ""].copy()
+    if desde_padron.empty:
+        st.session_state["_fuente_usuarios"] = "tab_Usuarios"
+        return tab
+
+    desde_padron[COL_CORREO_USR] = desde_padron["CORREO"]
+    for col in ("JEFE_INMEDIATO", "DIRECTOR_GENERAL"):
+        if col not in desde_padron.columns:
+            desde_padron[col] = ""
+    desde_padron = desde_padron[["RFC", COL_CORREO_USR,
+                                 "JEFE_INMEDIATO", "DIRECTOR_GENERAL"]]
+
+    ya = set(tab["RFC"].astype(str).str.upper().str.strip()) if "RFC" in tab.columns else set()
+    nuevos = desde_padron[~desde_padron["RFC"].astype(str).str.upper().str.strip().isin(ya)]
+    if nuevos.empty:
+        st.session_state["_fuente_usuarios"] = "tab_Usuarios"
+        return tab
+
+    st.session_state["_fuente_usuarios"] = f"tab_Usuarios + padrón (+{len(nuevos)})"
+    return pd.concat([tab, nuevos], ignore_index=True).fillna("")
 
 @st.cache_data(ttl=300)
 def cargar_solicitudes_eco():
@@ -2760,8 +2802,22 @@ def _directorio_unificado():
                     "CONTACTO_EMERGENCIA_NOMBRE", "CONTACTO_EMERGENCIA_TEL"):
             if col not in df.columns:
                 df[col] = ""
+        # Un directorio implica jerarquía. La tab antigua la llevaba implícita
+        # en el orden de las filas —el primero de cada área era el jefe— y eso
+        # se perdía al ordenar el padrón por nombre. Ahora es explícita:
+        # ORDEN_JERARQUIA (1 jefe, 2 personal, 3 administrativo).
+        if "ORDEN_JERARQUIA" in df.columns:
+            df["_ord"] = pd.to_numeric(df["ORDEN_JERARQUIA"], errors="coerce").fillna(2)
+            # En los Centros de Maestros la columna DEPARTAMENTO guarda el rol
+            # (Asesor, Responsable), no un departamento: agrupar por ella los
+            # desordenaría. Solo se usa como agrupador en oficinas centrales.
+            _roles_cm = ("Asesor", "Responsable", "Administrativo")
+            df["_grupo"] = df["DEPARTAMENTO"].where(
+                ~df["DEPARTAMENTO"].isin(_roles_cm), "")
+            df = (df.sort_values(["AREA", "_grupo", "_ord", "NOMBRE"])
+                    .drop(columns=["_ord", "_grupo"]))
         st.session_state["_fuente_directorio"] = "padron"
-        return df.fillna("")
+        return df.reset_index(drop=True).fillna("")
 
     st.session_state["_fuente_directorio"] = "tab_directorio (padrón no accesible)"
     client = get_client()
