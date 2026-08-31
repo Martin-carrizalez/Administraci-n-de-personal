@@ -189,11 +189,57 @@ def cargar_solicitudes_eco():
 
 @st.cache_data(ttl=300)
 def cargar_horarios():
+    """Horarios vigentes del personal.
+
+    Compone la tab `empleados` MÁS el padrón. La tab solo cubre a quienes
+    marcan en el reloj de piso 5 y 6; el personal de Centros de Maestros no
+    aparece ahí y su consulta de horario salía vacía aunque el padrón sí lo
+    tuviera. El padrón usa los mismos nombres de columna, así que se anexa
+    tal cual.
+
+    La tab manda cuando ambos tienen a la persona: es donde queda un cambio
+    de horario autorizado antes de que llegue al padrón.
+    """
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
-    ws = sh.worksheet("empleados")
-    data = ws.get_all_records(numericise_ignore=["all"])
-    return pd.DataFrame(data) if data else pd.DataFrame()
+    try:
+        ws = sh.worksheet("empleados")
+        data = ws.get_all_records(numericise_ignore=["all"])
+        tab = pd.DataFrame(data) if data else pd.DataFrame()
+    except Exception:
+        tab = pd.DataFrame()
+
+    padron = cargar_padron()
+    cols_h = [c for par in COLUMNAS_HORARIO.values() for c in par]
+    if padron.empty or "RFC" not in padron.columns:
+        return tab
+    if not any(c in padron.columns for c in cols_h):
+        return tab
+
+    # Solo quien tenga al menos un horario capturado: una fila sin horas no
+    # aporta nada y ensuciaría la consulta.
+    presentes = [c for c in cols_h if c in padron.columns]
+    con_horario = padron[
+        padron[presentes].apply(
+            lambda r: any(str(v).strip() for v in r), axis=1)].copy()
+    if con_horario.empty:
+        return tab
+
+    for c in cols_h:
+        if c not in con_horario.columns:
+            con_horario[c] = ""
+    if "NOMBRE" not in con_horario.columns and "NOMBRE_COMPLETO" in con_horario.columns:
+        con_horario["NOMBRE"] = con_horario["NOMBRE_COMPLETO"]
+    con_horario["ACTIVO"] = con_horario.get("ACTIVO_CHECADOR", "SI")
+    con_horario = con_horario[["RFC", "NOMBRE", "ACTIVO"] + cols_h]
+
+    ya = set(tab["RFC"].astype(str).str.upper().str.strip()) if "RFC" in tab.columns else set()
+    nuevos = con_horario[~con_horario["RFC"].astype(str).str.upper().str.strip().isin(ya)]
+    if nuevos.empty:
+        return tab
+    if tab.empty:
+        return nuevos.reset_index(drop=True)
+    return pd.concat([tab, nuevos], ignore_index=True).fillna("")
 
 COLS_NOMINA = ["ID", "NOMBRE_COMPLETO", "CORREO",
                "JEFE_INMEDIATO", "CORREO_JEFE", "CC_FIJO"]
@@ -3040,6 +3086,26 @@ def vista_qr_pantalla():
     _aqr_mod.vista_pantalla(URL_APP_ASISTENCIA)
 
 
+def vista_mi_asistencia():
+    if _aqr_mod is None:
+        st.error(f"El módulo de asistencia QR no está disponible: {_ERROR_AQR}")
+        return
+    _aqr_mod.vista_mi_asistencia()
+
+
+def _es_personal_cm(rfc_actual: str) -> bool:
+    """Cualquiera adscrito a un Centro de Maestros, no solo el Responsable."""
+    if _aqr_mod is None or not rfc_actual:
+        return False
+    try:
+        cm = _aqr_mod._padron_cm()
+        if cm.empty:
+            return False
+        return bool((cm["RFC"].astype(str).str.upper() == rfc_actual.upper()).any())
+    except Exception:
+        return False
+
+
 def vista_qr_coordinador():
     if _aqr_mod is None:
         st.error(f"El módulo de asistencia QR no está disponible: {_ERROR_AQR}")
@@ -3157,12 +3223,19 @@ def main():
             st.rerun()
         return
 
-    # ── Interceptor QR de validación de oficios (módulo aparte) ──
-    if "asistencia" in st.query_params:
+    # ── Escaneo del QR de asistencia ──
+    # Solo se procesa CON sesión iniciada. Sin ella se deja pasar al login: el
+    # parámetro sobrevive al rerun, así que en cuanto entra se registra sin
+    # tener que volver a escanear. Cortar aquí dejaba al asesor atrapado en
+    # una pantalla que le pedía sesión y no se la ofrecía.
+    if "asistencia" in st.query_params and "rol" in st.session_state:
         if _aqr_mod is None:
             st.error(f"El módulo de asistencia no está disponible: {_ERROR_AQR}")
         else:
             _aqr_mod.procesar_escaneo(st.query_params["asistencia"])
+        if st.button("Continuar al portal", key="btn_post_asistencia"):
+            st.query_params.clear()
+            st.rerun()
         st.stop()
 
     if "validar_oficio" in st.query_params and _oficios_mod is not None:
@@ -3171,6 +3244,9 @@ def main():
 
     if "rol" not in st.session_state:
         st.markdown("<style>[data-testid='stSidebar']{display:none}</style>", unsafe_allow_html=True)
+        if "asistencia" in st.query_params:
+            st.info("Inicia sesión para registrar tu asistencia. El código que "
+                    "escaneaste sigue vigente y se aplicará en cuanto entres.")
         login()
         return
 
@@ -3231,6 +3307,10 @@ def main():
             if st.button("📋 Toma de Lista (Centros piloto)"):
                 st.session_state["vista"] = "toma_lista_cm"
                 st.rerun()
+        if _es_personal_cm(_rfc_sb):
+            if st.button("📍 Mi asistencia", key="btn_mi_asistencia"):
+                st.session_state["vista"] = "mi_asistencia"
+                st.rerun()
         if _puede_qr(_rfc_sb):
             if st.button("📱 Pantalla de asistencia (QR)", key="btn_qr_pantalla"):
                 st.session_state["vista"] = "qr_pantalla"
@@ -3262,6 +3342,8 @@ def main():
         vista_contacto_emergencia()
     elif vista == "toma_lista_cm":
         vista_toma_lista_cm()
+    elif vista == "mi_asistencia":
+        vista_mi_asistencia()
     elif vista == "qr_pantalla":
         vista_qr_pantalla()
     elif vista == "qr_coordinador":

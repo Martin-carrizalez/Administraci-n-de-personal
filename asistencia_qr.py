@@ -392,7 +392,50 @@ def procesar_escaneo(codigo: str):
 
 
 # ─────────────────────────────────────────────
-# VISTA 3 · REGISTRO ASISTIDO Y CONSULTA
+# VISTA 3 · MI ASISTENCIA (cualquier asesor)
+# ─────────────────────────────────────────────
+def vista_mi_asistencia():
+    """Lo que ve el asesor: sus propios registros y el horario que le toca.
+    No puede registrar desde aquí; para eso está el QR de la pantalla."""
+    rfc = str(st.session_state.get("rfc", "")).upper().strip()
+    cm = _padron_cm()
+    yo = cm[cm["RFC"].astype(str).str.upper() == rfc] if not cm.empty else pd.DataFrame()
+    if yo.empty:
+        st.info("Esta sección es para el personal de Centros de Maestros.")
+        return
+    yo = yo.iloc[0]
+    centro = str(yo["ADSCRIPCION_REAL"])
+
+    st.markdown(f"## 📍 Mi asistencia")
+    st.caption(f"{yo['NOMBRE']} · {centro}")
+    st.info("Para registrar, escanea con tu celular el código de la pantalla "
+            "del centro. Se renueva cada 30 segundos, así que escanéalo en el "
+            "momento; una foto no sirve.")
+
+    entrada, salida = horario_del_dia(yo)
+    if entrada or salida:
+        st.markdown(f"**Tu horario de hoy:** {entrada or '—'} a {salida or '—'}")
+    else:
+        st.warning("No tienes horario capturado para hoy. Avisa a tu "
+                   "Responsable: sin él no se puede evaluar tu puntualidad.")
+
+    df = _cargar_asistencia(centro, dias=30)
+    if not df.empty:
+        df = df[df["RFC"].astype(str).str.upper() == rfc]
+    if df.empty:
+        st.caption("Sin registros en los últimos 30 días.")
+        return
+
+    st.divider()
+    st.markdown("#### Mis últimos registros")
+    st.dataframe(
+        df.sort_values("FECHA", ascending=False)[
+            ["FECHA", "HORA_ENTRADA", "HORA_SALIDA", "METODO_ENTRADA", "MOTIVO"]],
+        use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────────────────────
+# VISTA 4 · REGISTRO ASISTIDO Y CONSULTA
 # ─────────────────────────────────────────────
 def vista_coordinador():
     rfc = str(st.session_state.get("rfc", "")).upper().strip()
