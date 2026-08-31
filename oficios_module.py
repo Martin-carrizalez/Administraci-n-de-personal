@@ -1042,8 +1042,20 @@ def actualizar_filas_lote(get_client, cambios_por_id: dict) -> tuple[int, list[s
 
     posicion = {str(r.get("ID_OFICIO", "")).strip(): i
                 for i, r in enumerate(registros, start=2)}
+    errores = []
 
-    celdas, errores = [], []
+    # Una columna que no exista se saltaba en silencio: el lote decía
+    # "registrado" y las celdas quedaban vacías sin explicación. Ahora se
+    # reporta, porque casi siempre es un encabezado mal escrito en el Sheet.
+    pedidas = {c for cambios in cambios_por_id.values() for c in cambios}
+    ausentes = [c for c in pedidas if c not in headers]
+    if ausentes:
+        errores.append(
+            "El Sheet no tiene estas columnas, así que no se escribieron: "
+            + ", ".join(sorted(ausentes))
+            + ". Encabezados actuales: " + ", ".join(headers))
+
+    celdas = []
     for id_oficio, cambios in cambios_por_id.items():
         fila = posicion.get(str(id_oficio).strip())
         if fila is None:
