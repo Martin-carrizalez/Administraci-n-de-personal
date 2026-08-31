@@ -52,6 +52,11 @@ COLUMNAS_ASISTENCIA = [
 DIAS = ["LUN", "MAR", "MIE", "JUE", "VIE"]
 TOLERANCIA_MIN = 10
 
+# Tiempo mínimo entre entrada y salida. Sin este umbral, un segundo escaneo
+# accidental —o una recarga de la página— cerraba la jornada al instante:
+# se llegaron a registrar entrada y salida con 12 segundos de diferencia.
+MINIMO_JORNADA_MIN = 45
+
 
 def configurar(get_client, error_amable, cargar_padron, sheet_asistencia_id):
     """Llamar UNA vez desde app_incidencias, después de definir dependencias."""
@@ -234,7 +239,8 @@ def _cargar_asistencia(centro: str, dias: int = 30) -> pd.DataFrame:
 
 
 def registrar(centro: str, rfc: str, nombre: str, metodo: str,
-              registrado_por: str = "", motivo: str = "") -> tuple[bool, str]:
+              registrado_por: str = "", motivo: str = "",
+              forzar_salida: bool = False) -> tuple[bool, str]:
     """Marca entrada o salida. El sistema decide cuál según lo ya registrado
     hoy: un solo código sirve para ambas y no hay forma de equivocarse.
 
@@ -274,6 +280,22 @@ def registrar(centro: str, rfc: str, nombre: str, metodo: str,
         if str(existente.get("HORA_SALIDA", "")).strip():
             return False, (f"Ya tienes entrada ({existente.get('HORA_ENTRADA')}) "
                            f"y salida ({existente.get('HORA_SALIDA')}) de hoy.")
+
+        # Un segundo escaneo demasiado pronto es un doble toque, no una salida.
+        ts_ent = str(existente.get("TS_ENTRADA", "")).strip()
+        try:
+            t0 = TZ.localize(datetime.strptime(ts_ent, "%Y-%m-%d %H:%M:%S"))
+            transcurrido = (ahora - t0).total_seconds() / 60
+        except Exception:
+            transcurrido = None
+
+        if (not forzar_salida and transcurrido is not None
+                and transcurrido < MINIMO_JORNADA_MIN):
+            faltan = int(MINIMO_JORNADA_MIN - transcurrido)
+            return False, (f"Tu entrada ya está registrada a las "
+                           f"{existente.get('HORA_ENTRADA')}. Para marcar "
+                           f"salida deben pasar al menos {MINIMO_JORNADA_MIN} "
+                           f"minutos (faltan {faltan}).")
 
         from gspread.cell import Cell
         celdas = [
@@ -466,6 +488,11 @@ def vista_coordinador():
             sel = st.selectbox("Persona", nombres, key="aqr_persona")
             razon = st.text_input("Motivo", key="aqr_motivo",
                                   placeholder="No trae celular, batería agotada...")
+            forzar = st.checkbox(
+                f"Cerrar jornada aunque hayan pasado menos de "
+                f"{MINIMO_JORNADA_MIN} minutos", key="aqr_forzar",
+                help="Solo para salidas anticipadas reales: comisión, permiso "
+                     "o incidencia. Queda registrado quién lo autorizó.")
             if st.button("Registrar", type="primary", key="aqr_btn_asistido"):
                 if not razon.strip():
                     st.warning("El motivo es obligatorio: es lo que distingue "
@@ -474,7 +501,7 @@ def vista_coordinador():
                     fila = aseg[aseg["NOMBRE"].astype(str) == sel].iloc[0]
                     ok, msg = registrar(centro, fila["RFC"], sel, "ASISTIDO",
                                         st.session_state.get("nombre", rfc),
-                                        razon.strip())
+                                        razon.strip(), forzar_salida=forzar)
                     (st.success if ok else st.warning)(msg)
                     if ok:
                         st.rerun()
