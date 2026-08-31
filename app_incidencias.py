@@ -2642,59 +2642,55 @@ def vista_directorio():
                 tarjeta(row)
     else:
         # Agrupar por DEPARTAMENTO como área visible (7 secciones)
-       
         ORDEN_AREAS = [
-            "DESPACHO",
-            "RECURSOS HUMANOS",
-            "VIATICOS",
-            "VIÁTICOS",
-            "RECURSOS MATERIALES",
-            "LICITACIONES Y PRESUPUESTOS",
-            "COMUNICACION SOCIAL",
-            "COMUNICACIÓN SOCIAL",
-            "DIR. DESARROLLO ACADEMICO",
-            "DIR. DESARROLLO ACADÉMICO",
-            "BASE DE DATOS Y DISENO INSTRUCCIONAL",
-            "BASE DE DATOS Y DISEÑO INSTRUCCIONAL",
-            "COMISIONADO A OTRA AREA",
-            "COMISIONADO A OTRA ÁREA",
+            "Despacho",
+            "Recursos Humanos",
+            "Viáticos",
+            "Recursos Materiales",
+            "Licitaciones y Presupuestos",
+            "Comunicación Social",
+            "Dir. Desarrollo Académico",
+            "Base de Datos y Diseño Instruccional",
+            "Comisionado a otra área",
         ]
-
         ICONOS = {
-            "DESPACHO":                             "🏢",
-            "RECURSOS HUMANOS":                     "👥",
-            "VIATICOS":                             "🧾",
-            "VIÁTICOS":                             "🧾",
-            "RECURSOS MATERIALES":                  "📦",
-            "LICITACIONES Y PRESUPUESTOS":          "📋",
-            "COMUNICACION SOCIAL":                  "📢",
-            "COMUNICACIÓN SOCIAL":                  "📢",
-            "DIR. DESARROLLO ACADEMICO":            "👩‍🏫",
-            "DIR. DESARROLLO ACADÉMICO":            "👩‍🏫",
-            "BASE DE DATOS Y DISENO INSTRUCCIONAL": "💽",
-            "BASE DE DATOS Y DISEÑO INSTRUCCIONAL": "💽",
-            "COMISIONADO A OTRA AREA":              "✈️",
-            "COMISIONADO A OTRA ÁREA":              "✈️",
+            "Despacho":                    "🏢",
+            "Recursos Humanos":            "👥",
+            "Viáticos":                    "🧾",
+            "Recursos Materiales":         "📦",
+            "Licitaciones y Presupuestos": "📋",
+            "Comunicación Social":         "📢",
+            "Dir. Desarrollo Académico":   "👩‍🏫",
+            "Base de Datos y Diseño Instruccional": "💾",
+            "Comisionado a otra área":     "✈️",
+            "Asesor":                      "🎓",
+            "Responsable":                 "⭐",
+            "Administrativo":              "🗂️",
         }
+        # El padrón guarda todo en MAYÚSCULAS sin acentos, así que la búsqueda
+        # de icono se hace sobre una clave normalizada. Con la comparación
+        # literal, "VIATICOS" no encontraba "Viáticos" y todo caía al icono
+        # genérico.
+        def _clave_icono(t):
+            import unicodedata as _ud
+            t = _ud.normalize("NFKD", str(t or ""))
+            return "".join(c for c in t if not _ud.combining(c)).upper().strip()
 
+        ICONOS_NORM = {_clave_icono(k): v for k, v in ICONOS.items()}
+        ORDEN_NORM = [_clave_icono(a) for a in ORDEN_AREAS]
+
+        # Normalizar: si DEPARTAMENTO está vacío usar AREA como dept
         df["DEPT_VISTA"] = df.apply(lambda r: r["DEPARTAMENTO"] if r["DEPARTAMENTO"] else r["AREA"], axis=1)
 
-        # 1. Obtenemos los departamentos que realmente existen en tus datos
         depts_en_datos = df["DEPT_VISTA"].unique().tolist()
+        _pos = {d: (ORDEN_NORM.index(_clave_icono(d))
+                    if _clave_icono(d) in ORDEN_NORM else len(ORDEN_NORM))
+                for d in depts_en_datos}
+        orden_final = sorted(depts_en_datos, key=lambda d: (_pos[d], d))
 
-        # 2. Reordenamos: primero los de ORDEN_AREAS y al final cualquier otro no contemplado
-        def obtener_posicion(dept):
-            d_norm = str(dept).upper().strip()
-            if d_norm in ORDEN_AREAS:
-                return ORDEN_AREAS.index(d_norm)
-            return 999  # Mandar al final los que no estén en la lista (como "COMISIONADO", etc.)
-
-        orden_final = sorted(depts_en_datos, key=obtener_posicion)
-
-        # 3. Dibujamos los desplegables en el nuevo orden
         for dept in orden_final:
             personas = df[df["DEPT_VISTA"] == dept]
-            icono = ICONOS.get(str(dept).upper().strip(), "📁")
+            icono = ICONOS_NORM.get(_clave_icono(dept), "📁")
             bg, tc = color(df[df["DEPT_VISTA"]==dept]["AREA"].iloc[0])
             with st.expander(f"{icono} {dept}  ·  {len(personas)} personas"):
                 for _, row in personas.iterrows():
@@ -2769,6 +2765,10 @@ EMERGENCIA_HEADERS = ["ID", "CONSULTOR_RFC", "CONSULTOR_NOMBRE", "COMPAÑERO_CON
 # Directorio de siempre — la app nunca se queda sin directorio por la migración.
 
 PADRON_TAB = "Padron"
+
+# URL pública de la app: es la que se codifica en el QR de asistencia.
+URL_APP_ASISTENCIA = st.secrets.get(
+    "url_app", "https://gestion-personal-dfc.streamlit.app")
 
 # El padrón se armó con nombres propios (NOMBRE, ADSCRIPCION_REAL) y la app
 # nació esperando otros (NOMBRE_COMPLETO, UBICACION_FISICA). Se aceptan ambos
@@ -2998,6 +2998,55 @@ if _cm_module is not None:
                           subir_archivo_drive=subir_archivo_drive,
                           carpeta_asistencia_cm=DRIVE_ASISTENCIA_CM_FOLDER)
 
+# ── Asistencia por QR rotativo: asistencia_qr.py ──
+# Convive con cm_module a propósito: la toma de lista manual sigue disponible
+# mientras se compara contra el QR en el piloto de ENEG.
+try:
+    import asistencia_qr as _aqr_mod
+    _ERROR_AQR = ""
+except Exception as _e_aqr:
+    _aqr_mod = None
+    _ERROR_AQR = str(_e_aqr)
+
+if _aqr_mod is not None:
+    try:
+        _aqr_mod.configurar(
+            get_client=get_client,
+            error_amable=_error_amable,
+            cargar_padron=cargar_padron,
+            sheet_asistencia_id=st.secrets.get("sheet_asistencia_cm_id",
+                                               st.secrets.get("sheet_checador_id", "")),
+        )
+    except Exception as _e_cfg:
+        _ERROR_AQR = f"no se pudo configurar: {_e_cfg}"
+
+
+def _puede_qr(rfc_actual: str) -> bool:
+    """Responsable de un Centro de Maestros, o admin."""
+    if _aqr_mod is None:
+        return False
+    if st.session_state.get("rol") == "admin":
+        return True
+    try:
+        return bool(_aqr_mod.centro_del_responsable(rfc_actual))
+    except Exception:
+        return False
+
+
+def vista_qr_pantalla():
+    if _aqr_mod is None:
+        st.error(f"El módulo de asistencia QR no está disponible: {_ERROR_AQR}")
+        return
+    _aqr_mod.vista_pantalla(URL_APP_ASISTENCIA)
+
+
+def vista_qr_coordinador():
+    if _aqr_mod is None:
+        st.error(f"El módulo de asistencia QR no está disponible: {_ERROR_AQR}")
+        return
+    _aqr_mod.vista_coordinador()
+
+
 def _centro_del_responsable(rfc_actual: str):
     if _cm_module is None:
         return None
@@ -3109,6 +3158,13 @@ def main():
         return
 
     # ── Interceptor QR de validación de oficios (módulo aparte) ──
+    if "asistencia" in st.query_params:
+        if _aqr_mod is None:
+            st.error(f"El módulo de asistencia no está disponible: {_ERROR_AQR}")
+        else:
+            _aqr_mod.procesar_escaneo(st.query_params["asistencia"])
+        st.stop()
+
     if "validar_oficio" in st.query_params and _oficios_mod is not None:
         _oficios_mod.render_validacion_oficio(get_client, st.query_params["validar_oficio"])
         return
@@ -3175,6 +3231,13 @@ def main():
             if st.button("📋 Toma de Lista (Centros piloto)"):
                 st.session_state["vista"] = "toma_lista_cm"
                 st.rerun()
+        if _puede_qr(_rfc_sb):
+            if st.button("📱 Pantalla de asistencia (QR)", key="btn_qr_pantalla"):
+                st.session_state["vista"] = "qr_pantalla"
+                st.rerun()
+            if st.button("🤝 Asistencia: registro y consulta", key="btn_qr_coord"):
+                st.session_state["vista"] = "qr_coordinador"
+                st.rerun()
         if st.session_state.get("rol") == "admin" or _rfc_sb in _rfcs_secret("rfcs_oficios"):
             if st.button("📄 Minutario de oficios", key="btn_of_sidebar"):
                 st.session_state["vista"] = "oficios"
@@ -3191,7 +3254,6 @@ def main():
             st.rerun()
 
     vista = st.session_state.get("vista", "inicio")
-    vista = st.session_state.get("vista", "inicio")
     if vista == "ari":
         vista_ari()
     elif vista == "directorio":
@@ -3200,6 +3262,10 @@ def main():
         vista_contacto_emergencia()
     elif vista == "toma_lista_cm":
         vista_toma_lista_cm()
+    elif vista == "qr_pantalla":
+        vista_qr_pantalla()
+    elif vista == "qr_coordinador":
+        vista_qr_coordinador()
     elif vista == "calendario":
         vista_calendario()
     elif vista == "nomina":
