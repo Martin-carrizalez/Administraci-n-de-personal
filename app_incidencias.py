@@ -2697,7 +2697,7 @@ def vista_directorio():
             "Comunicación Social",
             "Dir. Desarrollo Académico",
             "Base de Datos y Diseño Instruccional",
-            "Comisionado a otra área",
+            #"Comisionado a otra área",
         ]
         ICONOS = {
             "Despacho":                    "🏢",
@@ -2708,10 +2708,10 @@ def vista_directorio():
             "Comunicación Social":         "📢",
             "Dir. Desarrollo Académico":   "👩‍🏫",
             "Base de Datos y Diseño Instruccional": "💾",
-            "Comisionado a otra área":     "✈️",
+            #"Comisionado a otra área":     "✈️",
             "Asesor":                      "🎓",
             "Responsable":                 "⭐",
-            "Administrativo":              "🗂️",
+            #"Administrativo":              "🗂️",
         }
         # El padrón guarda todo en MAYÚSCULAS sin acentos, así que la búsqueda
         # de icono se hace sobre una clave normalizada. Con la comparación
