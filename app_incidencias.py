@@ -2636,6 +2636,12 @@ def vista_directorio():
     _mask_cm = df["AREA"].astype(str).str.contains("Centro de Maestros", case=False, na=False)
     df_cm = df[_mask_cm].copy()
     df = df[~_mask_cm].copy()
+    if st.session_state.get("rol") != "admin":
+        mask_ocultar = (
+            df["AREA"].astype(str).str.contains("Comisionado a otra|Oficinas centrales", case=False, na=False) | 
+            df["DEPARTAMENTO"].astype(str).str.contains("Comisionado a otra|Oficinas centrales", case=False, na=False)
+        )
+        df = df[~mask_ocultar].copy()
 
     busq = st.text_input("", placeholder="🔍 Busca por nombre, extensión o correo...", label_visibility="collapsed")
 
@@ -2708,10 +2714,10 @@ def vista_directorio():
             "Comunicación Social":         "📢",
             "Dir. Desarrollo Académico":   "👩‍🏫",
             "Base de Datos y Diseño Instruccional": "💾",
-            #"Comisionado a otra área":     "✈️",
+            "Comisionado a otra área":     "✈️",
             "Asesor":                      "🎓",
             "Responsable":                 "⭐",
-            #"Administrativo":              "🗂️",
+            "Administrativo":              "🗂️",
         }
         # El padrón guarda todo en MAYÚSCULAS sin acentos, así que la búsqueda
         # de icono se hace sobre una clave normalizada. Con la comparación
