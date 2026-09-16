@@ -193,6 +193,21 @@ def centro_del_responsable(rfc: str) -> str:
     return str(hit.iloc[0]["ADSCRIPCION_REAL"]) if not hit.empty else ""
 
 
+_DIAS_ETIQUETA = {"LUN":"Lun","MAR":"Mar","MIE":"Mié","JUE":"Jue","VIE":"Vie","SAB":"Sáb","DOM":"Dom"}
+
+def _formato_horario(fila) -> str:
+    """Horario semanal legible a partir de las columnas ENTRADA_x/SALIDA_x
+    del padrón, para que el coordinador vea lo que hay registrado y avise
+    si está mal — hoy no hay forma de editarlo desde la app."""
+    partes = []
+    for dia, etiqueta in _DIAS_ETIQUETA.items():
+        ent = str(fila.get(f"ENTRADA_{dia}", "")).strip()
+        sal = str(fila.get(f"SALIDA_{dia}", "")).strip()
+        if ent and sal and ent.lower() != "nan" and sal.lower() != "nan":
+            partes.append(f"{etiqueta} {ent}-{sal}")
+    return " | ".join(partes) if partes else "(sin horario capturado)"
+
+
 def horario_del_dia(fila, momento=None) -> tuple:
     """(entrada, salida) que le toca a esa persona ese día. Los asesores tienen
     horarios distintos entre sí, así que la puntualidad se juzga contra el
@@ -531,32 +546,69 @@ def _registrar_asistencia_mensual(centro, rfc, nombre, periodo, url):
                   value_input_option="USER_ENTERED")
     _cargar_asistencia_mensual.clear()
 
+_MESES_ES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio",
+             "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+
+def _meses_esperados(anio: int, mes_actual: int) -> list[str]:
+    # Enero → mes actual (inclusive). No tiene caso ofrecer meses futuros.
+    return [f"{_MESES_ES[m-1]} {anio}" for m in range(1, mes_actual + 1)]
+
 def _tab_asistencia_mensual(centro: str, rfc_actual: str):
     if not _deps.get("subir_archivo_drive") or not _deps.get("carpeta_asistencia_cm"):
         st.info("La subida de listas mensuales no está configurada todavía "
                "(faltan credenciales de Drive). Avísale a RH.")
         return
-    st.caption("Sube la lista de asistencia mensual firmada de tu Centro, escaneada en PDF.")
-    periodo = st.text_input("Periodo que cubre esta lista", value=_ahora().strftime("%B %Y"),
-                            placeholder="Ej: Julio 2026", key="aqr_periodo_mensual")
-    archivo = st.file_uploader("Lista de asistencia (PDF)", type=["pdf"], key="aqr_pdf_mensual")
 
-    if archivo and st.button("📎 Subir lista de asistencia", type="primary",
-                             use_container_width=True, key="aqr_btn_mensual"):
-        if not periodo.strip():
-            st.warning("Indica a qué periodo corresponde la lista antes de subirla.")
-        else:
-            with st.spinner("Subiendo a la unidad compartida..."):
-                nombre_arch = f"Asistencia_{centro}_{periodo}_{rfc_actual}.pdf".replace(" ", "_")
-                url = _deps["subir_archivo_drive"](archivo, nombre_arch, _deps["carpeta_asistencia_cm"])
-            if url.startswith("ERROR:"):
-                _error(Exception(url), "al subir la lista de asistencia")
-            else:
-                _registrar_asistencia_mensual(centro, rfc_actual,
-                                              st.session_state.get("nombre", rfc_actual), periodo, url)
-                st.success(f"Lista de {periodo} subida y registrada correctamente.")
-
+    hoy = _ahora()
     hist = _cargar_asistencia_mensual(centro)
+    subidos = set(hist["PERIODO"].astype(str)) if not hist.empty else set()
+    esperados = _meses_esperados(hoy.year, hoy.month)
+    faltantes = [m for m in esperados if m not in subidos]
+
+    # Banner de estatus — esto es lo que pediste: que de un vistazo sepan
+    # qué les falta, sin tener que comparar la lista de abajo a mano.
+    if faltantes:
+        st.warning(f"📌 Aún falta subir: **{', '.join(faltantes)}**")
+    else:
+        st.success(f"✅ Al día — ya subiste la lista de todos los meses hasta {esperados[-1]}.")
+
+    st.caption("Sube la lista de asistencia mensual firmada de tu Centro, escaneada en PDF.")
+    # Selectbox en vez de texto libre: así "Agosto 2026" siempre se escribe
+    # igual y se puede comparar contra lo ya subido. Con texto libre, dos
+    # personas podían escribir el mismo mes de formas distintas y el
+    # sistema nunca sabría que ya estaba cubierto.
+    periodo = st.selectbox(
+        "Periodo que cubre esta lista", esperados,
+        index=len(esperados) - 1, key="aqr_periodo_mensual",
+        format_func=lambda m: f"{m}  ✅ (ya subido)" if m in subidos else m,
+    )
+    ya_existe = periodo in subidos
+    confirmar_duplicado = False
+    if ya_existe:
+        st.warning(f"Ya hay una lista subida para **{periodo}**. Solo continúa si es "
+                  "un reemplazo intencional (p. ej. corrigiendo un archivo mal subido).")
+        confirmar_duplicado = st.checkbox(
+            f"Sí, quiero subir otra lista para {periodo} de todos modos", key="aqr_confirma_dup")
+
+    archivo = st.file_uploader("Lista de asistencia (PDF)", type=["pdf"], key="aqr_pdf_mensual")
+    puede_subir = archivo and (not ya_existe or confirmar_duplicado)
+
+    if archivo and ya_existe and not confirmar_duplicado:
+        st.info("Marca la casilla de arriba para confirmar el reemplazo antes de subir.")
+
+    if puede_subir and st.button("📎 Subir lista de asistencia", type="primary",
+                                  use_container_width=True, key="aqr_btn_mensual"):
+        with st.spinner("Subiendo a la unidad compartida..."):
+            nombre_arch = f"Asistencia_{centro}_{periodo}_{rfc_actual}.pdf".replace(" ", "_")
+            url = _deps["subir_archivo_drive"](archivo, nombre_arch, _deps["carpeta_asistencia_cm"])
+        if url.startswith("ERROR:"):
+            _error(Exception(url), "al subir la lista de asistencia")
+        else:
+            _registrar_asistencia_mensual(centro, rfc_actual,
+                                          st.session_state.get("nombre", rfc_actual), periodo, url)
+            st.success(f"Lista de {periodo} subida y registrada correctamente.")
+            st.rerun()  # refresca el banner y el selectbox con el nuevo estado
+
     if not hist.empty:
         st.markdown("#### Listas ya subidas de este centro")
         for _, r in hist.sort_values("FECHA_SUBIDA", ascending=False).iterrows():
@@ -582,10 +634,17 @@ def vista_coordinador():
     t1, t2, t3 = st.tabs(["🤝 Registro asistido", "📋 Consultar", "📎 Asistencia mensual (PDF)"])
 
     with t1:
+        aseg = asesores_de(centro)
+        if not aseg.empty:
+            with st.expander("👥 Ver horarios registrados de tu equipo"):
+                st.caption("Si algún horario está mal o incompleto, contesta el correo "
+                          "de RH con el dato correcto — desde aquí no se puede editar.")
+                for _, _a in aseg.iterrows():
+                    st.markdown(f"**{_a['NOMBRE']}** — {_formato_horario(_a)}")
+
         st.caption("Para quien no puede escanear: sin celular, sin batería, o "
                    "porque no maneja la aplicación. Queda constancia de quién "
                    "lo registró y por qué, así que la excepción es visible.")
-        aseg = asesores_de(centro)
         if aseg.empty:
             st.warning("No hay personal registrado para este centro en el padrón.")
         else:
