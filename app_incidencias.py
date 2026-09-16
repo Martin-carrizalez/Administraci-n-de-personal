@@ -2746,6 +2746,20 @@ def vista_directorio():
         with col2:
             if ext_html: st.markdown(ext_html)
             if email_html: st.caption(row["CORREO"])
+        # Horario: SOLO admin lo ve aquí (las 10 áreas, no Centros de
+        # Maestros). Las 5 secretarias de rfcs_directorio_cm siguen viendo
+        # horario únicamente en la sección de Centros de Maestros.
+        if st.session_state.get("rol") == "admin":
+            _horario_partes = []
+            for _dia, (_col_e, _col_s) in COLUMNAS_HORARIO.items():
+                _ent = str(row.get(_col_e, "")).strip()
+                _sal = str(row.get(_col_s, "")).strip()
+                if _ent and _sal and _ent.lower() != "nan" and _sal.lower() != "nan":
+                    _ent = ":".join(_ent.split(":")[:2])
+                    _sal = ":".join(_sal.split(":")[:2])
+                    _horario_partes.append(f"{_dia} {_ent}-{_sal}")
+            if _horario_partes:
+                st.caption(f"🕒 {' | '.join(_horario_partes)}")
         st.divider()
 
     if busq:
