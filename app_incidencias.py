@@ -2859,6 +2859,20 @@ def vista_directorio():
                             _extra = f" · 📞 {_r['EXTENSION']}" if str(_r.get("EXTENSION", "")).strip() else ""
                             _correo = f" · {_r['CORREO']}" if str(_r.get("CORREO", "")).strip() else ""
                             st.markdown(f"{_icon} **{_r['NOMBRE']}** — {_rol or 'Asesor'}{_extra}{_correo}")
+                            # Horario semanal: se había perdido en una edición
+                            # anterior. split(":")[:2] quita los segundos sin
+                            # importar el valor de los minutos (":00:00"→":00"
+                            # solo servía cuando los minutos ya eran 00).
+                            _horario_partes = []
+                            for _dia, (_col_e, _col_s) in COLUMNAS_HORARIO.items():
+                                _ent = str(_r.get(_col_e, "")).strip()
+                                _sal = str(_r.get(_col_s, "")).strip()
+                                if _ent and _sal and _ent.lower() != "nan" and _sal.lower() != "nan":
+                                    _ent = ":".join(_ent.split(":")[:2])
+                                    _sal = ":".join(_sal.split(":")[:2])
+                                    _horario_partes.append(f"{_dia} {_ent}-{_sal}")
+                            if _horario_partes:
+                                st.caption(f"🕒 {' | '.join(_horario_partes)}")
 
 
 # ═══════════════════════════════════════════════════════════════════

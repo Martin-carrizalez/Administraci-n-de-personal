@@ -204,6 +204,10 @@ def _formato_horario(fila) -> str:
         ent = str(fila.get(f"ENTRADA_{dia}", "")).strip()
         sal = str(fila.get(f"SALIDA_{dia}", "")).strip()
         if ent and sal and ent.lower() != "nan" and sal.lower() != "nan":
+            # split(":")[:2] quita segundos sin importar el minuto (antes
+            # salía "19:00:00-20:00:00" directo del padrón, sin recortar).
+            ent = ":".join(ent.split(":")[:2])
+            sal = ":".join(sal.split(":")[:2])
             partes.append(f"{etiqueta} {ent}-{sal}")
     return " | ".join(partes) if partes else "(sin horario capturado)"
 
