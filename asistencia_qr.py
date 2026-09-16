@@ -615,36 +615,36 @@ def vista_coordinador():
         df = _cargar_asistencia(centro, dias=45)
         if df.empty:
             st.info("Sin registros todavía.")
-            return
-        fechas = sorted(df["FECHA"].astype(str).unique(), reverse=True)
-        f = st.selectbox("Fecha", fechas, key="aqr_fecha")
-        dia = df[df["FECHA"].astype(str) == f]
+        else:
+            fechas = sorted(df["FECHA"].astype(str).unique(), reverse=True)
+            f = st.selectbox("Fecha", fechas, key="aqr_fecha")
+            dia = df[df["FECHA"].astype(str) == f]
 
-        total = len(asesores_de(centro))
-        asistidos = int((dia["METODO_ENTRADA"].astype(str) == "ASISTIDO").sum())
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Registrados", f"{len(dia)} de {total}")
-        m2.metric("Por QR", len(dia) - asistidos)
-        m3.metric("Asistidos", asistidos)
+            total = len(asesores_de(centro))
+            asistidos = int((dia["METODO_ENTRADA"].astype(str) == "ASISTIDO").sum())
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Registrados", f"{len(dia)} de {total}")
+            m2.metric("Por QR", len(dia) - asistidos)
+            m3.metric("Asistidos", asistidos)
 
-        st.dataframe(
-            dia[["NOMBRE", "HORA_ENTRADA", "HORA_SALIDA", "METODO_ENTRADA",
-                 "MOTIVO", "REGISTRADO_POR"]],
-            use_container_width=True, hide_index=True)
+            st.dataframe(
+                dia[["NOMBRE", "HORA_ENTRADA", "HORA_SALIDA", "METODO_ENTRADA",
+                     "MOTIVO", "REGISTRADO_POR"]],
+                use_container_width=True, hide_index=True)
 
-        # Quién no aparece ese día: es el dato que la lista de papel no da.
-        presentes = set(dia["RFC"].astype(str).str.upper())
-        faltantes = asesores_de(centro)
-        faltantes = faltantes[~faltantes["RFC"].astype(str).str.upper().isin(presentes)]
-        if not faltantes.empty:
-            with st.expander(f"⚠️ {len(faltantes)} sin registro ese día"):
-                for _, r in faltantes.iterrows():
-                    st.write(f"• {r['NOMBRE']}")
+            # Quién no aparece ese día: es el dato que la lista de papel no da.
+            presentes = set(dia["RFC"].astype(str).str.upper())
+            faltantes = asesores_de(centro)
+            faltantes = faltantes[~faltantes["RFC"].astype(str).str.upper().isin(presentes)]
+            if not faltantes.empty:
+                with st.expander(f"⚠️ {len(faltantes)} sin registro ese día"):
+                    for _, r in faltantes.iterrows():
+                        st.write(f"• {r['NOMBRE']}")
 
-        if es_admin and asistidos:
-            st.caption("Un centro donde el registro asistido es frecuente "
-                       "merece revisión: puede haber un problema de pantalla, "
-                       "de señal, o de uso.")
+            if es_admin and asistidos:
+                st.caption("Un centro donde el registro asistido es frecuente "
+                           "merece revisión: puede haber un problema de pantalla, "
+                           "de señal, o de uso.")
 
     with t3:
         _tab_asistencia_mensual(centro, rfc)

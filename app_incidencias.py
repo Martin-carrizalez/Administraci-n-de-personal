@@ -162,8 +162,13 @@ def cargar_usuarios():
     # Excluir comisionados: cobran en DFC pero trabajan físicamente en otra
     # área (PRESTADO_A...). No necesitan acceso a esta app — no están aquí
     # para checar, pedir pases de salida, ni tomar lista.
+    # Excluir comisionados: cobran en DFC pero trabajan físicamente en otra
+    # área. La etiqueta real en el Sheet es COMISIONADO_FUERA (confirmado
+    # por Ángel) — se deja también PRESTADO_A por si algún registro viejo
+    # usa esa otra convención, pero la que manda es COMISIONADO_FUERA.
     if "PRESTADO" in desde_padron.columns:
-        _es_comisionado = desde_padron["PRESTADO"].astype(str).str.strip().str.upper().str.startswith("PRESTADO_A")
+        _valor = desde_padron["PRESTADO"].astype(str).str.strip().str.upper()
+        _es_comisionado = _valor.str.startswith("PRESTADO_A") | _valor.str.contains("COMISIONADO_FUERA")
         desde_padron = desde_padron[~_es_comisionado]
     if desde_padron.empty:
         st.session_state["_fuente_usuarios"] = "tab_Usuarios"
