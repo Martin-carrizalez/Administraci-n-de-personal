@@ -58,12 +58,15 @@ TOLERANCIA_MIN = 10
 MINIMO_JORNADA_MIN = 45
 
 
-def configurar(get_client, error_amable, cargar_padron, sheet_asistencia_id):
+def configurar(get_client, error_amable, cargar_padron, sheet_asistencia_id,
+              subir_archivo_drive=None, carpeta_asistencia_cm=None):
     """Llamar UNA vez desde app_incidencias, después de definir dependencias."""
     _deps["get_client"] = get_client
     _deps["error_amable"] = error_amable
     _deps["cargar_padron"] = cargar_padron
     _deps["sheet_id"] = sheet_asistencia_id
+    _deps["subir_archivo_drive"] = subir_archivo_drive
+    _deps["carpeta_asistencia_cm"] = carpeta_asistencia_cm
 
 
 def _client():
@@ -110,6 +113,21 @@ def generar_codigo(centro: str, ventana: int = None) -> str:
     mensaje = f"{_norm(centro)}|{v}".encode()
     firma = hmac.new(_secreto(), mensaje, hashlib.sha256).hexdigest()[:16]
     return f"{v}.{firma}"
+
+
+# Colores del QR: rotan con la ventana de 30 s para que quien supervisa
+# pueda CONFIRMAR A SIMPLE VISTA que el código sigue vivo, sin necesidad de
+# escanearlo. El diagnóstico que motivó esto: el código SÍ cambia (el texto
+# codificado es distinto cada 30 s, firmado con HMAC), pero dos QRs con datos
+# distintos se ven casi idénticos para un ojo humano — un cuadriculado negro
+# más. El cambio de color hace la rotación evidente sin escanear nada.
+# Todos son colores oscuros sobre fondo blanco para no arriesgar el contraste
+# mínimo que un lector de QR necesita.
+_PALETA_QR = ["#000000", "#7A0000", "#00478A", "#0F6E56", "#5B2C82", "#8A4B00"]
+
+def _color_ventana(ventana: int = None) -> str:
+    v = ventana if ventana is not None else ventana_actual()
+    return _PALETA_QR[v % len(_PALETA_QR)]
 
 
 def validar_codigo(codigo: str, centro: str) -> tuple[bool, str]:
@@ -330,19 +348,22 @@ def vista_pantalla(url_app: str):
     try:
         import qrcode
         from io import BytesIO
-        codigo = generar_codigo(centro)
+        v_actual = ventana_actual()
+        codigo = generar_codigo(centro, v_actual)
+        color_actual = _color_ventana(v_actual)
     except Exception as e:
         _error(e, "al generar el código")
         return
 
     st.markdown(f"### {centro}")
-    st.caption("Deja esta pantalla encendida. El código se renueva solo.")
+    st.caption("Deja esta pantalla encendida. El código y su color se renuevan solos "
+              "cada 30 segundos — si el color no cambia, la pantalla se congeló.")
 
     qr = qrcode.QRCode(box_size=12, border=2)
     qr.add_data(f"{url_app}/?asistencia={codigo}")
     qr.make(fit=True)
     buf = BytesIO()
-    qr.make_image(fill_color="black", back_color="white").save(buf, format="PNG")
+    qr.make_image(fill_color=color_actual, back_color="white").save(buf, format="PNG")
 
     c1, c2 = st.columns([2, 1])
     c1.image(buf.getvalue(), use_container_width=True)
@@ -459,6 +480,81 @@ def vista_mi_asistencia():
 # ─────────────────────────────────────────────
 # VISTA 4 · REGISTRO ASISTIDO Y CONSULTA
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# ASISTENCIA MENSUAL EN PDF (listas firmadas, escaneadas)
+# Misma tab de Sheets que ya usaba la toma de lista manual — si el piloto ya
+# subió listas ahí, siguen siendo válidas, no se pierden ni se duplican.
+# ─────────────────────────────────────────────
+TAB_ASISTENCIA_MENSUAL = "Asistencia_Mensual_CM"
+COLUMNAS_ASISTENCIA_MENSUAL = ["ID", "CENTRO", "RESPONSABLE_RFC", "RESPONSABLE_NOMBRE",
+                                "PERIODO", "URL_ARCHIVO", "FECHA_SUBIDA"]
+
+def _ws_asistencia_mensual():
+    sh = _client().open_by_key(_deps["sheet_id"])
+    try:
+        return sh.worksheet(TAB_ASISTENCIA_MENSUAL)
+    except Exception:
+        import gspread
+        try:
+            return sh.worksheet(TAB_ASISTENCIA_MENSUAL)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(TAB_ASISTENCIA_MENSUAL, rows=2, cols=len(COLUMNAS_ASISTENCIA_MENSUAL))
+            ws.append_row(COLUMNAS_ASISTENCIA_MENSUAL)
+            return ws
+
+@st.cache_data(ttl=60)
+def _cargar_asistencia_mensual(centro: str) -> pd.DataFrame:
+    try:
+        ws = _ws_asistencia_mensual()
+        data = ws.get_all_records(numericise_ignore=["all"])
+        df = pd.DataFrame(data) if data else pd.DataFrame(columns=COLUMNAS_ASISTENCIA_MENSUAL)
+        if df.empty:
+            return df
+        return df[df["CENTRO"].astype(str).str.strip() == centro.strip()]
+    except Exception:
+        return pd.DataFrame(columns=COLUMNAS_ASISTENCIA_MENSUAL)
+
+def _registrar_asistencia_mensual(centro, rfc, nombre, periodo, url):
+    ws = _ws_asistencia_mensual()
+    todas = ws.get_all_records(numericise_ignore=["all"])
+    nuevo_id = len(todas) + 1
+    ws.append_row([nuevo_id, centro, rfc, nombre, periodo, url, _ahora().strftime("%Y-%m-%d %H:%M")],
+                  value_input_option="USER_ENTERED")
+    _cargar_asistencia_mensual.clear()
+
+def _tab_asistencia_mensual(centro: str, rfc_actual: str):
+    if not _deps.get("subir_archivo_drive") or not _deps.get("carpeta_asistencia_cm"):
+        st.info("La subida de listas mensuales no está configurada todavía "
+               "(faltan credenciales de Drive). Avísale a RH.")
+        return
+    st.caption("Sube la lista de asistencia mensual firmada de tu Centro, escaneada en PDF.")
+    periodo = st.text_input("Periodo que cubre esta lista", value=_ahora().strftime("%B %Y"),
+                            placeholder="Ej: Julio 2026", key="aqr_periodo_mensual")
+    archivo = st.file_uploader("Lista de asistencia (PDF)", type=["pdf"], key="aqr_pdf_mensual")
+
+    if archivo and st.button("📎 Subir lista de asistencia", type="primary",
+                             use_container_width=True, key="aqr_btn_mensual"):
+        if not periodo.strip():
+            st.warning("Indica a qué periodo corresponde la lista antes de subirla.")
+        else:
+            with st.spinner("Subiendo a la unidad compartida..."):
+                nombre_arch = f"Asistencia_{centro}_{periodo}_{rfc_actual}.pdf".replace(" ", "_")
+                url = _deps["subir_archivo_drive"](archivo, nombre_arch, _deps["carpeta_asistencia_cm"])
+            if url.startswith("ERROR:"):
+                _error(Exception(url), "al subir la lista de asistencia")
+            else:
+                _registrar_asistencia_mensual(centro, rfc_actual,
+                                              st.session_state.get("nombre", rfc_actual), periodo, url)
+                st.success(f"Lista de {periodo} subida y registrada correctamente.")
+
+    hist = _cargar_asistencia_mensual(centro)
+    if not hist.empty:
+        st.markdown("#### Listas ya subidas de este centro")
+        for _, r in hist.sort_values("FECHA_SUBIDA", ascending=False).iterrows():
+            st.markdown(f"📄 **{r['PERIODO']}** — subida por {r['RESPONSABLE_NOMBRE']} "
+                       f"el {r['FECHA_SUBIDA']} · [Ver archivo]({r['URL_ARCHIVO']})")
+
+
 def vista_coordinador():
     rfc = str(st.session_state.get("rfc", "")).upper().strip()
     es_admin = st.session_state.get("rol") == "admin"
@@ -474,7 +570,7 @@ def vista_coordinador():
         return
 
     st.markdown(f"## {centro}")
-    t1, t2 = st.tabs(["🤝 Registro asistido", "📋 Consultar"])
+    t1, t2, t3 = st.tabs(["🤝 Registro asistido", "📋 Consultar", "📎 Asistencia mensual (PDF)"])
 
     with t1:
         st.caption("Para quien no puede escanear: sin celular, sin batería, o "
@@ -540,3 +636,6 @@ def vista_coordinador():
             st.caption("Un centro donde el registro asistido es frecuente "
                        "merece revisión: puede haber un problema de pantalla, "
                        "de señal, o de uso.")
+
+    with t3:
+        _tab_asistencia_mensual(centro, rfc)

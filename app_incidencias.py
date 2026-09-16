@@ -159,6 +159,12 @@ def cargar_usuarios():
         return tab
 
     desde_padron = padron[padron["CORREO"].astype(str).str.strip() != ""].copy()
+    # Excluir comisionados: cobran en DFC pero trabajan físicamente en otra
+    # área (PRESTADO_A...). No necesitan acceso a esta app — no están aquí
+    # para checar, pedir pases de salida, ni tomar lista.
+    if "PRESTADO" in desde_padron.columns:
+        _es_comisionado = desde_padron["PRESTADO"].astype(str).str.strip().str.upper().str.startswith("PRESTADO_A")
+        desde_padron = desde_padron[~_es_comisionado]
     if desde_padron.empty:
         st.session_state["_fuente_usuarios"] = "tab_Usuarios"
         return tab
@@ -1206,6 +1212,12 @@ def aprobar_dia_economico(nombre_admin: str, folio: str = "", rfc: str = "", fec
         _error_amable(e, "al aprobar")
 
 def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha_inicio_cho: str = None):
+    """Devuelve (encontro_empleado, encontro_incidencia). Antes esta función
+    no devolvía nada y el llamador mostraba éxito sin verificar: si el RFC/
+    NOMBRE no calzaba con ninguna fila de 'empleados' (típico en personal de
+    Centros de Maestros, que no vive en esa tab) o el FOLIO no se encontraba
+    en Incidencias, el cambio no se aplicaba en ningún lado pero la pantalla
+    igual decía 'autorizado'."""
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
     ws_emp = sh.worksheet("empleados")
@@ -1213,9 +1225,11 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha
     headers   = ws_emp.row_values(1)
     fecha_hoy = datetime.now().strftime("%Y-%m-%d")
     fecha_aplicacion = fecha_inicio_cho if fecha_inicio_cho else fecha_hoy
+    encontro_empleado = False
 
     for i, row in enumerate(registros, start=2):
         if str(row.get("RFC", "")).upper().strip() == str(emp_id).upper().strip() or str(row.get("NOMBRE", "")).upper().strip() == str(emp_id).upper().strip():
+            encontro_empleado = True
             # Guardar horario ANTERIOR en HISTORIAL_HORARIOS antes de sobrescribir
             try:
                 ws_hist = sh.worksheet("HISTORIAL_HORARIOS")
@@ -1265,8 +1279,10 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha
     inc_d  = ws_inc.get_all_records(numericise_ignore=["all"])
     from gspread.cell import Cell
     ahora_inc = datetime.now(pytz.utc).astimezone(pytz.timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M")
+    encontro_incidencia = False
     for i, row in enumerate(inc_d, start=2):
         if str(row.get("FOLIO", "")) == folio:
+            encontro_incidencia = True
             ws_inc.update_cells([
                 Cell(i, inc_h.index("ESTADO") + 1,             "AUTORIZADO"),
                 Cell(i, inc_h.index("AUTORIZADO_POR") + 1,     st.session_state.get("nombre", "admin")),
@@ -1274,6 +1290,7 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha
             ], value_input_option="USER_ENTERED")
             break
     cargar_incidencias.clear()
+    return encontro_empleado, encontro_incidencia
 
 # ─────────────────────────────────────────────
 # AUTENTICACIÓN
@@ -2176,9 +2193,17 @@ def vista_admin():
                                 ns = st.text_input("Salida",  value=default_s, key=f"ns_{row['FOLIO']}_{dia}", max_chars=5)
                                 nuevo_horario[dia] = {"entrada": ne, "salida": ns}
                         if st.button("💾 Guardar horario y autorizar", key=f"hor_{row['FOLIO']}", type="primary"):
-                            autorizar_cambio_horario(row["RFC"], nuevo_horario, row["FOLIO"])
-                            st.success("Horario actualizado y solicitud autorizada.")
-                            st.rerun()
+                            _enc_emp, _enc_inc = autorizar_cambio_horario(row["RFC"], nuevo_horario, row["FOLIO"])
+                            if not _enc_emp:
+                                st.error(f"⚠️ No se encontró a {row['RFC']} en la tab 'empleados' — el "
+                                        "horario NO se actualizó ahí (típico si es personal de Centros "
+                                        "de Maestros, que vive en otra tab). Revisa antes de continuar.")
+                            elif not _enc_inc:
+                                st.warning(f"El horario se actualizó, pero no se encontró el folio "
+                                          f"{row['FOLIO']} en Incidencias para marcarlo autorizado.")
+                            else:
+                                st.success("Horario actualizado y solicitud autorizada.")
+                                st.rerun()
 
     with tab2:
         sol_eco_hist = cargar_solicitudes_eco()
