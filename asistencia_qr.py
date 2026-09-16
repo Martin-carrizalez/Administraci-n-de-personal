@@ -365,6 +365,19 @@ def vista_pantalla(url_app: str):
     buf = BytesIO()
     qr.make_image(fill_color=color_actual, back_color="white").save(buf, format="PNG")
 
+    # Refresco automático REAL. Sin esto, la pantalla queda congelada con el
+    # mismo código y color hasta que alguien le da clic a "Renovar ahora" —
+    # justo lo contrario de "déjala encendida y se renueva sola".
+    import streamlit.components.v1 as components
+    components.html(f"""
+        <script>
+        if (!window.parent._aqrRefrescoSet) {{
+            window.parent._aqrRefrescoSet = true;
+            setTimeout(function() {{ window.parent.location.reload(); }}, {SEGUNDOS_VENTANA * 1000});
+        }}
+        </script>
+    """, height=0)
+
     c1, c2 = st.columns([2, 1])
     c1.image(buf.getvalue(), use_container_width=True)
     c2.metric("Renovación", f"{SEGUNDOS_VENTANA} s")

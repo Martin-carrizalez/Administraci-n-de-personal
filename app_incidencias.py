@@ -2986,10 +2986,22 @@ def _normalizar_busqueda(texto: str) -> str:
     t = unicodedata.normalize("NFKD", t)
     return "".join(c for c in t if not unicodedata.combining(c))
 
+def _es_responsable_cm(rfc_actual: str) -> bool:
+    """Responsable de un Centro de Maestros según el padrón (vía
+    asistencia_qr), sin depender de la lista piloto de cm_module."""
+    try:
+        return bool(_aqr_mod.centro_del_responsable(rfc_actual)) if _aqr_mod is not None else False
+    except Exception:
+        return False
+
 def vista_contacto_emergencia():
     rfc_actual = str(st.session_state.get("rfc", "")).upper().strip()
     autorizados = _rfcs_secret("rfcs_directorio_cm")
-    if st.session_state.get("rol") != "admin" and rfc_actual not in autorizados:
+    # Los responsables de Centros de Maestros TAMBIÉN necesitan esto: son
+    # quienes en la práctica atienden emergencias de sus propios asesores.
+    if (st.session_state.get("rol") != "admin"
+            and rfc_actual not in autorizados
+            and not _es_responsable_cm(rfc_actual)):
         st.error("No tienes permiso para esta sección.")
         return
 
@@ -3302,7 +3314,8 @@ def main():
             st.rerun()
         _rfc_sb = str(st.session_state.get("rfc", "")).upper().strip()
         _autoriz_emer = _rfcs_secret("rfcs_directorio_cm")
-        if st.session_state.get("rol") == "admin" or _rfc_sb in _autoriz_emer:
+        if (st.session_state.get("rol") == "admin" or _rfc_sb in _autoriz_emer
+                or _es_responsable_cm(_rfc_sb)):
             if st.button("🚨 Contacto de Emergencia", key="btn_emer_sidebar"):
                 st.session_state["vista"] = "emergencia"
                 st.rerun()
