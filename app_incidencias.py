@@ -2546,28 +2546,67 @@ def vista_calendario():
     ]
 
     import pytz
-    from datetime import datetime
+    from datetime import datetime, date
     tz_mx = pytz.timezone("America/Mexico_City")
-    mes_actual = datetime.now(tz_mx).month
+    hoy = datetime.now(tz_mx).date()
     MESES_NUM = {"Enero":1,"Febrero":2,"Marzo":3,"Abril":4,"Mayo":5,"Junio":6,
                  "Julio":7,"Agosto":8,"Septiembre":9,"Octubre":10,"Noviembre":11,"Diciembre":12}
+    MES_ABREV = {"Ene":1,"Feb":2,"Mar":3,"Abr":4,"May":5,"Jun":6,
+                 "Jul":7,"Ago":8,"Sep":9,"Oct":10,"Nov":11,"Dic":12}
+
+    def _fecha_real(fecha_str, anio=2026):
+        try:
+            dia_str, mes_abr = fecha_str.split()
+            return date(anio, MES_ABREV[mes_abr], int(dia_str))
+        except Exception:
+            return None
+
+    # Quincena ACTUAL de verdad: la última fecha de pago que ya pasó (o es
+    # hoy). Antes solo se comparaba el MES, así que toda la tarjeta de
+    # septiembre se resaltaba sin decir si iba la del 14 o la del 29.
+    _todas = []
+    for _mes, _quincenas in PAGOS:
+        for _fecha, _qna, _ in _quincenas:
+            _f = _fecha_real(_fecha)
+            if _f:
+                _todas.append((_f, _mes, _qna))
+    _todas.sort()
+    quincena_actual = None
+    for _f, _mes, _qna in _todas:
+        if _f <= hoy:
+            quincena_actual = (_mes, _qna)
+        else:
+            break
 
     def render_mes(col, mes, quincenas, es_actual):
         borde = "#F97316" if es_actual else "var(--color-border-tertiary)"
         fondo = "#FFF7ED" if es_actual else "var(--color-background-primary)"
-        col.markdown(f"<div style='border:2px solid {borde};border-radius:12px;padding:12px;margin-bottom:12px;background:{fondo}'>", unsafe_allow_html=True)
-        col.markdown(f"**{'🟠 ' if es_actual else ''}{mes.upper()}**")
+        # Construido en UN solo bloque HTML: antes el <div> se abría en un
+        # st.markdown y el contenido en otros, y Streamlit los renderizaba
+        # como piezas separadas — ese era el recuadro vacío flotando aparte.
+        partes = [f"<div style='border:2px solid {borde};border-radius:12px;"
+                 f"padding:12px;margin-bottom:12px;background:{fondo}'>"]
+        partes.append(f"<p style='margin:0 0 8px 0'><b>{'🟠 ' if es_actual else ''}{mes.upper()}</b></p>")
         for fecha, qna, conceptos in quincenas:
-            col.markdown(f"📅 **{fecha}**{'  ·  ' + qna if qna else ''}")
+            es_esta_quincena = quincena_actual == (mes, qna)
+            estilo_fila = ("background:#FFEDD5;border-radius:8px;padding:6px 8px;"
+                          "margin-bottom:6px;border-left:3px solid #F97316;") if es_esta_quincena else "margin-bottom:6px;"
+            partes.append(f"<div style='{estilo_fila}'>")
+            etiqueta = " · 📍 Estamos aquí" if es_esta_quincena else ""
+            partes.append(f"<p style='margin:0'>📅 <b>{fecha}</b>"
+                         f"{'  ·  ' + qna if qna else ''}{etiqueta}</p>")
             for concepto, cats in conceptos:
-                col.caption(f"{cats}  {concepto}" if cats else concepto)
-        col.markdown("</div>", unsafe_allow_html=True)
+                texto = f"{cats}  {concepto}" if cats else concepto
+                partes.append(f"<p style='margin:0;font-size:0.8em;color:gray'>{texto}</p>")
+            partes.append("</div>")
+        partes.append("</div>")
+        col.markdown("".join(partes), unsafe_allow_html=True)
 
     for fila in range(0, len(PAGOS), 3):
         grupo = PAGOS[fila:fila+3]
         cols = st.columns(3)
         for j, (mes, quincenas) in enumerate(grupo):
-            es_actual = MESES_NUM.get(mes, 0) == mes_actual
+            es_actual = MESES_NUM.get(mes, 0) == hoy.month
             render_mes(cols[j], mes, quincenas, es_actual)
 
     st.divider()
