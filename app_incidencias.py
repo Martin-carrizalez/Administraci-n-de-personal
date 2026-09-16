@@ -3088,8 +3088,9 @@ if _cm_module is not None:
                           carpeta_asistencia_cm=DRIVE_ASISTENCIA_CM_FOLDER)
 
 # ── Asistencia por QR rotativo: asistencia_qr.py ──
-# Convive con cm_module a propósito: la toma de lista manual sigue disponible
-# mientras se compara contra el QR en el piloto de ENEG.
+# Reemplaza la toma de lista manual (retirada del sidebar y del enrutador).
+# La tab vieja en Sheets no se borró: sigue ahí como histórico, solo ya
+# nadie puede llegar a ella desde la app.
 try:
     import asistencia_qr as _aqr_mod
     _ERROR_AQR = ""
@@ -3105,6 +3106,8 @@ if _aqr_mod is not None:
             cargar_padron=cargar_padron,
             sheet_asistencia_id=st.secrets.get("sheet_asistencia_cm_id",
                                                st.secrets.get("sheet_checador_id", "")),
+            subir_archivo_drive=subir_archivo_drive,
+            carpeta_asistencia_cm=DRIVE_ASISTENCIA_CM_FOLDER,
         )
     except Exception as _e_cfg:
         _ERROR_AQR = f"no se pudo configurar: {_e_cfg}"
@@ -3346,11 +3349,11 @@ def main():
                 </script>
             """, height=0)
 
-        _centro_resp = _centro_del_responsable(_rfc_sb)
-        if st.session_state.get("rol") == "admin" or _centro_resp:
-            if st.button("📋 Toma de Lista (Centros piloto)"):
-                st.session_state["vista"] = "toma_lista_cm"
-                st.rerun()
+        # Toma de lista manual RETIRADA: el sistema de QR (abajo) la reemplaza
+        # por decisión explícita. Antes de esto, Andrade Zamorano (único en
+        # el secret piloto viejo) veía AMBOS sistemas a la vez y por eso
+        # seguía usando la lista manual por costumbre — los demás coordinadores
+        # nunca vieron ese botón, de ahí la inconsistencia.
         if _es_personal_cm(_rfc_sb):
             if st.button("📍 Mi asistencia", key="btn_mi_asistencia"):
                 st.session_state["vista"] = "mi_asistencia"
@@ -3384,8 +3387,6 @@ def main():
         vista_directorio()
     elif vista == "emergencia":
         vista_contacto_emergencia()
-    elif vista == "toma_lista_cm":
-        vista_toma_lista_cm()
     elif vista == "mi_asistencia":
         vista_mi_asistencia()
     elif vista == "qr_pantalla":

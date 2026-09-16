@@ -365,19 +365,6 @@ def vista_pantalla(url_app: str):
     buf = BytesIO()
     qr.make_image(fill_color=color_actual, back_color="white").save(buf, format="PNG")
 
-    # Refresco automático REAL. Sin esto, la pantalla queda congelada con el
-    # mismo código y color hasta que alguien le da clic a "Renovar ahora" —
-    # justo lo contrario de "déjala encendida y se renueva sola".
-    import streamlit.components.v1 as components
-    components.html(f"""
-        <script>
-        if (!window.parent._aqrRefrescoSet) {{
-            window.parent._aqrRefrescoSet = true;
-            setTimeout(function() {{ window.parent.location.reload(); }}, {SEGUNDOS_VENTANA * 1000});
-        }}
-        </script>
-    """, height=0)
-
     c1, c2 = st.columns([2, 1])
     c1.image(buf.getvalue(), use_container_width=True)
     c2.metric("Renovación", f"{SEGUNDOS_VENTANA} s")
@@ -397,6 +384,15 @@ def vista_pantalla(url_app: str):
     if not df.empty:
         st.dataframe(df[["NOMBRE", "HORA_ENTRADA", "HORA_SALIDA", "METODO_ENTRADA"]],
                      use_container_width=True, hide_index=True)
+
+    # Refresco automático REAL, sin navegar el navegador. Antes esto usaba
+    # window.parent.location.reload() por JS: recargaba la página completa y
+    # en este despliegue eso tumbaba la sesión de Streamlit (así fue como se
+    # cerró la sesión de Zamorano). st.rerun() vuelve a ejecutar el script
+    # sobre la MISMA conexión — refresca el QR y su color sin tocar la sesión.
+    import time
+    time.sleep(SEGUNDOS_VENTANA)
+    st.rerun()
 
 
 # ─────────────────────────────────────────────
