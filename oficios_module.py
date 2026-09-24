@@ -2383,57 +2383,83 @@ def render_oficios(deps: dict):
             st.caption("Sube el oficio ya firmado y sellado. El sistema lee el QR "
                        "y lo asocia solo. Si el PDF trae varios oficios, los separa.")
             es_acuse = st.checkbox("Son acuses sellados de recibido", key="of_acuse")
-            scan = st.file_uploader("Escaneo (PDF de uno o varios oficios, o imagen)",
-                                    type=["pdf", "jpg", "jpeg", "png"], key="of_file")
+            # Lote: varios archivos a la vez. Cada uno puede traer uno o varios
+            # oficios (se siguen separando por QR, igual que antes).
+            scans = st.file_uploader(
+                "Escaneos (puedes seleccionar varios PDF o imágenes a la vez)",
+                type=["pdf", "jpg", "jpeg", "png"], key="of_file",
+                accept_multiple_files=True) or []
 
-            if scan is not None and leer_subida(scan) is not None:
-                scan_bytes = scan.getvalue()
+            # El QR trae el token (o el ID, si se estampó antes de que
+            # existiera el token). Ambos se traducen al ID vía el Sheet.
+            mapa = {}
+            if "TOKEN" in df.columns:
+                mapa.update({t: i for t, i in zip(
+                    df["TOKEN"].astype(str).str.strip(),
+                    df["ID_OFICIO"].astype(str)) if t})
+            mapa.update({i.strip().upper(): i.strip()
+                         for i in df["ID_OFICIO"].astype(str)})
+
+            def _buscar(t):
+                return mapa.get(t) or mapa.get(t.strip().upper())
+
+            # (archivo, bytes, validas) por cada archivo con al menos un QR válido
+            lote, vistos, repetidos, sin_qr = [], set(), [], []
+            for scan in scans:
+                scan_bytes = leer_subida(scan)
+                if scan_bytes is None:
+                    continue
                 try:
-                    with st.spinner("Buscando códigos QR..."):
+                    with st.spinner(f"Buscando códigos QR en {scan.name}..."):
                         marcas = leer_qr_pdf(scan_bytes, scan.name)
                 except Exception as e:
                     marcas = []
-                    _error_amable(e, "al leer el QR")
+                    _error_amable(e, f"al leer el QR de {scan.name}")
 
-                # El QR trae el token (o el ID, si se estampó antes de que
-                # existiera el token). Ambos se traducen al ID vía el Sheet.
-                mapa = {}
-                if "TOKEN" in df.columns:
-                    mapa.update({t: i for t, i in zip(
-                        df["TOKEN"].astype(str).str.strip(),
-                        df["ID_OFICIO"].astype(str)) if t})
-                mapa.update({i.strip().upper(): i.strip()
-                             for i in df["ID_OFICIO"].astype(str)})
-
-                def _buscar(t):
-                    return mapa.get(t) or mapa.get(t.strip().upper())
-
-                validas = [(p, _buscar(t)) for p, t in marcas if _buscar(t)]
                 huerfanas = [t for _, t in marcas if not _buscar(t)]
-
                 if huerfanas:
-                    st.error("Se leyó el QR, pero su código no aparece en el "
-                             "minutario: " + ", ".join(f"`{h}`" for h in huerfanas))
-                    st.caption("Busca ese código en la columna TOKEN del Sheet. "
-                               "Si no está, el oficio se registró sin token o "
-                               "el PDF se estampó con otra versión del sistema.")
+                    st.error(f"**{scan.name}**: se leyó el QR, pero su código no "
+                             "aparece en el minutario: " +
+                             ", ".join(f"`{h}`" for h in huerfanas))
+                validas = []
+                for pag, t in marcas:
+                    id_of = _buscar(t)
+                    if not id_of:
+                        continue
+                    # El mismo oficio en dos archivos del lote: se guarda el
+                    # primero; sin esto el segundo pisaría al primero en silencio.
+                    if id_of in vistos:
+                        repetidos.append(f"{id_of} ({scan.name})")
+                        continue
+                    vistos.add(id_of)
+                    validas.append((pag, id_of))
+                if validas:
+                    lote.append((scan, scan_bytes, validas))
+                elif not marcas:  # solo si no se leyó NINGÚN código (no por repetidos)
+                    sin_qr.append(scan.name)
 
-                if not validas:
-                    st.warning("No se detectó ningún QR del minutario. Verifica que el "
-                               "escaneo sea de al menos 200 dpi y que el QR esté completo.")
-                else:
-                    st.success(f"Detectados: {', '.join(i for _, i in validas)}")
-                    if st.button("Guardar escaneos", type="primary", key="of_btn_esc"):
+            if sin_qr:
+                st.warning("Sin QR del minutario (revisa que el escaneo sea de al menos "
+                           "200 dpi y que el QR esté completo): " + ", ".join(sin_qr))
+            if repetidos:
+                st.warning("Oficios repetidos dentro del lote; se guarda solo el primero: "
+                           + ", ".join(repetidos))
+
+            if lote:
+                total = sum(len(v) for _, _, v in lote)
+                st.success(f"Detectados {total} oficio(s) en {len(lote)} archivo(s): "
+                           + ", ".join(i for _, _, v in lote for _, i in v))
+                if st.button("Guardar escaneos", type="primary", key="of_btn_esc"):
+                    estado = "ACUSE" if es_acuse else "ESCANEADO"
+                    sufijo = "ACUSE" if es_acuse else "FIRMADO"
+                    barra, n = st.progress(0.0), 0
+                    for scan, scan_bytes, validas in lote:
                         es_pdf = scan.name.lower().endswith(".pdf")
                         piezas = (partir_pdf_por_qr(scan_bytes, validas) if es_pdf
                                   else {validas[0][1]: scan_bytes})
-                        estado = "ACUSE" if es_acuse else "ESCANEADO"
-                        sufijo = "ACUSE" if es_acuse else "FIRMADO"
                         mime = "application/pdf" if es_pdf else (scan.type or "image/png")
                         ext = "pdf" if es_pdf else scan.name.split(".")[-1].lower()
-
-                        barra = st.progress(0.0)
-                        for n, (id_of, contenido) in enumerate(piezas.items(), start=1):
+                        for id_of, contenido in piezas.items():
                             url = subir_bytes_drive(
                                 contenido, f"{id_of}_{sufijo}.{ext}", mime)
                             if url.startswith("ERROR:"):
@@ -2447,8 +2473,9 @@ def render_oficios(deps: dict):
                                 })
                                 _registrar_log(get_client, id_of, estado, url)
                                 st.write(f"✅ {id_of} → [Drive]({url})")
-                            barra.progress(n / len(piezas))
-                        st.cache_data.clear()
+                            n += 1
+                            barra.progress(min(n / total, 1.0))
+                    st.cache_data.clear()
 
     # ── Consultar ────────────────────────────
     with tab_cons:

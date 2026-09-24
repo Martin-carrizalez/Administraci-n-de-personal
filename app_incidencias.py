@@ -672,6 +672,20 @@ def dias_economicos_usados(rfc: str, solicitudes_df: pd.DataFrame) -> int:
             pass
     return total
 
+def saldo_economicos_rfc(rfc: str):
+    """(disponibles, totales) con la MISMA fórmula que vista_empleado, para
+    que coordinador y empleado vean el mismo número. None si el RFC no está
+    en la tab Empleados (no se inventa un saldo)."""
+    try:
+        emp = cargar_empleados()
+        fila = emp[emp["RFC"].astype(str).str.upper().str.strip() == str(rfc).upper().strip()]
+        if fila.empty:
+            return None
+        totales = int(fila["DIAS TOTALES"].iloc[0])
+        return totales - dias_economicos_usados(rfc, cargar_solicitudes_eco()), totales
+    except Exception:
+        return None
+
 def actualizar_dias_disponibles_sheet(rfc_objetivo: str = None):
     """Recalcula DIAS DISPONIBLES (= DIAS TOTALES - usados aprobados) y lo escribe
     en la hoja Empleados del Sheet de económicos.
@@ -1434,6 +1448,58 @@ def render_oficios():
 
 
 
+def _selector_fechas(prefijo: str, etq_ini: str, etq_fin: str):
+    """Rango continuo o días sueltos, igual que días económicos, para los
+    tipos de incidencia que abarcan días (comisión, reposición). Devuelve
+    (fechas_lista, fi, ff, dias_hab, es_suelto) o None si falta capturar.
+    En días sueltos, quien llama agrega "Fechas: ..." al motivo: el
+    checador justifica SOLO esos días, no el rango inicio→fin."""
+    festivos = cargar_festivos()
+    festivos_set = festivos_a_set(festivos)
+    modo = st.radio("Selección de fechas", ["Rango continuo", "Días sueltos"],
+                    horizontal=True, key=f"{prefijo}_modo")
+    if modo == "Rango continuo":
+        c1, c2 = st.columns(2)
+        with c1:
+            fi = st.date_input(etq_ini, value=None, format="DD/MM/YYYY", key=f"{prefijo}_fi")
+        with c2:
+            ff = st.date_input(etq_fin, value=None, format="DD/MM/YYYY", key=f"{prefijo}_ff")
+        if not fi or not ff:
+            st.info("Selecciona las fechas de tu solicitud para continuar.")
+            return None
+        if ff < fi:
+            st.error("La fecha fin no puede ser anterior a la fecha inicio.")
+            return None
+        dias_hab = dias_habiles_entre(fi, ff, festivos)
+        st.caption(f"Días hábiles: **{dias_hab}**")
+        return [], fi, ff, dias_hab, False
+    # Días sueltos: 10 hábiles hacia atrás (comisiones que se registran
+    # después) y 60 hacia adelante.
+    NOMBRES_DIA = ["Lun", "Mar", "Mié", "Jue", "Vie"]
+    MESES = ["", "Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+    atras, d = [], date.today() - timedelta(days=1)
+    while len(atras) < 10:
+        if d.weekday() < 5 and d not in festivos_set:
+            atras.append(d)
+        d -= timedelta(days=1)
+    adelante, d = [], date.today()
+    while len(adelante) < 60:
+        if d.weekday() < 5 and d not in festivos_set:
+            adelante.append(d)
+        d += timedelta(days=1)
+    st.caption("Marca cada día que aplica.")
+    fechas, cols = [], st.columns(5)
+    for i, dia in enumerate(sorted(atras) + adelante):
+        if cols[i % 5].checkbox(f"{NOMBRES_DIA[dia.weekday()]} {dia.day}/{MESES[dia.month]}",
+                                key=f"{prefijo}_dia_{dia}"):
+            fechas.append(dia)
+    if not fechas:
+        st.info("Selecciona al menos un día.")
+        return None
+    st.caption(f"Días seleccionados: **{len(fechas)}**")
+    return sorted(fechas), min(fechas), max(fechas), len(fechas), True
+
+
 def vista_empleado():
     rfc      = st.session_state["rfc"]
     nombre   = st.session_state["nombre"]
@@ -1819,21 +1885,14 @@ def vista_empleado():
 
     # ── COMISIÓN ────────────────────────────────
     elif tipo == "COM":
-        col1, col2 = st.columns(2)
-        with col1:
-            fi = st.date_input("Fecha inicio comisión", value=None, format="DD/MM/YYYY")
-        with col2:
-            ff = st.date_input("Fecha fin comisión",    value=None, format="DD/MM/YYYY")
-        if not fi or not ff:
-            st.info("Selecciona las fechas de tu solicitud para continuar.")
+        _sel = _selector_fechas("com", "Fecha inicio comisión", "Fecha fin comisión")
+        if _sel is None:
             return
-        if ff < fi:
-            st.error("La fecha fin no puede ser anterior a la fecha inicio.")
-        else:
-            festivos = cargar_festivos()
-            dias_hab = dias_habiles_entre(fi, ff, festivos)
-            st.caption(f"Días de comisión: **{dias_hab}**")
+        _fechas_com, fi, ff, dias_hab, _suelto_com = _sel
         motivo      = st.text_area("Motivo de la comisión", max_chars=300)
+        if _suelto_com:
+            motivo = (f"{motivo} | Fechas: " if motivo else "Fechas: ") + \
+                     ", ".join(f.strftime("%d/%m/%Y") for f in _fechas_com)
         archivo_anexo = st.file_uploader("Adjuntar constancia/oficio (opcional)", type=["pdf","png","jpg","jpeg"])
         tiene_anexo   = archivo_anexo is not None
         if not tiene_anexo:
@@ -1843,21 +1902,10 @@ def vista_empleado():
     # ── REPOSICIÓN DE GUARDIAS ──────────────────
     elif tipo == "RGU":
         st.info("Captura los días que repones a cambio de guardia(s) previamente realizada(s).")
-        col1, col2 = st.columns(2)
-        with col1:
-            fi = st.date_input("Fecha inicio reposición", value=None, format="DD/MM/YYYY")
-        with col2:
-            ff = st.date_input("Fecha fin reposición", value=None, format="DD/MM/YYYY")
-        if not fi or not ff:
-            st.info("Selecciona las fechas de tu solicitud para continuar.")
+        _sel = _selector_fechas("rgu", "Fecha inicio reposición", "Fecha fin reposición")
+        if _sel is None:
             return
-        dias_hab = 0
-        if ff < fi:
-            st.error("La fecha fin no puede ser anterior a la fecha inicio.")
-        else:
-            festivos = cargar_festivos()
-            dias_hab = dias_habiles_entre(fi, ff, festivos)
-            st.caption(f"Días a reponer: **{dias_hab}**")
+        _fechas_rgu, fi, ff, dias_hab, _suelto_rgu = _sel
         fecha_guardia = st.text_input(
             "Fecha(s) de la guardia que repones",
             placeholder="27/04/2026",
@@ -1869,6 +1917,8 @@ def vista_empleado():
         motivo_rgu = f"Reposición de guardia | Guardia repuesta: {fecha_guardia}".strip()
         if motivo:
             motivo_rgu += f" | {motivo}"
+        if _suelto_rgu:  # al FINAL: el checador lee todo lo que sigue a "Fechas:"
+            motivo_rgu += " | Fechas: " + ", ".join(f.strftime("%d/%m/%Y") for f in _fechas_rgu)
         if dias_hab == 0:
             st.warning("Selecciona al menos un día hábil para reponer.")
             return
@@ -2726,6 +2776,10 @@ def vista_directorio():
                 return v
         return ("#F4F6F9", "#444")
 
+    _rfc_dir = str(st.session_state.get("rfc", "")).upper().strip()
+    _ve_horarios_todos = (st.session_state.get("rol") == "admin"
+                          or _rfc_dir in _rfcs_secret("rfcs_horarios_todos"))
+
     def tarjeta(row):
         bg, tc = color(row["AREA"])
         ini = (str(row["NOMBRE"])[0] + (str(row["NOMBRE"]).split()[1][0] if len(str(row["NOMBRE"]).split()) > 1 else "")).upper()
@@ -2749,7 +2803,9 @@ def vista_directorio():
         # Horario: SOLO admin lo ve aquí (las 10 áreas, no Centros de
         # Maestros). Las 5 secretarias de rfcs_directorio_cm siguen viendo
         # horario únicamente en la sección de Centros de Maestros.
-        if st.session_state.get("rol") == "admin":
+        # Horarios de las 10 áreas: admin + RFCs del secret rfcs_horarios_todos
+        # (Pichardo y Nadia). En secrets, nunca en el código.
+        if _ve_horarios_todos:
             _horario_partes = []
             for _dia, (_col_e, _col_s) in COLUMNAS_HORARIO.items():
                 _ent = str(row.get(_col_e, "")).strip()
@@ -2840,7 +2896,7 @@ def vista_directorio():
     except Exception:
         _rfcs_cm = []
     _rfc_actual = str(st.session_state.get("rfc", "")).upper().strip()
-    _permiso_cm = (st.session_state.get("rol") == "admin") or (_rfc_actual and _rfc_actual in _rfcs_cm)
+    _permiso_cm = (st.session_state.get("rol") == "admin") or (_rfc_actual and _rfc_actual in _rfcs_cm) or _ve_horarios_todos
 
     if _permiso_cm:
         st.markdown("---")
@@ -3180,6 +3236,7 @@ if _aqr_mod is not None:
                                                st.secrets.get("sheet_checador_id", "")),
             subir_archivo_drive=subir_archivo_drive,
             carpeta_asistencia_cm=DRIVE_ASISTENCIA_CM_FOLDER,
+            saldo_economicos=saldo_economicos_rfc,
         )
     except Exception as _e_cfg:
         _ERROR_AQR = f"no se pudo configurar: {_e_cfg}"

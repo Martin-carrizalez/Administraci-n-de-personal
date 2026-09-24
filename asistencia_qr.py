@@ -59,14 +59,18 @@ MINIMO_JORNADA_MIN = 45
 
 
 def configurar(get_client, error_amable, cargar_padron, sheet_asistencia_id,
-              subir_archivo_drive=None, carpeta_asistencia_cm=None):
-    """Llamar UNA vez desde app_incidencias, después de definir dependencias."""
+              subir_archivo_drive=None, carpeta_asistencia_cm=None,
+              saldo_economicos=None):
+    """Llamar UNA vez desde app_incidencias, después de definir dependencias.
+    saldo_economicos(rfc) -> (disponibles, totales) o None si no está en
+    la tab Empleados; es la MISMA fórmula que ve el empleado en su tablero."""
     _deps["get_client"] = get_client
     _deps["error_amable"] = error_amable
     _deps["cargar_padron"] = cargar_padron
     _deps["sheet_id"] = sheet_asistencia_id
     _deps["subir_archivo_drive"] = subir_archivo_drive
     _deps["carpeta_asistencia_cm"] = carpeta_asistencia_cm
+    _deps["saldo_economicos"] = saldo_economicos
 
 
 def _client():
@@ -565,9 +569,12 @@ def _tab_asistencia_mensual(centro: str, rfc_actual: str):
 
     hoy = _ahora()
     hist = _cargar_asistencia_mensual(centro)
-    subidos = set(hist["PERIODO"].astype(str)) if not hist.empty else set()
+    # .strip().lower(): registros viejos quedaron como "abril 2026" (minúsculas)
+    # y el selector genera "Abril 2026" — sin normalizar nunca coincidían
+    # y el banner decía que faltaba todo (caso Galván Marín).
+    subidos = {str(p).strip().lower() for p in hist["PERIODO"]} if not hist.empty else set()
     esperados = _meses_esperados(hoy.year, hoy.month)
-    faltantes = [m for m in esperados if m not in subidos]
+    faltantes = [m for m in esperados if m.strip().lower() not in subidos]
 
     # Banner de estatus — esto es lo que pediste: que de un vistazo sepan
     # qué les falta, sin tener que comparar la lista de abajo a mano.
@@ -584,9 +591,9 @@ def _tab_asistencia_mensual(centro: str, rfc_actual: str):
     periodo = st.selectbox(
         "Periodo que cubre esta lista", esperados,
         index=len(esperados) - 1, key="aqr_periodo_mensual",
-        format_func=lambda m: f"{m}  ✅ (ya subido)" if m in subidos else m,
+        format_func=lambda m: f"{m}  ✅ (ya subido)" if m.strip().lower() in subidos else m,
     )
-    ya_existe = periodo in subidos
+    ya_existe = periodo.strip().lower() in subidos
     confirmar_duplicado = False
     if ya_existe:
         st.warning(f"Ya hay una lista subida para **{periodo}**. Solo continúa si es "
@@ -602,6 +609,14 @@ def _tab_asistencia_mensual(centro: str, rfc_actual: str):
 
     if puede_subir and st.button("📎 Subir lista de asistencia", type="primary",
                                   use_container_width=True, key="aqr_btn_mensual"):
+        # Revalidar SIN caché (dura 60 s): así se dejaron pasar los duplicados
+        # de febrero/marzo/abril de Galván, subidos con 1 minuto de diferencia.
+        _cargar_asistencia_mensual.clear()
+        _fresco = _cargar_asistencia_mensual(centro)
+        _ya_fresco = {str(p).strip().lower() for p in _fresco["PERIODO"]} if not _fresco.empty else set()
+        if periodo.strip().lower() in _ya_fresco and not confirmar_duplicado:
+            st.error(f"Ya existe una lista de {periodo}. Recarga la página antes de reintentar.")
+            return
         with st.spinner("Subiendo a la unidad compartida..."):
             nombre_arch = f"Asistencia_{centro}_{periodo}_{rfc_actual}.pdf".replace(" ", "_")
             url = _deps["subir_archivo_drive"](archivo, nombre_arch, _deps["carpeta_asistencia_cm"])
@@ -640,11 +655,23 @@ def vista_coordinador():
     with t1:
         aseg = asesores_de(centro)
         if not aseg.empty:
-            with st.expander("👥 Ver horarios registrados de tu equipo"):
-                st.caption("Si algún horario está mal o incompleto, contesta el correo "
+            with st.expander("👥 Tu equipo: horarios y días económicos"):
+                st.caption("Si algún horario o saldo está mal, contesta el correo "
                           "de RH con el dato correcto — desde aquí no se puede editar.")
                 for _, _a in aseg.iterrows():
-                    st.markdown(f"**{_a['NOMBRE']}** — {_formato_horario(_a)}")
+                    # Saldo de días económicos: mismo cálculo que el tablero del
+                    # empleado (DIAS TOTALES − aprobados). Si no está en la tab
+                    # Empleados no se inventa un número: se dice que no hay registro.
+                    _eco = ""
+                    if _deps.get("saldo_economicos"):
+                        try:
+                            _s = _deps["saldo_economicos"](str(_a.get("RFC", "")))
+                            _eco = (f" · 📅 {_s[0]} de {_s[1]} días económicos disponibles"
+                                    if _s else " · 📅 sin registro de días económicos")
+                        except Exception:
+                            _eco = ""
+                    st.markdown(f"**{_a['NOMBRE']}**{_eco}")
+                    st.caption(f"🕒 {_formato_horario(_a)}")
 
         st.caption("Para quien no puede escanear: sin celular, sin batería, o "
                    "porque no maneja la aplicación. Queda constancia de quién "

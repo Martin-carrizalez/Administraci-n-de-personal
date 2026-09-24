@@ -247,8 +247,22 @@ def render_checador(deps):
                     d = r["FECHA_INICIO"]
                     f = r["FECHA_FIN"]
                     if pd.isna(d) or pd.isna(f): continue
+                    # Fechas salteadas: si el MOTIVO trae "Fechas: dd/mm/aaaa, ...",
+                    # solo esos días se justifican (mismo formato que ya se usa
+                    # en días económicos). Sin esta lista, una comisión de lunes
+                    # y jueves justificaba también martes y miércoles por rango.
+                    _dias_exactos = set()
+                    _mot_inc = str(r.get("MOTIVO", ""))
+                    if "Fechas:" in _mot_inc:
+                        for _fs in _mot_inc.split("Fechas:")[1].split(","):
+                            for _fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+                                try:
+                                    _dias_exactos.add(datetime.strptime(_fs.strip()[:10], _fmt).date())
+                                    break
+                                except Exception:
+                                    pass
                     while d <= f:
-                        if fi <= d.date() <= ff:
+                        if fi <= d.date() <= ff and (not _dias_exactos or d.date() in _dias_exactos):
                             if tipo == "COM":
                                 resultado.setdefault(rfc, {})[d.date()] = "Comisión"
                             elif tipo == "RGU":
