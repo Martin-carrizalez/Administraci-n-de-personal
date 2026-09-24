@@ -1334,14 +1334,33 @@ def login():
             st.error("Ingresa tu correo y RFC.")
             return
 
-        admin_correo = st.secrets.get("admin_correo", "")
-        admin_rfc    = st.secrets.get("admin_rfc", "")
-        if correo.lower() == admin_correo.lower() and rfc_input.upper() == admin_rfc.upper():
+        admin_correo   = st.secrets.get("admin_correo", "")
+        admin_rfc      = st.secrets.get("admin_rfc", "")
+        # Contraseña propia del admin (secret admin_password). Si existe, el RFC
+        # deja de servir como contraseña de admin: quien conozca el RFC no entra.
+        # Si no existe, se conserva el comportamiento anterior (correo + RFC).
+        admin_password = str(st.secrets.get("admin_password", ""))
+        es_correo_admin = bool(admin_correo) and correo.strip().lower() == admin_correo.strip().lower()
+        if admin_password:
+            import hmac as _hmac
+            clave_ok = _hmac.compare_digest(rfc_input.strip(), admin_password)  # respeta mayúsculas
+        else:
+            clave_ok = rfc_input.upper() == admin_rfc.upper()
+        if es_correo_admin and clave_ok:
             st.session_state["rol"]    = "admin"
             st.session_state["correo"] = correo
-            st.session_state["rfc"]    = rfc_input.upper()
+            # Siempre el RFC real, nunca la contraseña: el resto de la app
+            # usa este valor para permisos y registros.
+            st.session_state["rfc"]    = admin_rfc.upper()
             st.session_state["nombre"] = "Administrador RH"
             st.rerun()
+            return
+
+        # Con contraseña de admin activa, el RFC del admin NO puede entrar por la
+        # ruta de empleado (si no, quien conozca tu RFC entraría como "Ángel").
+        # Mensaje genérico a propósito: no revela que ese RFC es el del admin.
+        if admin_password and admin_rfc and rfc_input.strip().upper() == admin_rfc.upper():
+            st.error("RFC no encontrado. Verifica tus datos.")
             return
 
         usuarios  = cargar_usuarios()
