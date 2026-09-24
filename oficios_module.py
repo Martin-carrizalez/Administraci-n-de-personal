@@ -1077,6 +1077,51 @@ def actualizar_filas_lote(get_client, cambios_por_id: dict) -> tuple[int, list[s
     return len(cambios_por_id) - len(errores), errores
 
 
+def _actualizar_filas_lote(get_client, cambios_por_id: dict) -> set:
+    """Actualiza MUCHOS oficios con 3 llamadas a Google en total (abrir,
+    leer, escribir), sin importar si son 2 o 200. _actualizar_fila hace esas
+    llamadas por CADA oficio: con 40 escaneos rebasaba la cuota (~60
+    lecturas/min) y tumbaba la app con APIError. Devuelve los IDs escritos."""
+    from gspread.cell import Cell
+    sh = _abrir_sheet(get_client)
+    ws = sh.worksheet(TAB_OFICIOS)
+    valores = ws.get_all_values()  # una sola lectura: encabezados + filas
+    if not valores:
+        return set()
+    headers = valores[0]
+    if "ID_OFICIO" not in headers:
+        return set()
+    col_id = headers.index("ID_OFICIO")
+    celdas, escritos = [], set()
+    for i, fila in enumerate(valores[1:], start=2):
+        id_fila = fila[col_id] if col_id < len(fila) else ""
+        if id_fila in cambios_por_id:
+            for col, valor in cambios_por_id[id_fila].items():
+                if col in headers:
+                    celdas.append(Cell(i, headers.index(col) + 1, valor))
+            escritos.add(id_fila)
+    if celdas:
+        ws.update_cells(celdas, value_input_option="USER_ENTERED")
+    st.cache_data.clear()
+    return escritos
+
+
+def _registrar_log_lote(get_client, entradas: list):
+    """Bitácora en UNA sola escritura. entradas: [(id_oficio, accion, detalle)]."""
+    if not entradas:
+        return
+    try:
+        sh = _abrir_sheet(get_client)
+        ws = sh.worksheet(TAB_LOG)
+        rfc = str(st.session_state.get("rfc", "")).upper()
+        nombre = st.session_state.get("nombre", "")
+        ws.append_rows([[_ahora(), i, a, rfc, nombre, d] for i, a, d in entradas],
+                       value_input_option="USER_ENTERED")
+    except Exception:
+        # La bitácora nunca debe tumbar la operación principal.
+        pass
+
+
 def _actualizar_fila(get_client, id_oficio: str, cambios: dict) -> bool:
     """Actualiza celdas por nombre de columna, sin asumir el orden del Sheet."""
     from gspread.cell import Cell
@@ -2453,6 +2498,8 @@ def render_oficios(deps: dict):
                     estado = "ACUSE" if es_acuse else "ESCANEADO"
                     sufijo = "ACUSE" if es_acuse else "FIRMADO"
                     barra, n = st.progress(0.0), 0
+                    cambios, bitacora, links = {}, [], {}
+                    # Paso 1: subir todo a Drive (su cuota es aparte de Sheets).
                     for scan, scan_bytes, validas in lote:
                         es_pdf = scan.name.lower().endswith(".pdf")
                         piezas = (partir_pdf_por_qr(scan_bytes, validas) if es_pdf
@@ -2465,16 +2512,38 @@ def render_oficios(deps: dict):
                             if url.startswith("ERROR:"):
                                 st.error(f"{id_of}: {url}")
                             else:
-                                _actualizar_fila(get_client, id_of, {
+                                cambios[id_of] = {
                                     "URL_ESCANEO": url,
                                     "SHA256_ESCANEO": sha256_bytes(contenido),
                                     "FECHA_ESCANEO": _hoy(),
                                     "ESTADO": estado,
-                                })
-                                _registrar_log(get_client, id_of, estado, url)
-                                st.write(f"✅ {id_of} → [Drive]({url})")
+                                }
+                                bitacora.append((id_of, estado, url))
+                                links[id_of] = url
                             n += 1
-                            barra.progress(min(n / total, 1.0))
+                            barra.progress(min(n / total, 1.0) * 0.9)
+                    # Paso 2: UNA escritura al minutario y UNA a la bitácora.
+                    if cambios:
+                        try:
+                            with st.spinner(f"Registrando {len(cambios)} oficio(s) en el minutario..."):
+                                escritos = _actualizar_filas_lote(get_client, cambios)
+                            _registrar_log_lote(get_client,
+                                                [b for b in bitacora if b[0] in escritos])
+                            barra.progress(1.0)
+                            for id_of in sorted(escritos):
+                                st.write(f"✅ {id_of} → [Drive]({links[id_of]})")
+                            no_hallados = sorted(set(cambios) - escritos)
+                            if no_hallados:
+                                st.warning("Subidos a Drive pero no encontrados en el "
+                                           "minutario: " + ", ".join(no_hallados))
+                        except Exception as e:
+                            # Los archivos YA están en Drive: se listan para no perderlos.
+                            _error_amable(e, "al registrar los escaneos en el minutario")
+                            st.warning("Los archivos sí se subieron a Drive, pero no se "
+                                       "registraron en el Sheet. Espera un minuto y vuelve a "
+                                       "guardar el lote. Links subidos:")
+                            for id_of, url in sorted(links.items()):
+                                st.write(f"• {id_of} → [Drive]({url})")
                     st.cache_data.clear()
 
     # ── Consultar ────────────────────────────
