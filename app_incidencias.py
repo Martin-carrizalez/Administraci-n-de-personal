@@ -1934,7 +1934,10 @@ def vista_empleado():
             st.info("Selecciona la fecha en que aplica el cambio para continuar.")
             return
         motivo      = st.text_area("Motivo del cambio de horario", max_chars=300)
-        tiene_anexo = st.checkbox("¿Traerás documento de soporte (oficio, etc.)?")
+        # Antes solo preguntaba "¿Traerás documento?" sin dejar subirlo.
+        archivo_anexo = st.file_uploader("Adjuntar documento de soporte (oficio, etc.) (opcional)",
+                                         type=["pdf","png","jpg","jpeg"], key="cho_anexo")
+        tiene_anexo = archivo_anexo is not None
         st.markdown("**Horario solicitado:**")
         st.caption("Deja en blanco los días que no labora.")
         horario_solicitado = {}
@@ -1955,7 +1958,7 @@ def vista_empleado():
         )
         motivo_completo = f"Horario solicitado: {horario_str} | Motivo: {motivo}".strip()
         enviar_solicitud(rfc, nombre, tipo, fecha_inicio_cho, fecha_inicio_cho, 0, 0.0,
-                         motivo_completo, tiene_anexo, incidencias, jefe_inmediato=jefe_pdf)
+                         motivo_completo, tiene_anexo, incidencias, archivo_anexo, jefe_inmediato=jefe_pdf)
 
     # ── CUMPLEAÑOS (oculto hasta autorización) ──
     if HABILITAR_CUMPLEANOS and tipo == "CUM":
@@ -2067,6 +2070,13 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
         if archivo_anexo is not None:
             with st.spinner("Subiendo anexo a Drive..."):
                 link_anexo = subir_anexo_drive(archivo_anexo, folio, rfc)
+            # Si Drive falla, la función devuelve "ERROR: ...". Antes ese texto
+            # se guardaba en LINK_ANEXO como si fuera un link válido.
+            if link_anexo.startswith("ERROR:"):
+                st.warning("La solicitud se registrará, pero el anexo NO se pudo subir "
+                           "a Drive. Entrégalo en físico en RH o vuelve a intentarlo después.")
+                link_anexo = ""
+                archivo_anexo = None
         datos = {
             "folio":           folio,
             "rfc":             rfc,
