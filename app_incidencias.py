@@ -2784,6 +2784,16 @@ def vista_directorio():
     _mask_cm = df["AREA"].astype(str).str.contains("Centro de Maestros", case=False, na=False)
     df_cm = df[_mask_cm].copy()
     df = df[~_mask_cm].copy()
+
+    # Contactos externos (Subsecretaría, etc.): solo admin y los RFC del secret
+    # rfcs_horarios_todos. Se agregan aquí y no en _directorio_unificado
+    # para que no lleguen al buscador de contacto de emergencia.
+    _rfc_ext = str(st.session_state.get("rfc", "")).upper().strip()
+    if (st.session_state.get("rol") == "admin"
+            or _rfc_ext in _rfcs_secret("rfcs_horarios_todos")):
+        _ext = cargar_directorio_externo()
+        if not _ext.empty:
+            df = pd.concat([df, _ext], ignore_index=True).fillna("")
     if st.session_state.get("rol") != "admin":
         mask_ocultar = (
             df["AREA"].astype(str).str.contains("Comisionado a otra|Oficinas centrales", case=False, na=False) | 
@@ -2900,7 +2910,10 @@ def vista_directorio():
         ORDEN_NORM = [_clave_icono(a) for a in ORDEN_AREAS]
 
         # Normalizar: si DEPARTAMENTO está vacío usar AREA como dept
-        df["DEPT_VISTA"] = df.apply(lambda r: r["DEPARTAMENTO"] if r["DEPARTAMENTO"] else r["AREA"], axis=1)
+        # Externos se agrupan por su oficina (AREA); su DEPARTAMENTO es el cargo.
+        df["DEPT_VISTA"] = df.apply(
+            lambda r: r["AREA"] if str(r.get("_EXTERNO", "")) == "SI"
+            else (r["DEPARTAMENTO"] if r["DEPARTAMENTO"] else r["AREA"]), axis=1)
 
         depts_en_datos = df["DEPT_VISTA"].unique().tolist()
         _pos = {d: (ORDEN_NORM.index(_clave_icono(d))
@@ -3042,6 +3055,27 @@ def padron_disponible() -> bool:
     """True si el padrón se puede leer y trae la columna de nombre."""
     p = cargar_padron()
     return (not p.empty) and _col(p, *ALIAS_PADRON["NOMBRE"]) is not None
+
+
+@st.cache_data(ttl=600)
+def cargar_directorio_externo() -> pd.DataFrame:
+    """Contactos de oficinas FUERA de la DFC (p. ej. Despacho de la
+    Subsecretaría de Atención al Magisterio). Vive en su propia tab
+    'Directorio_Externo' del Sheet del padrón y NO se mezcla con el padrón:
+    así no obtienen login, no aparecen en contacto de emergencia ni en
+    nómina. Solo se muestra en el directorio. Vacío si la tab no existe."""
+    try:
+        sh = get_client().open_by_key(st.secrets["sheet_padron_id"])
+        data = sh.worksheet("Directorio_Externo").get_all_records(numericise_ignore=["all"])
+        df = pd.DataFrame(data).fillna("")
+        for col in ("NOMBRE", "AREA", "DEPARTAMENTO", "EXTENSION", "CORREO"):
+            if col not in df.columns:
+                df[col] = ""
+        df = df[df["NOMBRE"].astype(str).str.strip() != ""].copy()
+        df["_EXTERNO"] = "SI"  # para agruparlos por su oficina, no por cargo
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 def _directorio_unificado():
