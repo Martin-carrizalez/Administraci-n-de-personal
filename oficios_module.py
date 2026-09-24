@@ -1250,6 +1250,65 @@ def registrar_acuse(get_client, datos: dict, archivo) -> tuple[bool, str]:
 
 
 
+def registrar_acuses_lote(get_client, anio: int, clave: str, filas: list) -> tuple:
+    """Registra varios acuses del mismo tipo y año con UNA escritura al Sheet
+    y UNA a la bitácora (registrar_acuse, uno por uno, rebasa la cuota con
+    decenas de archivos). filas: [{"archivo", "descripcion", "referencia",
+    "fecha_documento", "relacionado_con", "observaciones"}].
+    Devuelve (registrados [(id, nombre_archivo)], errores [str], links {nombre: url}).
+    Cada fila puede traer su propia "clave" (tipo) y, en lugar de "archivo",
+    "contenido" + "nombre" (documentos recortados de un PDF más grande)."""
+    # Consecutivo leído SIN caché justo antes de asignar: si alguien registró
+    # un acuse en los últimos minutos, no se repite su número.
+    st.cache_data.clear()
+    df_fresco = cargar_acuses(get_client)
+    siguiente = {}  # un consecutivo independiente por tipo
+    renglones, bitacora, registrados, errores, links = [], [], [], [], {}
+    for f in filas:
+        clave_f = f.get("clave", clave)
+        if clave_f not in siguiente:
+            siguiente[clave_f] = siguiente_consecutivo(df_fresco, anio, clave_f)
+        if "archivo" in f:
+            arch = f["archivo"]
+            contenido, nombre_f = arch.getvalue(), arch.name
+            mime = arch.type or "application/octet-stream"
+        else:
+            contenido, nombre_f = f["contenido"], f["nombre"]
+            mime = f.get("mime", "application/pdf")
+        if not contenido:
+            errores.append(f"{nombre_f}: el archivo se perdió al recargar; vuelve a subirlo.")
+            continue
+        id_acuse = f"DFC-{anio}-{clave_f}-{siguiente[clave_f]:04d}"
+        ext = nombre_f.split(".")[-1].lower()
+        url = subir_bytes_drive(contenido, f"{id_acuse}.{ext}", mime)
+        if url.startswith("ERROR:"):
+            errores.append(f"{nombre_f}: {url}")
+            continue  # no consume consecutivo si no se subió
+        renglones.append([
+            id_acuse, str(anio), str(siguiente[clave_f]).zfill(4), clave_f,
+            f.get("referencia", ""), f.get("fecha_documento", ""), _hoy(),
+            str(st.session_state.get("rfc", "")).upper(),
+            st.session_state.get("nombre", ""),
+            f.get("descripcion", ""), f.get("relacionado_con", ""),
+            url, sha256_bytes(contenido), f.get("observaciones", ""),
+        ])
+        bitacora.append((id_acuse, "ACUSE_REGISTRADO", f.get("descripcion", "")))
+        registrados.append((id_acuse, nombre_f))
+        links[nombre_f] = url
+        siguiente[clave_f] += 1
+    if renglones:
+        try:
+            sh = _abrir_sheet(get_client)
+            sh.worksheet(TAB_ACUSES).append_rows(renglones, value_input_option="USER_ENTERED")
+            st.cache_data.clear()
+            _registrar_log_lote(get_client, bitacora)
+        except Exception as e:
+            # Los archivos YA están en Drive; se devuelven sus links para no perderlos.
+            errores.append(f"Se subieron a Drive pero NO se registraron en el Sheet: {e}")
+            registrados = []
+    return registrados, errores, links
+
+
 def ficha_trazabilidad(get_client, id_oficio: str) -> bytes:
     """Hoja de una página con todo el rastro de un oficio, para presentar
     cuando alguien cuestiona su procedencia. Prioriza lo que una persona
@@ -2220,6 +2279,203 @@ def _tab_historico(get_client):
                 st.error(res)
 
 
+def _alta_acuses_lote(get_client, df_acu: pd.DataFrame):
+    """Varios acuses del mismo tipo y año: se suben todos los archivos, cada
+    uno queda como una fila editable (descripción prellenada con el nombre
+    del archivo) y se registran juntos con una sola escritura al Sheet."""
+    c1, c2 = st.columns([2, 1])
+    tipo_nom = c1.selectbox("Tipo de documento (aplica a todos)",
+                            options=list(TIPOS_ACUSE.keys()), key="acl_tipo")
+    clave = TIPOS_ACUSE[tipo_nom]
+    anio = int(c2.number_input("Año", min_value=2020, max_value=2100,
+                               value=datetime.now(TZ).year, step=1, key="acl_anio"))
+    archivos = st.file_uploader("Escaneos de los acuses (selecciona varios a la vez)",
+                                type=["pdf", "jpg", "jpeg", "png"],
+                                accept_multiple_files=True, key="acl_files") or []
+    if not archivos:
+        st.caption("Selecciona los archivos con Ctrl (o Shift para un rango), "
+                   "o arrástralos todos juntos al recuadro.")
+        return
+
+    prox = siguiente_consecutivo(df_acu, anio, clave)
+    fecha_def = datetime.now(TZ).date()
+    base = pd.DataFrame([{
+        "Archivo": a.name,
+        "Se registrará como": f"DFC-{anio}-{clave}-{prox + i:04d}",
+        "Descripción": a.name.rsplit(".", 1)[0].replace("_", " "),
+        "Fecha del documento": fecha_def,
+        "Referencia externa": "",
+        "Relacionado con": "",
+        "Observaciones": "",
+    } for i, a in enumerate(archivos)])
+    st.caption("Revisa y corrige cada fila antes de registrar. La descripción es obligatoria.")
+    editado = st.data_editor(
+        base, key="acl_tabla", hide_index=True, use_container_width=True,
+        disabled=["Archivo", "Se registrará como"],
+        column_config={"Fecha del documento": st.column_config.DateColumn(format="DD/MM/YYYY")})
+
+    vacias = editado[editado["Descripción"].astype(str).str.strip() == ""]
+    if not vacias.empty:
+        st.warning("Falta la descripción en: " + ", ".join(vacias["Archivo"]))
+    if st.button(f"Registrar {len(archivos)} acuse(s)", type="primary",
+                 key="acl_btn", disabled=not vacias.empty):
+        por_nombre = {a.name: a for a in archivos}
+        filas = []
+        for _, r in editado.iterrows():
+            fdoc = r["Fecha del documento"]
+            filas.append({
+                "archivo": por_nombre[r["Archivo"]],
+                "descripcion": str(r["Descripción"]).strip(),
+                "referencia": str(r["Referencia externa"] or "").strip(),
+                "fecha_documento": fdoc.strftime("%Y-%m-%d") if hasattr(fdoc, "strftime") else str(fdoc or ""),
+                "relacionado_con": str(r["Relacionado con"] or "").strip(),
+                "observaciones": str(r["Observaciones"] or "").strip(),
+            })
+        with st.spinner(f"Resguardando {len(filas)} acuse(s)..."):
+            registrados, errores, links = registrar_acuses_lote(get_client, anio, clave, filas)
+        for e in errores:
+            st.error(e)
+        if registrados:
+            st.success(f"Registrados {len(registrados)} acuse(s).")
+            for id_ac, nombre in registrados:
+                st.write(f"✅ {id_ac} ← {nombre}")
+        elif links:
+            st.warning("Links de lo que sí se subió a Drive (para no perderlo):")
+            for nombre, url in links.items():
+                st.write(f"• {nombre} → [Drive]({url})")
+
+
+def _parsear_paginas(texto: str, n_pag: int):
+    """'1-3, 5' -> [0, 1, 2, 4] (índices base 0). Devuelve (lista, error)."""
+    paginas = []
+    for parte in str(texto or "").replace(" ", "").split(","):
+        if not parte:
+            continue
+        try:
+            if "-" in parte:
+                a, b = (int(x) for x in parte.split("-", 1))
+            else:
+                a = b = int(parte)
+        except ValueError:
+            return [], f"'{parte}' no es una página válida (usa formato 1-3, 5)"
+        if a < 1 or b > n_pag or a > b:
+            return [], f"'{parte}' está fuera del PDF (tiene {n_pag} páginas)"
+        paginas.extend(range(a - 1, b))
+    if not paginas:
+        return [], "no indica ninguna página"
+    return sorted(set(paginas)), ""
+
+
+def _extraer_paginas(pdf_bytes: bytes, paginas: list) -> bytes:
+    """Nuevo PDF solo con las páginas indicadas (índices base 0)."""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    nuevo = pymupdf.open()
+    try:
+        for p in paginas:
+            nuevo.insert_pdf(doc, from_page=p, to_page=p)
+        return nuevo.tobytes()
+    finally:
+        nuevo.close()
+        doc.close()
+
+
+def _alta_acuses_separar_pdf(get_client, df_acu: pd.DataFrame):
+    """Un PDF con varios documentos de distinto tipo: cada fila de la tabla
+    es un acuse con sus páginas. Las páginas que no se asignen a ninguna
+    fila se IGNORAN (no se guardan en ningún lado)."""
+    if pymupdf is None:
+        st.error(f"Separar PDFs requiere PyMuPDF: {_ERROR_PDF}")
+        return
+    anio = int(st.number_input("Año", min_value=2020, max_value=2100,
+                               value=datetime.now(TZ).year, step=1, key="acs_anio"))
+    arch = st.file_uploader("PDF con varios documentos", type=["pdf"], key="acs_file")
+    if arch is None:
+        return
+    pdf_bytes = leer_subida(arch)
+    if not pdf_bytes:
+        return
+    try:
+        _d = pymupdf.open(stream=pdf_bytes, filetype="pdf"); n_pag = _d.page_count; _d.close()
+    except Exception as e:
+        st.error(f"No se pudo abrir el PDF: {e}")
+        return
+
+    col_tabla, col_vista = st.columns([3, 2])
+    with col_vista:
+        st.caption(f"Este PDF tiene **{n_pag}** páginas. Revísalas aquí:")
+        _visor_documento(pdf_bytes, arch.name, "acs")
+    with col_tabla:
+        st.caption("Agrega una fila por cada documento que SÍ quieres guardar. "
+                   "Páginas: `1-3` o `5` o `2, 4-6`. Lo que no pongas se ignora.")
+        tipos = list(TIPOS_ACUSE.keys())
+        base = pd.DataFrame([{"Páginas": "", "Tipo": tipos[0], "Descripción": "",
+                              "Fecha del documento": datetime.now(TZ).date(),
+                              "Referencia externa": "", "Relacionado con": "",
+                              "Observaciones": ""}])
+        tabla = st.data_editor(
+            base, key="acs_tabla", num_rows="dynamic", hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Tipo": st.column_config.SelectboxColumn(options=tipos, required=True),
+                "Fecha del documento": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            })
+
+    # Validación: páginas legibles, sin repetirse entre documentos, con descripción
+    tabla = tabla[tabla["Páginas"].astype(str).str.strip() != ""]
+    errores, usadas, docs = [], {}, []
+    for n, (_, r) in enumerate(tabla.iterrows(), start=1):
+        pags, err = _parsear_paginas(r["Páginas"], n_pag)
+        if err:
+            errores.append(f"Fila {n}: {err}")
+            continue
+        for p in pags:
+            if p in usadas:
+                errores.append(f"Fila {n}: la página {p+1} ya está en la fila {usadas[p]}")
+            usadas.setdefault(p, n)
+        if not str(r["Descripción"] or "").strip():
+            errores.append(f"Fila {n}: falta la descripción")
+        docs.append((pags, r))
+
+    if tabla.empty:
+        st.info("Llena al menos una fila con las páginas del primer documento a guardar.")
+        return
+    ignoradas = [str(p + 1) for p in range(n_pag) if p not in usadas]
+    if ignoradas:
+        st.caption(f"🚫 Se ignorarán las páginas: {', '.join(ignoradas)}")
+    for e in errores:
+        st.warning(e)
+
+    if st.button(f"Registrar {len(docs)} documento(s)", type="primary",
+                 key="acs_btn", disabled=bool(errores) or not docs):
+        filas, base_nombre = [], arch.name.rsplit(".", 1)[0]
+        for pags, r in docs:
+            fdoc = r["Fecha del documento"]
+            rango = f"p{pags[0]+1}-{pags[-1]+1}" if len(pags) > 1 else f"p{pags[0]+1}"
+            filas.append({
+                "contenido": _extraer_paginas(pdf_bytes, pags),
+                "nombre": f"{base_nombre}_{rango}.pdf",
+                "mime": "application/pdf",
+                "clave": TIPOS_ACUSE[r["Tipo"]],
+                "descripcion": str(r["Descripción"]).strip(),
+                "referencia": str(r["Referencia externa"] or "").strip(),
+                "fecha_documento": fdoc.strftime("%Y-%m-%d") if hasattr(fdoc, "strftime") else str(fdoc or ""),
+                "relacionado_con": str(r["Relacionado con"] or "").strip(),
+                "observaciones": str(r["Observaciones"] or "").strip(),
+            })
+        with st.spinner(f"Separando y resguardando {len(filas)} documento(s)..."):
+            registrados, errs, links = registrar_acuses_lote(get_client, anio, "", filas)
+        for e in errs:
+            st.error(e)
+        if registrados:
+            st.success(f"Registrados {len(registrados)} documento(s).")
+            for id_ac, nombre in registrados:
+                st.write(f"✅ {id_ac} ← {nombre}")
+        elif links:
+            st.warning("Links de lo que sí se subió a Drive (para no perderlo):")
+            for nombre, url in links.items():
+                st.write(f"• {nombre} → [Drive]({url})")
+
+
 def render_oficios(deps: dict):
     get_client = deps["get_client"]
     rfcs_autorizados = deps.get("rfcs_autorizados", [])
@@ -2654,6 +2910,14 @@ def render_oficios(deps: dict):
         sub_alta, sub_lista = st.tabs(["➕ Registrar acuse", "📋 Ver acuses"])
 
         with sub_alta:
+          modo_ac = st.radio("Modo de registro",
+                             ["Uno por uno", "Varios archivos", "Separar un PDF con varios documentos"],
+                             horizontal=True, key="ac_modo")
+          if modo_ac == "Varios archivos":
+            _alta_acuses_lote(get_client, df_acu)
+          elif modo_ac == "Separar un PDF con varios documentos":
+            _alta_acuses_separar_pdf(get_client, df_acu)
+          else:
             # El archivo va primero: los datos se leen del propio documento,
             # así que conviene tenerlo a la vista mientras se captura.
             arch = st.file_uploader("Escaneo del acuse (PDF o imagen)",
