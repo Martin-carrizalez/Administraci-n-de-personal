@@ -2827,7 +2827,16 @@ def vista_directorio():
         ini = (str(row["NOMBRE"])[0] + (str(row["NOMBRE"]).split()[1][0] if len(str(row["NOMBRE"]).split()) > 1 else "")).upper()
         ext_html = f"📞 **{row['EXTENSION']}**" if row["EXTENSION"] else ""
         email_html = row["CORREO"] if row["CORREO"] else ""
-        dept_html = f" · *{row['DEPARTAMENTO']}*" if row["DEPARTAMENTO"] else ""
+        # Departamento en su propio renglón, como etiqueta de color y en
+        # mayúsculas (antes iba en gris chico y con asteriscos literales:
+        # la cursiva de Markdown no funciona dentro de HTML).
+        _dep = str(row.get("DEPARTAMENTO", "") or "").strip()
+        dept_html = (f"<div style='margin-top:3px'><span style='background:{bg};color:{tc};"
+                     f"font-size:11px;font-weight:700;letter-spacing:.3px;padding:2px 8px;"
+                     f"border-radius:10px'>{_dep.upper()}</span></div>") if _dep else ""
+        # Celular: SOLO contactos externos (oficinas fuera de la DFC). Si el
+        # padrón tuviera celulares personales del personal, no se exponen aquí.
+        _cel = str(row.get("CELULAR", "") or "").strip() if str(row.get("_EXTERNO", "")) == "SI" else ""
 
         col1, col2 = st.columns([3,1])
         with col1:
@@ -2836,11 +2845,12 @@ def vista_directorio():
                 f"<div style='width:34px;height:34px;border-radius:50%;background:{bg};color:{tc};"
                 f"display:flex;align-items:center;justify-content:center;font-weight:600;font-size:12px;flex-shrink:0'>{ini}</div>"
                 f"<div><div style='font-size:14px;font-weight:500'>{row['NOMBRE']}</div>"
-                f"<div style='font-size:12px;color:gray'>{row['AREA']}{dept_html}</div></div></div>",
+                f"<div style='font-size:12px;color:gray'>{row['AREA']}</div>{dept_html}</div></div>",
                 unsafe_allow_html=True
             )
         with col2:
             if ext_html: st.markdown(ext_html)
+            if _cel: st.markdown(f"📱 **{_cel}**")
             if email_html: st.caption(row["CORREO"])
         # Horario: SOLO admin lo ve aquí (las 10 áreas, no Centros de
         # Maestros). Las 5 secretarias de rfcs_directorio_cm siguen viendo
@@ -2926,7 +2936,8 @@ def vista_directorio():
 
         for dept in orden_final:
             personas = df[df["DEPT_VISTA"] == dept]
-            icono = ICONOS_NORM.get(_clave_icono(dept), "📁")
+            _es_ext = (personas.get("_EXTERNO", pd.Series(dtype=str)).astype(str) == "SI").any()
+            icono = ICONOS_NORM.get(_clave_icono(dept), "🏛️" if _es_ext else "🏢")
             bg, tc = color(df[df["DEPT_VISTA"]==dept]["AREA"].iloc[0])
             with st.expander(f"{icono} {dept}  ·  {len(personas)} personas"):
                 for _, row in personas.iterrows():
@@ -3065,9 +3076,18 @@ def _cargar_directorio_externo_cached() -> pd.DataFrame:
     # Si falla LANZA la excepción: Streamlit no guarda en caché los errores,
     # así que al crear la pestaña se lee en el siguiente intento, no 10 min después.
     sh = get_client().open_by_key(st.secrets["sheet_padron_id"])
-    data = sh.worksheet("Directorio_Externo").get_all_records(numericise_ignore=["all"])
-    df = pd.DataFrame(data).fillna("")
-    for col in ("NOMBRE", "AREA", "DEPARTAMENTO", "EXTENSION", "CORREO"):
+    # get_all_values en vez de get_all_records: este último truena si la fila 1
+    # tiene 2+ celdas vacías (columnas sobrantes con formato o datos sueltos).
+    # Aquí se toman solo las columnas con encabezado y se ignoran las demás.
+    valores = sh.worksheet("Directorio_Externo").get_all_values()
+    if not valores:
+        return pd.DataFrame(columns=["NOMBRE", "AREA", "DEPARTAMENTO", "EXTENSION", "CORREO"])
+    enc = [str(h).strip().upper() for h in valores[0]]
+    utiles = [i for i, h in enumerate(enc) if h]
+    filas = [[(f[i] if i < len(f) else "") for i in utiles] for f in valores[1:]]
+    df = pd.DataFrame(filas, columns=[enc[i] for i in utiles]).fillna("")
+    df = df.loc[:, ~df.columns.duplicated()]  # si un nombre se repite, gana el primero
+    for col in ("NOMBRE", "AREA", "DEPARTAMENTO", "EXTENSION", "CORREO", "CELULAR"):
         if col not in df.columns:
             df[col] = ""
     df = df[df["NOMBRE"].astype(str).str.strip() != ""].copy()
