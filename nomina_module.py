@@ -94,6 +94,10 @@ def render_pendientes_nomina(cargar_directorio_nomina):
         emp_id = opciones[sel]
         emp = directorio[directorio["ID"].astype(str) == str(emp_id)].iloc[0]
         st.caption(f"📧 {emp.get('CORREO','(sin correo)')}  ·  Jefe: {emp.get('JEFE_INMEDIATO','(sin jefe)')}")
+        _ya = next((x for x in st.session_state["lista_nomina"] if str(x["id"]) == str(emp_id)), None)
+        if _ya:
+            st.info("Ya registrado: " + " · ".join(
+                f"{n}: {', '.join(c)}" for n, c in _ya["pendientes"].items() if c))
         pend_emp = {}
         for nom in NOMINAS:
             if conceptos_por_nomina[nom]:
@@ -110,18 +114,30 @@ def render_pendientes_nomina(cargar_directorio_nomina):
             if not pend_emp:
                 st.warning("No marcaste ningún concepto para este empleado.")
             else:
-                st.session_state["lista_nomina"] = [
-                    x for x in st.session_state["lista_nomina"] if str(x["id"]) != str(emp_id)
-                ]
-                st.session_state["lista_nomina"].append({
-                    "id": emp_id,
-                    "nombre": emp.get("NOMBRE_COMPLETO",""),
-                    "correo": emp.get("CORREO",""),
-                    "jefe": emp.get("JEFE_INMEDIATO",""),
-                    "correo_jefe": emp.get("CORREO_JEFE",""),
-                    "pendientes": pend_emp,
-                })
-                st.success(f"Agregado: {emp.get('NOMBRE_COMPLETO','')}")
+                # COMBINAR, no reemplazar: antes se borraba el registro previo del
+                # empleado y solo quedaba lo último marcado (Juan en Q15 perdía su
+                # Q14). Ahora lo nuevo se SUMA a lo que ya tenía, sin duplicar.
+                previo = next((x for x in st.session_state["lista_nomina"]
+                               if str(x["id"]) == str(emp_id)), None)
+                if previo is None:
+                    st.session_state["lista_nomina"].append({
+                        "id": emp_id,
+                        "nombre": emp.get("NOMBRE_COMPLETO",""),
+                        "correo": emp.get("CORREO",""),
+                        "jefe": emp.get("JEFE_INMEDIATO",""),
+                        "correo_jefe": emp.get("CORREO_JEFE",""),
+                        "pendientes": pend_emp,
+                    })
+                    st.success(f"Agregado: {emp.get('NOMBRE_COMPLETO','')}")
+                else:
+                    for nom, conceptos in pend_emp.items():
+                        acumulados = previo["pendientes"].setdefault(nom, [])
+                        for c in conceptos:
+                            if c not in acumulados:
+                                acumulados.append(c)
+                    total = sum(len(v) for v in previo["pendientes"].values())
+                    st.success(f"Actualizado: {emp.get('NOMBRE_COMPLETO','')} — "
+                               f"ahora tiene {total} pendiente(s) acumulados")
 
     # 3. Lista capturada
     lista = st.session_state["lista_nomina"]
