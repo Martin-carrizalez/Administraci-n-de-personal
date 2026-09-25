@@ -291,6 +291,14 @@ def cargar_directorio_nomina():
 
     df = padron[padron["EN_NOMINA_DFC"].astype(str).str.upper().str.strip() == "SI"].copy()
     df["NOMBRE_COMPLETO"] = df[c_nom]
+    # El padrón no tiene columna ID: sin esto, TODOS quedaban con ID vacío y el
+    # módulo de nómina confundía a cada empleado con el primero de la lista.
+    # El RFC es la llave única del padrón; si falta, se usa el nombre.
+    _c_rfc = _col(padron, "RFC")
+    if "ID" not in df.columns or df["ID"].astype(str).str.strip().eq("").all():
+        _rfc = df[_c_rfc].astype(str).str.strip().str.upper() if _c_rfc else ""
+        df["ID"] = [r if r else f"NOM:{n}" for r, n in
+                    zip(_rfc if _c_rfc else [""] * len(df), df["NOMBRE_COMPLETO"].astype(str))]
     for col in COLS_NOMINA:
         if col not in df.columns:
             df[col] = ""

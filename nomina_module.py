@@ -84,15 +84,27 @@ def render_pendientes_nomina(cargar_directorio_nomina):
 
     # 2. Captura por empleado (selector, sin cruces)
     st.markdown("#### 2. Agregar empleado con pendientes")
-    opciones = {f"{r['NOMBRE_COMPLETO']}  ·  ID {r['ID']}": r["ID"] for _, r in directorio.iterrows()}
+    # Cada opción apunta a su FILA exacta, no al ID: si varios empleados traían
+    # el ID vacío, todos se resolvían al primero de la lista (bug de nómina).
+    directorio = directorio.reset_index(drop=True)
+    def _clave_emp(r):
+        _id = str(r.get("ID", "")).strip()
+        return _id if _id else f"NOM:{str(r.get('NOMBRE_COMPLETO', '')).strip()}"
+    opciones = {}
+    for i, r in directorio.iterrows():
+        _id = str(r.get("ID", "")).strip()
+        etiqueta = f"{r['NOMBRE_COMPLETO']}  ·  {_id}" if _id else f"{r['NOMBRE_COMPLETO']}"
+        if etiqueta in opciones:          # homónimos sin ID: no se pisan
+            etiqueta = f"{etiqueta}  ·  #{i + 1}"
+        opciones[etiqueta] = i
     sel = st.selectbox("Busca y elige al empleado", options=["—"] + list(opciones.keys()))
 
     if "lista_nomina" not in st.session_state:
         st.session_state["lista_nomina"] = []
 
     if sel != "—":
-        emp_id = opciones[sel]
-        emp = directorio[directorio["ID"].astype(str) == str(emp_id)].iloc[0]
+        emp = directorio.iloc[opciones[sel]]
+        emp_id = _clave_emp(emp)
         st.caption(f"📧 {emp.get('CORREO','(sin correo)')}  ·  Jefe: {emp.get('JEFE_INMEDIATO','(sin jefe)')}")
         _ya = next((x for x in st.session_state["lista_nomina"] if str(x["id"]) == str(emp_id)), None)
         if _ya:
