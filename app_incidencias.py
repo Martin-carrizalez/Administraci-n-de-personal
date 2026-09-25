@@ -2791,9 +2791,12 @@ def vista_directorio():
     _rfc_ext = str(st.session_state.get("rfc", "")).upper().strip()
     if (st.session_state.get("rol") == "admin"
             or _rfc_ext in _rfcs_secret("rfcs_horarios_todos")):
-        _ext = cargar_directorio_externo()
+        _ext, _motivo_ext = cargar_directorio_externo()
         if not _ext.empty:
             df = pd.concat([df, _ext], ignore_index=True).fillna("")
+        elif st.session_state.get("rol") == "admin":
+            # Solo el admin ve el diagnóstico: antes esto fallaba en silencio.
+            st.caption(f"ℹ️ Directorio externo sin mostrar: {_motivo_ext}.")
     if st.session_state.get("rol") != "admin":
         mask_ocultar = (
             df["AREA"].astype(str).str.contains("Comisionado a otra|Oficinas centrales", case=False, na=False) | 
@@ -3058,24 +3061,34 @@ def padron_disponible() -> bool:
 
 
 @st.cache_data(ttl=600)
-def cargar_directorio_externo() -> pd.DataFrame:
+def _cargar_directorio_externo_cached() -> pd.DataFrame:
+    # Si falla LANZA la excepción: Streamlit no guarda en caché los errores,
+    # así que al crear la pestaña se lee en el siguiente intento, no 10 min después.
+    sh = get_client().open_by_key(st.secrets["sheet_padron_id"])
+    data = sh.worksheet("Directorio_Externo").get_all_records(numericise_ignore=["all"])
+    df = pd.DataFrame(data).fillna("")
+    for col in ("NOMBRE", "AREA", "DEPARTAMENTO", "EXTENSION", "CORREO"):
+        if col not in df.columns:
+            df[col] = ""
+    df = df[df["NOMBRE"].astype(str).str.strip() != ""].copy()
+    df["_EXTERNO"] = "SI"  # para agruparlos por su oficina, no por cargo
+    return df
+
+
+def cargar_directorio_externo():
     """Contactos de oficinas FUERA de la DFC (p. ej. Despacho de la
-    Subsecretaría de Atención al Magisterio). Vive en su propia tab
-    'Directorio_Externo' del Sheet del padrón y NO se mezcla con el padrón:
-    así no obtienen login, no aparecen en contacto de emergencia ni en
-    nómina. Solo se muestra en el directorio. Vacío si la tab no existe."""
+    Subsecretaría de Atención al Magisterio), en la pestaña
+    'Directorio_Externo' del Sheet del padrón. No se mezclan con el padrón:
+    sin login, sin contacto de emergencia, sin nómina.
+    Devuelve (df, motivo): motivo explica por qué vino vacío."""
     try:
-        sh = get_client().open_by_key(st.secrets["sheet_padron_id"])
-        data = sh.worksheet("Directorio_Externo").get_all_records(numericise_ignore=["all"])
-        df = pd.DataFrame(data).fillna("")
-        for col in ("NOMBRE", "AREA", "DEPARTAMENTO", "EXTENSION", "CORREO"):
-            if col not in df.columns:
-                df[col] = ""
-        df = df[df["NOMBRE"].astype(str).str.strip() != ""].copy()
-        df["_EXTERNO"] = "SI"  # para agruparlos por su oficina, no por cargo
-        return df
-    except Exception:
-        return pd.DataFrame()
+        df = _cargar_directorio_externo_cached()
+        return df, ("" if not df.empty else "la pestaña existe pero no tiene filas con NOMBRE")
+    except Exception as e:
+        if type(e).__name__ == "WorksheetNotFound":
+            return pd.DataFrame(), ("no existe una pestaña llamada exactamente "
+                                    "'Directorio_Externo' en el Sheet del padrón")
+        return pd.DataFrame(), f"no se pudo leer ({type(e).__name__}: {e})"
 
 
 def _directorio_unificado():
