@@ -10,6 +10,8 @@ except Exception as _e_nomina:
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
+import re
+import unicodedata
 from datetime import datetime, date, timedelta
 from io import BytesIO
 from reportlab.lib.pagesizes import letter
@@ -3218,6 +3220,110 @@ def _normalizar_busqueda(texto: str) -> str:
     t = unicodedata.normalize("NFKD", t)
     return "".join(c for c in t if not unicodedata.combining(c))
 
+def _tokens_persona(txt: str) -> frozenset:
+    """Nombre en piezas comparables: sin acentos, sin puntuación y con Z→S
+    (CARRIZALEZ/CARRIZALES). Se comparan como conjunto para que no importe si
+    el minutario escribió 'Garcia Tirado Susana' y el padrón otro orden."""
+    t = unicodedata.normalize("NFKD", str(txt or "").upper())
+    t = "".join(c for c in t if not unicodedata.combining(c)).replace("Z", "S")
+    t = re.sub(r"[^A-ZÑ ]", " ", t)
+    return frozenset(p for p in t.split() if len(p) > 1)
+
+
+def _mismo_nombre(a: frozenset, b: frozenset) -> bool:
+    """Coinciden si uno contiene al otro (segundo nombre de más) y comparten
+    al menos 2 piezas: así 'GARCIA TIRADO' solo no basta para dar un falso
+    positivo con otro García."""
+    if not a or not b:
+        return False
+    return len(a & b) >= 2 and (a <= b or b <= a)
+
+
+def pendientes_acuse_de_centro(centro: str) -> list:
+    """Comisiones del personal de ese Centro que aún no tienen acuse firmado.
+    Se leen del minutario: asunto con 'comisión' y estado distinto de ACUSE
+    (CANCELADO se ignora). Devuelve [{nombre, oficios: [...]}]."""
+    if _oficios_mod is None or _aqr_mod is None or not centro:
+        return []
+    try:
+        df = _oficios_mod.cargar_oficios(get_client)
+    except Exception:
+        return []
+    if df.empty or "DIRIGIDO_A" not in df.columns:
+        return []
+    _asunto = df.get("ASUNTO", pd.Series([""] * len(df))).astype(str)
+    _asunto_norm = _asunto.apply(lambda x: "".join(
+        c for c in unicodedata.normalize("NFKD", x.upper()) if not unicodedata.combining(c)))
+    _estado = df.get("ESTADO", pd.Series([""] * len(df))).astype(str).str.upper().str.strip()
+    df = df[_asunto_norm.str.contains("COMISION", na=False)
+            & ~_estado.isin(["ACUSE", "CANCELADO"])]
+    if df.empty:
+        return []
+    try:
+        gente = _aqr_mod.asesores_de(centro)
+    except Exception:
+        return []
+    if gente.empty:
+        return []
+    filas = [(str(r["NOMBRE"]), _tokens_persona(r["NOMBRE"])) for _, r in gente.iterrows()]
+    por_persona = {}
+    for _, o in df.iterrows():
+        tok_of = _tokens_persona(o.get("DIRIGIDO_A", ""))
+        for nombre, tok_p in filas:
+            if _mismo_nombre(tok_p, tok_of):
+                por_persona.setdefault(nombre, []).append({
+                    "id": str(o.get("ID_OFICIO", "")),
+                    "fecha": str(o.get("FECHA_OFICIO", "") or o.get("FECHA_SOLICITUD", "")),
+                    "asunto": str(o.get("ASUNTO", "")),
+                    "estado": str(o.get("ESTADO", "")).upper(),
+                })
+                break
+    return [{"nombre": n, "oficios": o} for n, o in
+            sorted(por_persona.items(), key=lambda kv: -len(kv[1]))]
+
+
+def vista_pendientes_cm():
+    """Pendientes de entregar acuse, para el coordinador del Centro."""
+    rfc_actual = str(st.session_state.get("rfc", "")).upper().strip()
+    centro = ""
+    if _aqr_mod is not None:
+        try:
+            centro = _aqr_mod.centro_del_responsable(rfc_actual)
+        except Exception:
+            centro = ""
+    if st.session_state.get("rol") == "admin" and not centro:
+        try:
+            opciones = _aqr_mod.centros_disponibles() if _aqr_mod else []
+        except Exception:
+            opciones = []
+        if not opciones:
+            st.info("El padrón no tiene personal de Centros de Maestros.")
+            return
+        centro = st.selectbox("Centro (vista admin)", opciones, key="pend_centro")
+    if not centro:
+        st.error("No tienes permiso para esta sección.")
+        return
+
+    st.markdown(f"## 📌 Pendientes — {centro}")
+    datos = pendientes_acuse_de_centro(centro)
+    total = sum(len(d["oficios"]) for d in datos)
+    if not total:
+        st.success("✅ Sin pendientes: todas las comisiones de tu Centro tienen su acuse entregado.")
+        return
+
+    # Encabezado con el total y, abajo, el desglose plegado: un Centro con
+    # muchos pendientes no satura la pantalla.
+    c1, c2 = st.columns(2)
+    c1.metric("Acuses por entregar", total)
+    c2.metric("Personas", len(datos))
+    st.caption("Entrega en RH el acuse firmado de cada comisión. "
+               "Toca un nombre para ver sus oficios.")
+    for d in datos:
+        with st.expander(f"{d['nombre']} — {len(d['oficios'])} pendiente(s)"):
+            for o in d["oficios"]:
+                st.markdown(f"• **{o['id']}** · {o['fecha']} — {o['asunto']}")
+
+
 def _es_responsable_cm(rfc_actual: str) -> bool:
     """Responsable de un Centro de Maestros según el padrón (vía
     asistencia_qr), sin depender de la lista piloto de cm_module."""
@@ -3587,6 +3693,45 @@ def main():
         # el secret piloto viejo) veía AMBOS sistemas a la vez y por eso
         # seguía usando la lista manual por costumbre — los demás coordinadores
         # nunca vieron ese botón, de ahí la inconsistencia.
+        if st.session_state.get("rol") == "admin" or _es_responsable_cm(_rfc_sb):
+            _n_pend = 0
+            try:
+                _c_pend = _aqr_mod.centro_del_responsable(_rfc_sb) if _aqr_mod else ""
+                if _c_pend:
+                    _n_pend = sum(len(d["oficios"]) for d in pendientes_acuse_de_centro(_c_pend))
+            except Exception:
+                _n_pend = 0
+            if st.button(f"📌 Pendientes ({_n_pend})" if _n_pend else "📌 Pendientes",
+                         key="btn_pend_sidebar"):
+                st.session_state["vista"] = "pendientes_cm"
+                st.rerun()
+            # Azul, con el mismo método del botón naranja de emergencia: se
+            # busca por su texto, porque las clases internas de Streamlit
+            # cambian entre versiones.
+            import streamlit.components.v1 as _comp_pend
+            _comp_pend.html("""
+                <script>
+                function _colorearBotonPendientes() {
+                    try {
+                        window.parent.document.querySelectorAll('button').forEach(function(b) {
+                            if (b.innerText && b.innerText.indexOf("Pendientes") !== -1) {
+                                b.style.backgroundColor = "#1F4E9C";
+                                b.style.color = "#FFFFFF";
+                                b.style.fontWeight = "bold";
+                                b.style.border = "none";
+                            }
+                        });
+                    } catch (e) {}
+                }
+                _colorearBotonPendientes();
+                if (!window.parent._pendObserverSet) {
+                    window.parent._pendObserverSet = true;
+                    new MutationObserver(_colorearBotonPendientes)
+                        .observe(window.parent.document.body, {childList: true, subtree: true});
+                }
+                </script>
+            """, height=0)
+
         if _es_personal_cm(_rfc_sb):
             if st.button("📍 Mi asistencia", key="btn_mi_asistencia"):
                 st.session_state["vista"] = "mi_asistencia"
@@ -3620,6 +3765,8 @@ def main():
         vista_directorio()
     elif vista == "emergencia":
         vista_contacto_emergencia()
+    elif vista == "pendientes_cm":
+        vista_pendientes_cm()
     elif vista == "mi_asistencia":
         vista_mi_asistencia()
     elif vista == "qr_pantalla":

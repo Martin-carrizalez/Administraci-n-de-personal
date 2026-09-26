@@ -16,6 +16,7 @@ Conexión desde app_incidencias.py:
 import streamlit as st
 import pandas as pd
 import urllib.parse
+import hashlib
 
 
 def construir_cuerpo_nomina(nombre, pendientes_por_nomina, segundo_aviso=False):
@@ -101,6 +102,8 @@ def render_pendientes_nomina(cargar_directorio_nomina):
 
     if "lista_nomina" not in st.session_state:
         st.session_state["lista_nomina"] = []
+    if st.session_state.get("_msg_nomina"):
+        st.success(st.session_state.pop("_msg_nomina"))
 
     if sel != "—":
         emp = directorio.iloc[opciones[sel]]
@@ -110,18 +113,33 @@ def render_pendientes_nomina(cargar_directorio_nomina):
         if _ya:
             st.info("Ya registrado: " + " · ".join(
                 f"{n}: {', '.join(c)}" for n, c in _ya["pendientes"].items() if c))
+        # Lo marcado se guarda EN EL MOMENTO en un borrador por empleado, no
+        # solo al presionar el botón. Antes vivía únicamente en las casillas:
+        # si Streamlit las volvía a crear (recarga, caché del directorio que
+        # expira, cambio de un dato de arriba) se desmarcaban solas y se
+        # perdían los conceptos ya elegidos.
+        borrador = st.session_state.setdefault("pend_borrador", {})
+        draft = borrador.setdefault(emp_id, {})
         pend_emp = {}
         for nom in NOMINAS:
             if conceptos_por_nomina[nom]:
                 st.markdown(f"**{nom}** — marca lo que debe:")
                 marcados = []
+                previos_nom = draft.get(nom, [])
                 ccols = st.columns(min(len(conceptos_por_nomina[nom]), 4) or 1)
                 for j, concepto in enumerate(conceptos_por_nomina[nom]):
                     with ccols[j % len(ccols)]:
-                        if st.checkbox(concepto, key=f"chk_{emp_id}_{nom}_{concepto}"):
+                        # value= restaura lo ya marcado si la casilla se recreó.
+                        if st.checkbox(concepto, key=f"chk_{emp_id}_{nom}_{concepto}",
+                                       value=concepto in previos_nom):
                             marcados.append(concepto)
+                draft[nom] = marcados
                 if marcados:
                     pend_emp[nom] = marcados
+        _tot_draft = sum(len(v) for v in draft.values())
+        if _tot_draft:
+            st.caption(f"✔️ Marcado ahora ({_tot_draft}): " + " · ".join(
+                f"{n}: {', '.join(c)}" for n, c in draft.items() if c))
         if st.button("➕ Agregar a la lista", key=f"add_{emp_id}"):
             if not pend_emp:
                 st.warning("No marcaste ningún concepto para este empleado.")
@@ -140,7 +158,7 @@ def render_pendientes_nomina(cargar_directorio_nomina):
                         "correo_jefe": emp.get("CORREO_JEFE",""),
                         "pendientes": pend_emp,
                     })
-                    st.success(f"Agregado: {emp.get('NOMBRE_COMPLETO','')}")
+                    st.session_state["_msg_nomina"] = f"Agregado: {emp.get('NOMBRE_COMPLETO','')}"
                 else:
                     for nom, conceptos in pend_emp.items():
                         acumulados = previo["pendientes"].setdefault(nom, [])
@@ -148,8 +166,16 @@ def render_pendientes_nomina(cargar_directorio_nomina):
                             if c not in acumulados:
                                 acumulados.append(c)
                     total = sum(len(v) for v in previo["pendientes"].values())
-                    st.success(f"Actualizado: {emp.get('NOMBRE_COMPLETO','')} — "
-                               f"ahora tiene {total} pendiente(s) acumulados")
+                    st.session_state["_msg_nomina"] = (
+                        f"Actualizado: {emp.get('NOMBRE_COMPLETO','')} — "
+                        f"ahora tiene {total} pendiente(s) acumulados")
+                # Ya quedó guardado en la lista: se limpian borrador y casillas
+                # para que la siguiente captura empiece en blanco.
+                borrador.pop(emp_id, None)
+                for _k in [k for k in st.session_state
+                           if str(k).startswith(f"chk_{emp_id}_")]:
+                    st.session_state.pop(_k, None)
+                st.rerun()
 
     # 3. Lista capturada
     lista = st.session_state["lista_nomina"]
@@ -183,7 +209,12 @@ def render_pendientes_nomina(cargar_directorio_nomina):
             st.text(f"Para: {', '.join(para) or '(sin correo)'}")
             st.text(f"CC: {', '.join(cc_fijos) or '(sin CC)'}")
             st.text(f"Asunto: {asunto}")
-            st.text_area("Cuerpo", value=cuerpo, height=280, key=f"prev_{x['id']}")
+            # La key incluye una huella del contenido: con una key fija,
+            # Streamlit conservaba el texto viejo y la vista previa mostraba
+            # menos pendientes de los que realmente llevaba el correo.
+            _huella = hashlib.md5(cuerpo.encode("utf-8")).hexdigest()[:8]
+            st.text_area("Cuerpo", value=cuerpo, height=280,
+                         key=f"prev_{x['id']}_{_huella}")
             # Botón que abre Gmail con todo prellenado (sin permisos de admin)
             if para:
                 gmail_url = (
