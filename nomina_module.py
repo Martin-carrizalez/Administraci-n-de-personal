@@ -62,8 +62,127 @@ Enlace de Recursos Humanos de Dirección de Formación Continua"""
     return cuerpo.strip()
 
 
-def render_pendientes_nomina(cargar_directorio_nomina):
+TAB_PEND_NOMINA = "Pendientes_Nomina"
+COLS_PEND_NOMINA = ["FECHA_REGISTRO", "NOMBRE", "NOMINA", "CONCEPTO",
+                    "ESTADO", "REGISTRADO_POR", "FECHA_FIRMA"]
+
+
+def _norm_nom(txt: str) -> str:
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(txt or "").upper())
+    return " ".join("".join(c for c in t if not unicodedata.combining(c)).split())
+
+
+def guardar_pendientes_en_sheet(get_client, lista) -> tuple:
+    """Deja los pendientes en la tab Pendientes_Nomina para que los
+    coordinadores los vean en su botón de Pendientes (la lista de la sesión
+    se borra al recargar). Una lectura y una escritura, sin duplicar lo que
+    ya estaba registrado como PENDIENTE. Devuelve (nuevos, ya_estaban)."""
+    import gspread
+    from datetime import datetime
+    sh = get_client().open_by_key(st.secrets["sheet_checador_id"])
+    try:
+        ws = sh.worksheet(TAB_PEND_NOMINA)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(TAB_PEND_NOMINA, rows=2, cols=len(COLS_PEND_NOMINA))
+        ws.append_row(COLS_PEND_NOMINA)
+    valores = ws.get_all_values()
+    headers = valores[0] if valores else COLS_PEND_NOMINA
+    idx = {c: headers.index(c) for c in COLS_PEND_NOMINA if c in headers}
+    ya = set()
+    for f in valores[1:]:
+        def _v(c):
+            i = idx.get(c, -1)
+            return f[i] if 0 <= i < len(f) else ""
+        if str(_v("ESTADO")).upper().strip() != "FIRMADO":
+            ya.add((_norm_nom(_v("NOMBRE")), str(_v("NOMINA")).strip(), str(_v("CONCEPTO")).strip()))
+    hoy = datetime.now().strftime("%Y-%m-%d %H:%M")
+    quien = st.session_state.get("nombre", "RH")
+    nuevas, repetidas = [], 0
+    for x in lista:
+        for nom, conceptos in x["pendientes"].items():
+            for c in conceptos:
+                clave = (_norm_nom(x["nombre"]), str(nom).strip(), str(c).strip())
+                if clave in ya:
+                    repetidas += 1
+                    continue
+                ya.add(clave)
+                nuevas.append([hoy, x["nombre"], nom, c, "PENDIENTE", quien, ""])
+    if nuevas:
+        ws.append_rows(nuevas, value_input_option="USER_ENTERED")
+    return len(nuevas), repetidas
+
+
+def _panel_marcar_firmados(get_client):
+    """Marca como FIRMADO lo que ya vino a firmar, para que deje de aparecerle
+    al coordinador. NO se borra la fila: queda el histórico con su fecha."""
+    import gspread
+    from datetime import datetime
+    from gspread.cell import Cell
+    try:
+        sh = get_client().open_by_key(st.secrets["sheet_checador_id"])
+        ws = sh.worksheet(TAB_PEND_NOMINA)
+        valores = ws.get_all_values()
+    except gspread.WorksheetNotFound:
+        st.caption("Aún no hay pendientes guardados en el Sheet.")
+        return
+    except Exception as e:
+        st.error(f"No se pudo leer el registro: {e}")
+        return
+    if len(valores) < 2:
+        st.caption("Aún no hay pendientes guardados en el Sheet.")
+        return
+    headers = [h.strip().upper() for h in valores[0]]
+    def _i(col):
+        return headers.index(col) if col in headers else -1
+    i_nom, i_nomina, i_con, i_est = _i("NOMBRE"), _i("NOMINA"), _i("CONCEPTO"), _i("ESTADO")
+    if min(i_nom, i_nomina, i_con, i_est) < 0:
+        st.error("La tab Pendientes_Nomina no tiene las columnas esperadas.")
+        return
+    def _v(f, i):
+        return f[i] if 0 <= i < len(f) else ""
+    # fila real en el Sheet (base 2) de cada pendiente
+    abiertos = {}
+    for n_fila, f in enumerate(valores[1:], start=2):
+        if str(_v(f, i_est)).upper().strip() == "FIRMADO":
+            continue
+        abiertos.setdefault(str(_v(f, i_nom)).strip(), []).append(
+            (n_fila, str(_v(f, i_nomina)).strip(), str(_v(f, i_con)).strip()))
+    if not abiertos:
+        st.success("✅ No hay firmas pendientes registradas: todos al corriente.")
+        return
+    st.caption(f"{sum(len(v) for v in abiertos.values())} pendiente(s) de "
+               f"{len(abiertos)} persona(s). Marca lo que ya vino a firmar.")
+    marcadas = []
+    for nombre in sorted(abiertos):
+        with st.expander(f"{nombre} — {len(abiertos[nombre])} pendiente(s)"):
+            if st.checkbox("Ya firmó TODO lo de esta persona", key=f"fmt_all_{nombre}"):
+                marcadas += [n for n, _, _ in abiertos[nombre]]
+            else:
+                for n_fila, nomina, concepto in abiertos[nombre]:
+                    if st.checkbox(f"{concepto} · nómina {nomina}", key=f"fmd_{n_fila}"):
+                        marcadas.append(n_fila)
+    if marcadas and st.button(f"✅ Marcar {len(marcadas)} como FIRMADO", type="primary"):
+        i_fecha = _i("FECHA_FIRMA")
+        ahora = datetime.now().strftime("%Y-%m-%d %H:%M")
+        celdas = [Cell(n, i_est + 1, "FIRMADO") for n in marcadas]
+        if i_fecha >= 0:
+            celdas += [Cell(n, i_fecha + 1, ahora) for n in marcadas]
+        try:
+            ws.update_cells(celdas, value_input_option="USER_ENTERED")  # una sola escritura
+            st.cache_data.clear()
+            st.success(f"Listo: {len(marcadas)} firma(s) marcadas. "
+                       "Ya no le aparecen al coordinador.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"No se pudo actualizar: {e}")
+
+
+def render_pendientes_nomina(cargar_directorio_nomina, get_client=None):
     st.markdown("### 📋 Pendientes de Firma de Nómina")
+    if get_client is not None:
+        with st.expander("✅ Marcar firmas ya recibidas (quitarlas de pendientes)"):
+            _panel_marcar_firmados(get_client)
     directorio = cargar_directorio_nomina()
     if directorio.empty:
         st.warning("No se encontró la tab **Directorio_Nomina** o está vacía. "
@@ -183,11 +302,25 @@ def render_pendientes_nomina(cargar_directorio_nomina):
         st.info("Aún no has agregado empleados a la lista.")
         return
     st.markdown("#### 3. Empleados en la lista")
+    # Detalle visible: antes solo se veía el TOTAL y había que abrir el correo
+    # para saber qué conceptos quedaron guardados.
     resumen = [{"Nombre": x["nombre"],
                 "Pendientes": sum(len(v) for v in x["pendientes"].values()),
+                "Detalle": " | ".join(f"{n}: {', '.join(c)}"
+                                      for n, c in x["pendientes"].items() if c),
                 "Correo": x["correo"]} for x in lista]
     st.dataframe(pd.DataFrame(resumen).sort_values("Pendientes", ascending=False),
                  use_container_width=True, hide_index=True)
+    if get_client is not None:
+        if st.button("💾 Guardar para los coordinadores", type="primary"):
+            try:
+                nuevos, repetidos = guardar_pendientes_en_sheet(get_client, lista)
+                msg = f"Guardados {nuevos} pendiente(s) en el Sheet."
+                if repetidos:
+                    msg += f" {repetidos} ya estaban registrados (no se duplicaron)."
+                st.success(msg + " Los coordinadores ya los ven en su botón de Pendientes.")
+            except Exception as e:
+                st.error(f"No se pudieron guardar: {e}")
     if st.button("🗑️ Vaciar lista"):
         st.session_state["lista_nomina"] = []
         st.rerun()

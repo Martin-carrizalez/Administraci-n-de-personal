@@ -2484,7 +2484,7 @@ def vista_admin():
         if render_pendientes_nomina is None:
             st.error(f"El módulo de nómina no está disponible: {_ERROR_NOMINA}")
         else:
-            render_pendientes_nomina(cargar_directorio_nomina)
+            render_pendientes_nomina(cargar_directorio_nomina, get_client)
 
     with tab3:
         # ── Alerta días económicos por agotarse ──────
@@ -3282,6 +3282,52 @@ def pendientes_acuse_de_centro(centro: str) -> list:
             sorted(por_persona.items(), key=lambda kv: -len(kv[1]))]
 
 
+@st.cache_data(ttl=300)
+def cargar_pendientes_nomina_sheet() -> pd.DataFrame:
+    """Pendientes de firma de nómina que RH dejó registrados en la tab
+    Pendientes_Nomina. Vacío si la tab aún no existe."""
+    try:
+        sh = get_client().open_by_key(st.secrets["sheet_checador_id"])
+        valores = sh.worksheet("Pendientes_Nomina").get_all_values()
+        if len(valores) < 2:
+            return pd.DataFrame()
+        enc = [str(h).strip().upper() for h in valores[0]]
+        utiles = [i for i, h in enumerate(enc) if h]
+        filas = [[(f[i] if i < len(f) else "") for i in utiles] for f in valores[1:]]
+        return pd.DataFrame(filas, columns=[enc[i] for i in utiles]).fillna("")
+    except Exception:
+        return pd.DataFrame()
+
+
+def pendientes_nomina_de_centro(centro: str) -> list:
+    """Firmas de nómina pendientes del personal de ese Centro.
+    Devuelve [{nombre, conceptos: [(nomina, concepto)]}]."""
+    df = cargar_pendientes_nomina_sheet()
+    if df.empty or "NOMBRE" not in df.columns or _aqr_mod is None or not centro:
+        return []
+    if "ESTADO" in df.columns:
+        df = df[df["ESTADO"].astype(str).str.upper().str.strip() != "FIRMADO"]
+    if df.empty:
+        return []
+    try:
+        gente = _aqr_mod.asesores_de(centro)
+    except Exception:
+        return []
+    if gente.empty:
+        return []
+    filas = [(str(r["NOMBRE"]), _tokens_persona(r["NOMBRE"])) for _, r in gente.iterrows()]
+    por_persona = {}
+    for _, p in df.iterrows():
+        tok = _tokens_persona(p.get("NOMBRE", ""))
+        for nombre, tok_p in filas:
+            if _mismo_nombre(tok_p, tok):
+                por_persona.setdefault(nombre, []).append(
+                    (str(p.get("NOMINA", "")), str(p.get("CONCEPTO", ""))))
+                break
+    return [{"nombre": n, "conceptos": c} for n, c in
+            sorted(por_persona.items(), key=lambda kv: -len(kv[1]))]
+
+
 def vista_pendientes_cm():
     """Pendientes de entregar acuse, para el coordinador del Centro."""
     rfc_actual = str(st.session_state.get("rfc", "")).upper().strip()
@@ -3307,21 +3353,37 @@ def vista_pendientes_cm():
     st.markdown(f"## 📌 Pendientes — {centro}")
     datos = pendientes_acuse_de_centro(centro)
     total = sum(len(d["oficios"]) for d in datos)
-    if not total:
-        st.success("✅ Sin pendientes: todas las comisiones de tu Centro tienen su acuse entregado.")
+    nom = pendientes_nomina_de_centro(centro)
+    total_nom = sum(len(d["conceptos"]) for d in nom)
+
+    if not total and not total_nom:
+        st.success("✅ Sin pendientes: tu Centro está al corriente en acuses y en firmas de nómina.")
         return
 
-    # Encabezado con el total y, abajo, el desglose plegado: un Centro con
+    # Encabezado con los totales y, abajo, el desglose plegado: un Centro con
     # muchos pendientes no satura la pantalla.
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Acuses por entregar", total)
-    c2.metric("Personas", len(datos))
-    st.caption("Entrega en RH el acuse firmado de cada comisión. "
-               "Toca un nombre para ver sus oficios.")
-    for d in datos:
-        with st.expander(f"{d['nombre']} — {len(d['oficios'])} pendiente(s)"):
-            for o in d["oficios"]:
-                st.markdown(f"• **{o['id']}** · {o['fecha']} — {o['asunto']}")
+    c2.metric("Firmas de nómina", total_nom)
+    c3.metric("Personas", len({d["nombre"] for d in datos} | {d["nombre"] for d in nom}))
+
+    if total:
+        st.markdown("### 📄 Acuses de comisión por entregar")
+        st.caption("Entrega en RH el acuse firmado de cada comisión. "
+                   "Toca un nombre para ver sus oficios.")
+        for d in datos:
+            with st.expander(f"{d['nombre']} — {len(d['oficios'])} pendiente(s)"):
+                for o in d["oficios"]:
+                    st.markdown(f"• **{o['id']}** · {o['fecha']} — {o['asunto']}")
+
+    if total_nom:
+        st.markdown("### 💰 Firmas de nómina pendientes")
+        st.caption("Deben presentarse en la Dirección a firmar. La Dirección de Pagos "
+                   "permite un rezago máximo de 2 quincenas.")
+        for d in nom:
+            with st.expander(f"{d['nombre']} — {len(d['conceptos'])} firma(s)"):
+                for nomina, concepto in d["conceptos"]:
+                    st.markdown(f"• **{concepto}** · nómina {nomina}")
 
 
 def _es_responsable_cm(rfc_actual: str) -> bool:
@@ -3698,7 +3760,8 @@ def main():
             try:
                 _c_pend = _aqr_mod.centro_del_responsable(_rfc_sb) if _aqr_mod else ""
                 if _c_pend:
-                    _n_pend = sum(len(d["oficios"]) for d in pendientes_acuse_de_centro(_c_pend))
+                    _n_pend = (sum(len(d["oficios"]) for d in pendientes_acuse_de_centro(_c_pend))
+                               + sum(len(d["conceptos"]) for d in pendientes_nomina_de_centro(_c_pend)))
             except Exception:
                 _n_pend = 0
             if st.button(f"📌 Pendientes ({_n_pend})" if _n_pend else "📌 Pendientes",
