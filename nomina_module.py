@@ -113,6 +113,84 @@ def guardar_pendientes_en_sheet(get_client, lista) -> tuple:
     return len(nuevas), repetidas
 
 
+def _leer_pendientes_abiertos(get_client):
+    """(ws, headers, filas_abiertas) de la tab Pendientes_Nomina.
+    filas_abiertas: [(n_fila, nombre, nomina, concepto)] con ESTADO != FIRMADO."""
+    import gspread
+    sh = get_client().open_by_key(st.secrets["sheet_checador_id"])
+    try:
+        ws = sh.worksheet(TAB_PEND_NOMINA)
+    except gspread.WorksheetNotFound:
+        return None, [], []
+    valores = ws.get_all_values()
+    if len(valores) < 2:
+        return ws, (valores[0] if valores else []), []
+    headers = [h.strip().upper() for h in valores[0]]
+    def _i(c):
+        return headers.index(c) if c in headers else -1
+    i_n, i_nm, i_c, i_e = _i("NOMBRE"), _i("NOMINA"), _i("CONCEPTO"), _i("ESTADO")
+    if min(i_n, i_nm, i_c, i_e) < 0:
+        return ws, headers, []
+    abiertas = []
+    for nf, f in enumerate(valores[1:], start=2):
+        def _v(i):
+            return f[i] if 0 <= i < len(f) else ""
+        if str(_v(i_e)).upper().strip() == "FIRMADO":
+            continue
+        abiertas.append((nf, str(_v(i_n)).strip(), str(_v(i_nm)).strip(), str(_v(i_c)).strip()))
+    return ws, headers, abiertas
+
+
+def reconstruir_lista_desde_sheet(get_client, directorio) -> int:
+    """Rearma la lista de trabajo con lo guardado en el Sheet, para volver a
+    sacar el PDF y los correos sin recapturar a los 120 empleados."""
+    _ws, _h, abiertas = _leer_pendientes_abiertos(get_client)
+    if not abiertas:
+        return 0
+    # Correo y jefe se recuperan del directorio cruzando por nombre normalizado
+    datos = {}
+    for _, r in directorio.iterrows():
+        datos[_norm_nom(r.get("NOMBRE_COMPLETO", ""))] = r
+    por_persona = {}
+    for _nf, nombre, nomina, concepto in abiertas:
+        d = por_persona.setdefault(nombre, {})
+        d.setdefault(nomina, [])
+        if concepto not in d[nomina]:
+            d[nomina].append(concepto)
+    lista = []
+    for nombre, pend in por_persona.items():
+        r = datos.get(_norm_nom(nombre))
+        lista.append({
+            "id": nombre,
+            "nombre": nombre,
+            "correo": str(r.get("CORREO", "")) if r is not None else "",
+            "jefe": str(r.get("JEFE_INMEDIATO", "")) if r is not None else "",
+            "correo_jefe": str(r.get("CORREO_JEFE", "")) if r is not None else "",
+            "pendientes": pend,
+        })
+    st.session_state["lista_nomina"] = lista
+    return sum(len(v) for x in lista for v in x["pendientes"].values())
+
+
+def cerrar_quincena(get_client) -> int:
+    """Cierra TODO lo abierto marcándolo FIRMADO con su fecha, para empezar la
+    siguiente ronda en limpio. No borra filas: el histórico se conserva."""
+    from datetime import datetime
+    from gspread.cell import Cell
+    ws, headers, abiertas = _leer_pendientes_abiertos(get_client)
+    if ws is None or not abiertas:
+        return 0
+    i_e = headers.index("ESTADO")
+    i_f = headers.index("FECHA_FIRMA") if "FECHA_FIRMA" in headers else -1
+    ahora = datetime.now().strftime("%Y-%m-%d %H:%M")
+    celdas = [Cell(nf, i_e + 1, "FIRMADO") for nf, _, _, _ in abiertas]
+    if i_f >= 0:
+        celdas += [Cell(nf, i_f + 1, ahora) for nf, _, _, _ in abiertas]
+    ws.update_cells(celdas, value_input_option="USER_ENTERED")  # una sola escritura
+    st.session_state["lista_nomina"] = []
+    return len(abiertas)
+
+
 def _panel_marcar_firmados(get_client):
     """Marca como FIRMADO lo que ya vino a firmar, para que deje de aparecerle
     al coordinador. NO se borra la fila: queda el histórico con su fecha."""
@@ -180,10 +258,34 @@ def _panel_marcar_firmados(get_client):
 
 def render_pendientes_nomina(cargar_directorio_nomina, get_client=None):
     st.markdown("### 📋 Pendientes de Firma de Nómina")
-    if get_client is not None:
+    directorio = cargar_directorio_nomina()
+    if get_client is not None and not directorio.empty:
+        cbt1, cbt2 = st.columns(2)
+        # La lista de la sesión se pierde al recargar; esto la rearma desde el
+        # Sheet para volver a generar PDF y correos sin recapturar todo.
+        if cbt1.button("📥 Cargar pendientes guardados", use_container_width=True):
+            try:
+                n = reconstruir_lista_desde_sheet(get_client, directorio)
+                st.session_state["_msg_nomina"] = (
+                    f"Lista recuperada del Sheet: {n} pendiente(s)." if n
+                    else "No hay pendientes abiertos en el Sheet.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo cargar: {e}")
+        with cbt2.popover("🔄 Regenerar lista (cerrar quincena)", use_container_width=True):
+            st.caption("Cierra TODOS los pendientes abiertos (quedan como FIRMADO "
+                       "con su fecha, no se borran) y deja la lista en blanco para "
+                       "empezar la siguiente quincena.")
+            if st.checkbox("Confirmo que ya se solventaron", key="conf_regen"):
+                if st.button("Sí, cerrar y empezar de nuevo", type="primary"):
+                    try:
+                        n = cerrar_quincena(get_client)
+                        st.session_state["_msg_nomina"] = f"Cerrados {n} pendiente(s). Lista en blanco."
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo cerrar: {e}")
         with st.expander("✅ Marcar firmas ya recibidas (quitarlas de pendientes)"):
             _panel_marcar_firmados(get_client)
-    directorio = cargar_directorio_nomina()
     if directorio.empty:
         st.warning("No se encontró la tab **Directorio_Nomina** o está vacía. "
                    "Crea esa hoja con columnas: ID, NOMBRE_COMPLETO, CORREO, "
@@ -474,39 +576,44 @@ def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False, conceptos_por
         elems.append(Paragraph(str(nom), st_nom))
         elems.append(Paragraph(linea_qna, st_qna))
 
-        encabezados = [_con_q(c) for c in orden]
-        max_filas = max(len(por_concepto[c]) for c in orden)
-        data = [encabezados]
-        for i in range(max_filas):
-            fila = []
-            for c in orden:
-                nombres = por_concepto[c]
-                fila.append(nombres[i] if i < len(nombres) else "")
-            data.append(fila)
-        # Pie por columna, igual que el Excel
-        data.append([f"PENDIENTES: {len(por_concepto[c])}" for c in orden])
-
-        ancho_col = (PAGE[0] - 3*cm) / len(orden)
-        t = Table(data, colWidths=[ancho_col]*len(orden), repeatRows=1)
-        ult = len(data) - 1
-        t.setStyle(TableStyle([
-            # Header de conceptos: fondo gris, negritas, centrado (como el Excel)
-            ("BACKGROUND",(0,0),(-1,0), GRIS_HDR),
-            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-            ("ALIGN",(0,0),(-1,0),"CENTER"),
-            ("FONTSIZE",(0,0),(-1,0),10),
-            # Cuerpo: nombres a la izquierda
-            ("FONTSIZE",(0,1),(-1,-1),9),
-            ("ALIGN",(0,1),(-1,ult-1),"LEFT"),
-            ("VALIGN",(0,0),(-1,-1),"TOP"),
-            ("GRID",(0,0),(-1,-1),0.4, colors.grey),
-            # Pie PENDIENTES: negritas
-            ("FONTNAME",(0,ult),(-1,ult),"Helvetica-Bold"),
-            ("ALIGN",(0,ult),(-1,ult),"LEFT"),
-            ("TOPPADDING",(0,0),(-1,-1),3),
-            ("BOTTOMPADDING",(0,0),(-1,-1),3),
-        ]))
-        elems.append(t)
+        # Máximo 4 columnas por página: con 6 conceptos las columnas quedaban
+        # tan angostas que los nombres se encimaban y el PDF era ilegible.
+        MAX_COLS = 4
+        st_celda = ParagraphStyle("celda", parent=styles["Normal"], fontSize=8,
+                                  leading=9.5, fontName="Helvetica")
+        st_hdr = ParagraphStyle("hdr", parent=styles["Normal"], fontSize=9, leading=11,
+                                fontName="Helvetica-Bold", alignment=TA_CENTER)
+        bloques_cols = [orden[i:i + MAX_COLS] for i in range(0, len(orden), MAX_COLS)]
+        for nb, cols_bloque in enumerate(bloques_cols):
+            if nb:  # los conceptos que no cupieron siguen en otra página
+                elems.append(PageBreak())
+                elems.append(Paragraph(str(nom), st_nom))
+                elems.append(Paragraph(linea_qna + "  (continúa)", st_qna))
+            # Paragraph en cada celda para que los nombres largos se PARTAN
+            # en varias líneas en vez de desbordarse sobre la columna vecina.
+            data = [[Paragraph(_con_q(c), st_hdr) for c in cols_bloque]]
+            max_filas = max(len(por_concepto[c]) for c in cols_bloque)
+            for i in range(max_filas):
+                data.append([Paragraph(por_concepto[c][i], st_celda)
+                             if i < len(por_concepto[c]) else "" for c in cols_bloque])
+            data.append([Paragraph(f"PENDIENTES: {len(por_concepto[c])}", st_hdr)
+                         for c in cols_bloque])
+            ancho_col = (PAGE[0] - 3*cm) / len(cols_bloque)
+            tb = Table(data, colWidths=[ancho_col]*len(cols_bloque), repeatRows=1)
+            ult = len(data) - 1
+            tb.setStyle(TableStyle([
+                ("BACKGROUND",(0,0),(-1,0), GRIS_HDR),
+                ("BACKGROUND",(0,ult),(-1,ult), GRIS_HDR),
+                ("VALIGN",(0,0),(-1,-1),"TOP"),
+                ("GRID",(0,0),(-1,-1),0.4, colors.grey),
+                ("LEFTPADDING",(0,0),(-1,-1),4),
+                ("RIGHTPADDING",(0,0),(-1,-1),4),
+                ("TOPPADDING",(0,0),(-1,-1),2),
+                ("BOTTOMPADDING",(0,0),(-1,-1),2),
+                # Filas alternas: ayuda a seguir el renglón con la vista
+                ("ROWBACKGROUNDS",(0,1),(-1,ult-1),[colors.white, colors.HexColor("#F2F2F2")]),
+            ]))
+            elems.append(tb)
 
     if not elems:
         return None

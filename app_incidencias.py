@@ -1678,6 +1678,26 @@ def vista_empleado():
                            "Si ya lo entregaste, espera a que el área lo valide.")
     st.divider()
 
+    # ── Firmas de nómina pendientes (lo que RH registró en el Sheet) ──
+    try:
+        _pn = cargar_pendientes_nomina_sheet()
+        if not _pn.empty and "NOMBRE" in _pn.columns:
+            if "ESTADO" in _pn.columns:
+                _pn = _pn[_pn["ESTADO"].astype(str).str.upper().str.strip() != "FIRMADO"]
+            _tok_yo = _tokens_persona(st.session_state.get("nombre", ""))
+            _mios = [r for _, r in _pn.iterrows()
+                     if _mismo_nombre(_tok_yo, _tokens_persona(r.get("NOMBRE", "")))]
+            if _mios:
+                st.markdown("#### 💰 Mis firmas de nómina pendientes")
+                st.warning(f"Tienes **{len(_mios)}** registro(s) de nómina sin firmar. "
+                           "La Dirección de Pagos permite un rezago máximo de 2 quincenas; "
+                           "acude a la Dirección a firmar.")
+                for _r in _mios:
+                    st.markdown(f"• **{_r.get('CONCEPTO','')}** · nómina {_r.get('NOMINA','')}")
+                st.divider()
+    except Exception:
+        pass  # informativo: nunca debe impedir que el empleado use su vista
+
     # ── Faltas informativas ──────────────────────
     asis = cargar_asistencia_mes()
     mi_asis = pd.DataFrame()
