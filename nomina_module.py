@@ -551,11 +551,21 @@ def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False, conceptos_por
 
         # Orden de columnas = orden en que se CAPTURARON los conceptos
         # (no el orden en que se agregaron empleados)
-        if conceptos_por_nomina and conceptos_por_nomina.get(nom):
-            orden = [c for c in conceptos_por_nomina[nom] if c in por_concepto]
-            orden += [c for c in por_concepto if c not in orden]
-        else:
-            orden = list(por_concepto.keys())
+        # Columnas SIEMPRE por número de quincena, no por el orden en que se
+        # capturaron: antes salían salteadas (Q16, Q17, Q18, Q15) y así nadie
+        # las atiende. Variantes de la misma quincena quedan juntas
+        # (Q17, Q17 GU1, Q17-RETRO) y lo que no trae número, al final.
+        def _clave_orden(c):
+            txt = str(c).strip().upper()
+            m = re.search(r"(\d+)", txt)
+            if not m:
+                return (2, 0, txt)          # sin número: al final
+            # Quincenas normales (Q15, Q16...) primero y en orden; después las
+            # variantes (Q17-RETRO, Q17 GU1), también en orden. Así las cuatro
+            # quincenas corridas quedan juntas en la misma hoja.
+            simple = re.fullmatch(r"Q?\s*\d+", txt) is not None
+            return (0 if simple else 1, int(m.group(1)), txt)
+        orden = sorted(por_concepto.keys(), key=_clave_orden)
 
         # Nombres en orden alfabético por columna (como el Excel de control)
         for c in orden:
