@@ -62,6 +62,8 @@ Enlace de Recursos Humanos de Dirección de Formación Continua"""
     return cuerpo.strip()
 
 
+NOMINAS = ["14ADG1075P", "14FMP0001B"]
+
 TAB_PEND_NOMINA = "Pendientes_Nomina"
 COLS_PEND_NOMINA = ["FECHA_REGISTRO", "NOMBRE", "NOMINA", "CONCEPTO",
                     "ESTADO", "REGISTRADO_POR", "FECHA_FIRMA"]
@@ -191,6 +193,52 @@ def cerrar_quincena(get_client) -> int:
     return len(abiertas)
 
 
+def precargar_quincena(get_client, directorio, num_q: int, nominas: list) -> tuple:
+    """Da de alta como PENDIENTE a TODO el personal del directorio de nómina
+    para la quincena ordinaria: el día de pago nadie ha firmado todavía.
+    Así nadie se escapa por un olvido de captura. Solo la quincena ordinaria:
+    conceptos como Q17-RETRO aplican a unos cuantos y se siguen capturando a
+    mano, para no inventarle una deuda a quien nunca tuvo ese pago.
+    Devuelve (creados, ya_estaban)."""
+    from datetime import datetime
+    concepto = f"Q{num_q}"
+    _ws, _h, abiertas = _leer_pendientes_abiertos(get_client)
+    import gspread
+    sh = get_client().open_by_key(st.secrets["sheet_checador_id"])
+    try:
+        ws = sh.worksheet(TAB_PEND_NOMINA)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(TAB_PEND_NOMINA, rows=2, cols=len(COLS_PEND_NOMINA))
+        ws.append_row(COLS_PEND_NOMINA)
+    # No duplicar: se revisa TODO el historial, incluido lo ya FIRMADO, para
+    # no revivir a quien ya vino a firmar esta misma quincena.
+    valores = ws.get_all_values()
+    headers = [h.strip().upper() for h in valores[0]] if valores else COLS_PEND_NOMINA
+    def _i(c):
+        return headers.index(c) if c in headers else -1
+    i_n, i_nm, i_c = _i("NOMBRE"), _i("NOMINA"), _i("CONCEPTO")
+    existentes = set()
+    for f in valores[1:]:
+        def _v(i):
+            return f[i] if 0 <= i < len(f) else ""
+        existentes.add((_norm_nom(_v(i_n)), str(_v(i_nm)).strip(), str(_v(i_c)).strip()))
+    hoy = datetime.now().strftime("%Y-%m-%d %H:%M")
+    quien = st.session_state.get("nombre", "RH")
+    nuevas, repetidas = [], 0
+    for _, r in directorio.iterrows():
+        nombre = str(r.get("NOMBRE_COMPLETO", "")).strip()
+        if not nombre:
+            continue
+        for nomina in nominas:
+            if (_norm_nom(nombre), nomina, concepto) in existentes:
+                repetidas += 1
+                continue
+            nuevas.append([hoy, nombre, nomina, concepto, "PENDIENTE", quien, ""])
+    if nuevas:
+        ws.append_rows(nuevas, value_input_option="USER_ENTERED")  # una sola escritura
+    return len(nuevas), repetidas
+
+
 def _panel_marcar_firmados(get_client):
     """Marca como FIRMADO lo que ya vino a firmar, para que deje de aparecerle
     al coordinador. NO se borra la fila: queda el histórico con su fecha."""
@@ -240,6 +288,30 @@ def _panel_marcar_firmados(get_client):
                 for n_fila, nomina, concepto in abiertos[nombre]:
                     if st.checkbox(f"{concepto} · nómina {nomina}", key=f"fmd_{n_fila}"):
                         marcadas.append(n_fila)
+    # Cierre invertido: con la nómina física enfrente se marcan los POCOS que
+    # no firmaron y un clic cierra a todos los demás. Al revés (palomear a los
+    # 100 que sí firmaron) sería más trabajo que capturarlos a mano.
+    with st.popover("✅ Los NO marcados ya firmaron (cerrar el resto)", use_container_width=True):
+        _resto = [n for n, _, _, _ in
+                  [(nf, nb, nm, cc) for nb in abiertos for nf, nm, cc in abiertos[nb]]
+                  if n not in marcadas]
+        st.caption(f"Marca arriba solo a quienes NO firmaron. Al confirmar, los otros "
+                   f"{len(_resto)} quedan como FIRMADO con la fecha de hoy.")
+        if st.checkbox("Confirmo que el resto ya firmó", key="conf_resto"):
+            if st.button("Cerrar el resto", type="primary") and _resto:
+                i_fecha = _i("FECHA_FIRMA")
+                ahora = datetime.now().strftime("%Y-%m-%d %H:%M")
+                celdas = [Cell(n, i_est + 1, "FIRMADO") for n in _resto]
+                if i_fecha >= 0:
+                    celdas += [Cell(n, i_fecha + 1, ahora) for n in _resto]
+                try:
+                    ws.update_cells(celdas, value_input_option="USER_ENTERED")
+                    st.cache_data.clear()
+                    st.success(f"Cerrados {len(_resto)}. Quedan pendientes los {len(marcadas)} que marcaste.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo cerrar: {e}")
+
     if marcadas and st.button(f"✅ Marcar {len(marcadas)} como FIRMADO", type="primary"):
         i_fecha = _i("FECHA_FIRMA")
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -256,7 +328,8 @@ def _panel_marcar_firmados(get_client):
             st.error(f"No se pudo actualizar: {e}")
 
 
-def render_pendientes_nomina(cargar_directorio_nomina, get_client=None):
+def render_pendientes_nomina(cargar_directorio_nomina, get_client=None,
+                             quincena_actual=None):
     st.markdown("### 📋 Pendientes de Firma de Nómina")
     directorio = cargar_directorio_nomina()
     if get_client is not None and not directorio.empty:
@@ -284,6 +357,25 @@ def render_pendientes_nomina(cargar_directorio_nomina, get_client=None):
                         st.rerun()
                     except Exception as e:
                         st.error(f"No se pudo cerrar: {e}")
+        if quincena_actual:
+            _q = quincena_actual()
+            if _q:
+                _num, _fpago = _q
+                with st.popover(f"📅 Precargar Q{_num} a todo el personal", use_container_width=True):
+                    st.caption(f"Quincena vigente según el calendario de pagos: **Q{_num}** "
+                               f"(pago del {_fpago.strftime('%d/%m/%Y')}). Se dará de alta "
+                               "como PENDIENTE a todo el personal en nómina; después marcas "
+                               "a quienes van firmando. No se duplica si ya se precargó.")
+                    if st.button("Precargar ahora", type="primary", key="btn_precarga"):
+                        try:
+                            n_new, n_rep = precargar_quincena(get_client, directorio, _num, NOMINAS)
+                            msg = f"Precargados {n_new} registro(s) de Q{_num}."
+                            if n_rep:
+                                msg += f" {n_rep} ya existían (no se duplicaron)."
+                            st.session_state["_msg_nomina"] = msg
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"No se pudo precargar: {e}")
         with st.expander("✅ Marcar firmas ya recibidas (quitarlas de pendientes)"):
             _panel_marcar_firmados(get_client)
     if directorio.empty:
@@ -292,7 +384,6 @@ def render_pendientes_nomina(cargar_directorio_nomina, get_client=None):
                    "JEFE_INMEDIATO, CORREO_JEFE, CC_FIJO.")
         return
 
-    NOMINAS = ["14ADG1075P", "14FMP0001B"]
 
     # 1. Conceptos del período (los escribe el usuario), por nómina
     st.markdown("#### 1. Conceptos pendientes de este período")

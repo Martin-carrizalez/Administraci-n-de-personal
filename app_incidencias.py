@@ -2504,7 +2504,8 @@ def vista_admin():
         if render_pendientes_nomina is None:
             st.error(f"El módulo de nómina no está disponible: {_ERROR_NOMINA}")
         else:
-            render_pendientes_nomina(cargar_directorio_nomina, get_client)
+            render_pendientes_nomina(cargar_directorio_nomina, get_client,
+                                     quincena_actual=quincena_pago_actual)
 
     with tab3:
         # ── Alerta días económicos por agotarse ──────
@@ -2581,6 +2582,99 @@ def vista_admin():
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
+PAGOS = [
+    ("Enero", [
+        ("14 Ene", "Q-01", [("Estímulo puntualidad y asistencia 2ª parte", "🟣🔵"), ("Prima Dominical", "🟣🔵")]),
+        ("29 Ene", "Q-02", [("Compensación Nacional Única 1ª Parte", "🟡🟢")]),
+    ]),
+    ("Febrero", [
+        ("12 Feb", "Q-03", [("Sueldo ordinario", "")]),
+        ("26 Feb", "Q-04", [("Sueldo ordinario", "")]),
+    ]),
+    ("Marzo", [
+        ("12 Mar", "Q-05", [("Sueldo ordinario", "")]),
+        ("26 Mar", "Q-06", [("1ª Parte Aguinaldo", "🟢🔵")]),
+    ]),
+    ("Abril", [
+        ("14 Abr", "Q-07", [("Sueldo ordinario", "")]),
+        ("29 Abr", "Q-08", [("Sueldo ordinario", "")]),
+    ]),
+    ("Mayo", [
+        ("14 May", "Q-09", [
+            ("1ª Parte Aguinaldo", "🟡"),
+            ("Gratificación Día del Maestro", "🟡"),
+            ("1ª Parte Aguinaldo", "🟣"),
+            ("Reconocimiento Docentes Nivel Superior", "🟣"),
+            ("Ayuda para Libros", "🟣"),
+        ]),
+        ("28 May", "Q-10", [("Sueldo ordinario", "")]),
+    ]),
+    ("Junio", [
+        ("12 Jun", "Q-11", [("Estímulo puntualidad y asistencia 1ª parte", "🟣🔵")]),
+        ("29 Jun", "Q-12", [("Reconocimiento a Directores", "🟡")]),
+    ]),
+    ("Julio", [
+        ("14 Jul", "Q-13", [("Sueldo ordinario", "")]),
+        ("30 Jul", "Q-14", [("Gratificación por el trabajo", "🟢")]),
+    ]),
+    ("Agosto", [
+        ("13 Ago", "Q-15", [("Organización Escolar", "🟡"), ("Ayuda para gastos escolares", "🟢")]),
+        ("28 Ago", "Q-16", [("Compensación Nacional Única 2ª Parte", "🟡🟢"), ("Medida Económica Única", "🟣🔵")]),
+    ]),
+    ("Septiembre", [
+        ("14 Sep", "Q-17", [
+            ("Estímulo a la Actividad Docente", "🟡"),
+            ("Estímulo a Directores", "🟡"),
+            ("Gratificación Única 1ª Parte", "🔵"),
+        ]),
+        ("29 Sep", "Q-18", [
+            ("Gratificación Fortalecimiento Académico", "🟡"),
+            ("Bono Extraordinario superación académica 1ª Parte", "🟣"),
+        ]),
+    ]),
+    ("Octubre", [
+        ("14 Oct", "Q-19", [("Sueldo ordinario", "")]),
+        ("29 Oct", "Q-20", [("Fortalecimiento CC según ajustes salariales", "🟡"), ("Fortalecimiento CT según ajustes salariales", "🟢")]),
+    ]),
+    ("Noviembre", [
+        ("12 Nov", "Q-21", [("Sueldo ordinario", "")]),
+        ("27 Nov", "Q-22", [("Bono anual 24 días inicial", "🟡"), ("Apoyo a la integración educativa especial", "🟡")]),
+    ]),
+    ("Diciembre", [
+        ("Por definir", "", [("Fecha de pago por definir", "")]),
+    ]),
+]
+
+def quincena_pago_actual(anio: int = None):
+    """(numero_quincena, fecha_de_pago) de la quincena vigente, leída del
+    MISMO calendario PAGOS que muestra la app. Vigente = último pago que ya
+    ocurrió (o es hoy). None si aún no hay pagos en el año."""
+    import pytz
+    _MES_ABREV = {"Ene":1,"Feb":2,"Mar":3,"Abr":4,"May":5,"Jun":6,
+                  "Jul":7,"Ago":8,"Sep":9,"Oct":10,"Nov":11,"Dic":12}
+    hoy = datetime.now(pytz.timezone("America/Mexico_City")).date()
+    anio = anio or hoy.year
+    todas = []
+    for _mes, quincenas in PAGOS:
+        for fecha_str, qna, _ in quincenas:
+            try:
+                dia, mes_abr = fecha_str.split()
+                f = date(anio, _MES_ABREV[mes_abr], int(dia))
+            except Exception:
+                continue
+            m = re.search(r"(\d+)", str(qna))
+            if m:
+                todas.append((f, int(m.group(1))))
+    todas.sort()
+    actual = None
+    for f, num in todas:
+        if f <= hoy:
+            actual = (num, f)
+        else:
+            break
+    return actual
+
+
 def vista_calendario():
     st.markdown("## 📅 Calendario de Pagos y Prestaciones 2026")
     st.markdown("""
@@ -2591,68 +2685,6 @@ def vista_calendario():
         <span>🔵 Personal de Apoyo No Docente Nivel Superior</span>
     </div>""", unsafe_allow_html=True)
 
-    PAGOS = [
-        ("Enero", [
-            ("14 Ene", "Q-01", [("Estímulo puntualidad y asistencia 2ª parte", "🟣🔵"), ("Prima Dominical", "🟣🔵")]),
-            ("29 Ene", "Q-02", [("Compensación Nacional Única 1ª Parte", "🟡🟢")]),
-        ]),
-        ("Febrero", [
-            ("12 Feb", "Q-03", [("Sueldo ordinario", "")]),
-            ("26 Feb", "Q-04", [("Sueldo ordinario", "")]),
-        ]),
-        ("Marzo", [
-            ("12 Mar", "Q-05", [("Sueldo ordinario", "")]),
-            ("26 Mar", "Q-06", [("1ª Parte Aguinaldo", "🟢🔵")]),
-        ]),
-        ("Abril", [
-            ("14 Abr", "Q-07", [("Sueldo ordinario", "")]),
-            ("29 Abr", "Q-08", [("Sueldo ordinario", "")]),
-        ]),
-        ("Mayo", [
-            ("14 May", "Q-09", [
-                ("1ª Parte Aguinaldo", "🟡"),
-                ("Gratificación Día del Maestro", "🟡"),
-                ("1ª Parte Aguinaldo", "🟣"),
-                ("Reconocimiento Docentes Nivel Superior", "🟣"),
-                ("Ayuda para Libros", "🟣"),
-            ]),
-            ("28 May", "Q-10", [("Sueldo ordinario", "")]),
-        ]),
-        ("Junio", [
-            ("12 Jun", "Q-11", [("Estímulo puntualidad y asistencia 1ª parte", "🟣🔵")]),
-            ("29 Jun", "Q-12", [("Reconocimiento a Directores", "🟡")]),
-        ]),
-        ("Julio", [
-            ("14 Jul", "Q-13", [("Sueldo ordinario", "")]),
-            ("30 Jul", "Q-14", [("Gratificación por el trabajo", "🟢")]),
-        ]),
-        ("Agosto", [
-            ("13 Ago", "Q-15", [("Organización Escolar", "🟡"), ("Ayuda para gastos escolares", "🟢")]),
-            ("28 Ago", "Q-16", [("Compensación Nacional Única 2ª Parte", "🟡🟢"), ("Medida Económica Única", "🟣🔵")]),
-        ]),
-        ("Septiembre", [
-            ("14 Sep", "Q-17", [
-                ("Estímulo a la Actividad Docente", "🟡"),
-                ("Estímulo a Directores", "🟡"),
-                ("Gratificación Única 1ª Parte", "🔵"),
-            ]),
-            ("29 Sep", "Q-18", [
-                ("Gratificación Fortalecimiento Académico", "🟡"),
-                ("Bono Extraordinario superación académica 1ª Parte", "🟣"),
-            ]),
-        ]),
-        ("Octubre", [
-            ("14 Oct", "Q-19", [("Sueldo ordinario", "")]),
-            ("29 Oct", "Q-20", [("Fortalecimiento CC según ajustes salariales", "🟡"), ("Fortalecimiento CT según ajustes salariales", "🟢")]),
-        ]),
-        ("Noviembre", [
-            ("12 Nov", "Q-21", [("Sueldo ordinario", "")]),
-            ("27 Nov", "Q-22", [("Bono anual 24 días inicial", "🟡"), ("Apoyo a la integración educativa especial", "🟡")]),
-        ]),
-        ("Diciembre", [
-            ("Por definir", "", [("Fecha de pago por definir", "")]),
-        ]),
-    ]
 
     import pytz
     from datetime import datetime, date
