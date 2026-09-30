@@ -199,7 +199,7 @@ def precargar_quincena(get_client, directorio, num_q: int, nominas: list) -> tup
     Así nadie se escapa por un olvido de captura. Solo la quincena ordinaria:
     conceptos como Q17-RETRO aplican a unos cuantos y se siguen capturando a
     mano, para no inventarle una deuda a quien nunca tuvo ese pago.
-    Devuelve (creados, ya_estaban)."""
+    Devuelve (creados, ya_estaban, sin_cct)."""
     from datetime import datetime
     concepto = f"Q{num_q}"
     _ws, _h, abiertas = _leer_pendientes_abiertos(get_client)
@@ -225,18 +225,59 @@ def precargar_quincena(get_client, directorio, num_q: int, nominas: list) -> tup
     hoy = datetime.now().strftime("%Y-%m-%d %H:%M")
     quien = st.session_state.get("nombre", "RH")
     nuevas, repetidas = [], 0
+    sin_cct = []
     for _, r in directorio.iterrows():
         nombre = str(r.get("NOMBRE_COMPLETO", "")).strip()
         if not nombre:
             continue
-        for nomina in nominas:
+        # Cada quien SOLO en el o los CCT donde realmente cobra. La celda trae
+        # uno ("14ADG1075P") o los dos separados por diagonal
+        # ("14ADG1075P / 14FMP0001B"); nunca se asume que cobra en ambos.
+        cct = str(r.get("CCT_NOMINA", "") or "").upper()
+        suyas = [n for n in nominas if n.upper() in cct]
+        if not suyas:
+            sin_cct.append(nombre)   # sin dato: no se inventa en cuál cobra
+            continue
+        for nomina in suyas:
             if (_norm_nom(nombre), nomina, concepto) in existentes:
                 repetidas += 1
                 continue
             nuevas.append([hoy, nombre, nomina, concepto, "PENDIENTE", quien, ""])
     if nuevas:
         ws.append_rows(nuevas, value_input_option="USER_ENTERED")  # una sola escritura
-    return len(nuevas), repetidas
+    return len(nuevas), repetidas, sin_cct
+
+
+def borrar_precarga(get_client, concepto: str) -> int:
+    """Borra del Sheet las filas PENDIENTE de ese concepto (p. ej. 'Q18').
+    Para deshacer una precarga equivocada. No toca lo ya FIRMADO, que es
+    historial, ni los conceptos capturados a mano de otras quincenas."""
+    import gspread
+    sh = get_client().open_by_key(st.secrets["sheet_checador_id"])
+    try:
+        ws = sh.worksheet(TAB_PEND_NOMINA)
+    except gspread.WorksheetNotFound:
+        return 0
+    valores = ws.get_all_values()
+    if len(valores) < 2:
+        return 0
+    headers = [h.strip().upper() for h in valores[0]]
+    i_c = headers.index("CONCEPTO") if "CONCEPTO" in headers else -1
+    i_e = headers.index("ESTADO") if "ESTADO" in headers else -1
+    if i_c < 0 or i_e < 0:
+        return 0
+    def _v(f, i):
+        return f[i] if 0 <= i < len(f) else ""
+    quedan = [valores[0]] + [
+        f for f in valores[1:]
+        if not (str(_v(f, i_c)).strip().upper() == concepto.strip().upper()
+                and str(_v(f, i_e)).strip().upper() != "FIRMADO")]
+    borradas = len(valores) - len(quedan)
+    if borradas:
+        ws.clear()
+        ws.update(quedan, value_input_option="USER_ENTERED")
+        st.cache_data.clear()
+    return borradas
 
 
 def _panel_marcar_firmados(get_client):
@@ -366,12 +407,25 @@ def render_pendientes_nomina(cargar_directorio_nomina, get_client=None,
                                f"(pago del {_fpago.strftime('%d/%m/%Y')}). Se dará de alta "
                                "como PENDIENTE a todo el personal en nómina; después marcas "
                                "a quienes van firmando. No se duplica si ya se precargó.")
+                    if st.checkbox(f"Deshacer: borrar lo precargado de Q{_num}", key="chk_borrar_prec"):
+                        if st.button(f"Borrar pendientes de Q{_num}", key="btn_borrar_prec"):
+                            try:
+                                n_b = borrar_precarga(get_client, f"Q{_num}")
+                                st.session_state["_msg_nomina"] = f"Borrados {n_b} registro(s) de Q{_num}."
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"No se pudo borrar: {e}")
                     if st.button("Precargar ahora", type="primary", key="btn_precarga"):
                         try:
-                            n_new, n_rep = precargar_quincena(get_client, directorio, _num, NOMINAS)
+                            n_new, n_rep, sin_cct = precargar_quincena(
+                                get_client, directorio, _num, NOMINAS)
                             msg = f"Precargados {n_new} registro(s) de Q{_num}."
                             if n_rep:
                                 msg += f" {n_rep} ya existían (no se duplicaron)."
+                            if sin_cct:
+                                msg += (f" ⚠️ {len(sin_cct)} sin CCT_NOMINA en el padrón, "
+                                        f"no se precargaron: {', '.join(sin_cct[:5])}"
+                                        + ("..." if len(sin_cct) > 5 else ""))
                             st.session_state["_msg_nomina"] = msg
                             st.rerun()
                         except Exception as e:

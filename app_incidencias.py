@@ -255,7 +255,7 @@ def cargar_horarios():
     return pd.concat([tab, nuevos], ignore_index=True).fillna("")
 
 COLS_NOMINA = ["ID", "NOMBRE_COMPLETO", "CORREO",
-               "JEFE_INMEDIATO", "CORREO_JEFE", "CC_FIJO"]
+               "JEFE_INMEDIATO", "CORREO_JEFE", "CC_FIJO", "CCT_NOMINA"]
 
 
 @st.cache_data(ttl=300)
@@ -301,6 +301,12 @@ def cargar_directorio_nomina():
         _rfc = df[_c_rfc].astype(str).str.strip().str.upper() if _c_rfc else ""
         df["ID"] = [r if r else f"NOM:{n}" for r, n in
                     zip(_rfc if _c_rfc else [""] * len(df), df["NOMBRE_COMPLETO"].astype(str))]
+    # CCT_NOMINA dice en qué centro(s) cobra cada quien ("14ADG1075P" o
+    # "14ADG1075P / 14FMP0001B"). Sin esto, la precarga metía a TODOS en las
+    # dos nóminas, aunque cobraran en una sola.
+    _c_cct = _col(padron, "CCT_NOMINA")
+    if _c_cct and "CCT_NOMINA" not in df.columns:
+        df["CCT_NOMINA"] = padron.loc[df.index, _c_cct].astype(str)
     for col in COLS_NOMINA:
         if col not in df.columns:
             df[col] = ""
