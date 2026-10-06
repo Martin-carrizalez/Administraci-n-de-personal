@@ -3314,7 +3314,7 @@ def pendientes_acuse_de_centro(centro: str) -> list:
         c for c in unicodedata.normalize("NFKD", x.upper()) if not unicodedata.combining(c)))
     _estado = df.get("ESTADO", pd.Series([""] * len(df))).astype(str).str.upper().str.strip()
     df = df[_asunto_norm.str.contains("COMISION", na=False)
-            & ~_estado.isin(["ACUSE", "CANCELADO"])]
+            & ~_estado.isin(["ACUSE", "CANCELADO", "HISTORICO"])]
     if df.empty:
         return []
     try:
