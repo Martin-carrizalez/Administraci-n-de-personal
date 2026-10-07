@@ -378,13 +378,22 @@ def render_checador(deps):
         while d <= fecha_fin:
             dias.append(d); d += timedelta(days=1)
         col_to_day = {}
+        # El umbral era fijo (>=10 días) y descartaba los reportes cortos: con
+        # un período de 6 días ninguna fila lo alcanzaba, col_to_day quedaba
+        # vacío y TODAS las checadas se perdían (0 retardos, todo falta).
+        # Ahora se exige la cantidad real de días del período, o 3 como mínimo.
+        _min_dias = max(3, min(len(dias), 10))
         for i in range(5):
             row = sh.row_values(i)
-            if sum(1 for v in row if isinstance(v, float) and 1 <= v <= 31) >= 10:
+            if sum(1 for v in row if isinstance(v, float) and 1 <= v <= 31) >= _min_dias:
                 for j, v in enumerate(row):
                     if isinstance(v, float) and 1 <= v <= 31:
                         col_to_day[j] = int(v)
                 break
+        if not col_to_day:
+            raise ValueError("No se encontró la fila de días en el reporte. "
+                             "Verifica que el archivo sea el 'Reporte de Asistencia' "
+                             "exportado del reloj.")
         checadas = {}
         i = 0
         while i < sh.nrows:
