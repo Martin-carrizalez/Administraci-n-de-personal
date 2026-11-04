@@ -1004,50 +1004,123 @@ def subir_anexo_drive(archivo, folio: str, rfc: str) -> str:
 # que falla al escribirse no deja absolutamente ningún rastro: ni el empleado
 # ni RH pueden demostrar después que se intentó enviar.
 BITACORA_SOL_TAB = "Bitacora_Solicitudes"
-BITACORA_SOL_HEADERS = ["FECHA_HORA", "RFC", "NOMBRE", "TIPO", "FECHA_INICIO",
-                        "FECHA_FIN", "FOLIO", "RESULTADO", "DETALLE"]
+# Orden pensado para leerse de izquierda a derecha: cuándo, qué pasó, a cuál
+# folio, de quién es, de qué estado a cuál, y quién lo hizo.
+BITACORA_SOL_HEADERS = [
+    "FECHA_HORA", "EVENTO", "FOLIO", "TIPO", "NOMBRE", "RFC",
+    "ESTADO_ANTERIOR", "ESTADO_NUEVO", "USUARIO_SESION", "ROL",
+    "RESULTADO", "DETALLE", "FECHA_INICIO", "FECHA_FIN",
+]
 
 
 def _ws_bitacora_sol():
+    """Hoja de bitácora, creándola si no existe.
+
+    Si la hoja ya existía con menos columnas (la primera versión solo
+    registraba altas), se le AGREGAN las que falten en vez de romperse: así
+    los renglones viejos se conservan y los nuevos quedan alineados.
+    """
     sh = get_client().open_by_key(st.secrets["sheet_checador_id"])
     try:
-        return sh.worksheet(BITACORA_SOL_TAB)
+        ws = sh.worksheet(BITACORA_SOL_TAB)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(BITACORA_SOL_TAB, rows=2, cols=len(BITACORA_SOL_HEADERS))
         ws.append_row(BITACORA_SOL_HEADERS, value_input_option="USER_ENTERED")
         return ws
+    try:
+        actuales = [str(h).strip().upper() for h in ws.row_values(1)]
+        faltan = [h for h in BITACORA_SOL_HEADERS if h not in actuales]
+        if faltan:
+            if ws.col_count < len(actuales) + len(faltan):
+                ws.add_cols(len(actuales) + len(faltan) - ws.col_count)
+            ws.update(
+                [actuales + faltan],
+                f"A1:{chr(64 + len(actuales) + len(faltan)) if len(actuales)+len(faltan) <= 26 else 'AZ'}1",
+                value_input_option="USER_ENTERED")
+    except Exception:
+        pass  # si no se pudo ampliar, se escribe con lo que haya
+    return ws
 
 
 def _volcar_bitacora_sol():
-    """Vacía la cola de la bitácora al Sheet. Si Google está caído la cola se
-    queda en sesión y se reintenta en el siguiente rerun: así un 429 no se
-    lleva también el registro de auditoría."""
+    """Vacía la cola al Sheet. Cada evento viaja como diccionario y aquí se
+    acomoda según los encabezados REALES de la hoja: si alguien le cambia el
+    orden a las columnas, el dato sigue cayendo donde va.
+
+    Si Google está caído la cola se queda en sesión y se reintenta en el
+    siguiente rerun: un 429 no se lleva también el registro de auditoría.
+    """
     cola = st.session_state.get("_bitacora_cola") or []
     if not cola:
         return
     try:
-        _ws_bitacora_sol().append_rows(cola, value_input_option="USER_ENTERED",
-                                       insert_data_option="INSERT_ROWS")
+        ws = _ws_bitacora_sol()
+        enc = [str(h).strip().upper() for h in ws.row_values(1)] or BITACORA_SOL_HEADERS
+        filas = []
+        for ev in cola:
+            if isinstance(ev, dict):
+                filas.append([str(ev.get(c, "")) for c in enc])
+            else:
+                filas.append(list(ev))  # cola de la versión anterior (lista)
+        ws.append_rows(filas, value_input_option="USER_ENTERED",
+                       insert_data_option="INSERT_ROWS")
         st.session_state["_bitacora_cola"] = []
     except Exception:
-        pass  # se reintenta solo; nunca debe tumbar la pantalla del empleado
+        pass  # se reintenta solo; nunca debe tumbar la pantalla
 
 
-def registrar_bitacora_sol(datos: dict, resultado: str, detalle: str = ""):
-    """Anota un intento de envío. NUNCA lanza excepción: la bitácora no puede
-    ser el motivo de que una solicitud falle."""
+def registrar_bitacora_evento(evento: str, folio: str = "", tipo: str = "",
+                              nombre: str = "", rfc: str = "",
+                              estado_anterior: str = "", estado_nuevo: str = "",
+                              resultado: str = "OK", detalle: str = "",
+                              fecha_inicio: str = "", fecha_fin: str = ""):
+    """Anota UN evento del ciclo de vida de una solicitud.
+
+    EVENTO es ALTA (la mandó el empleado), AUTORIZACION, RECHAZO o
+    CAMBIO_HORARIO. Con el alta y la resolución en la misma hoja, cada folio
+    tiene su rastro completo: si un folio tiene ALTA pero nunca una
+    resolución y ya no está en pendientes, se perdió — y la bitácora lo
+    demuestra.
+
+    NUNCA lanza excepción: la bitácora no puede ser el motivo de que una
+    solicitud o una autorización fallen.
+    """
     try:
         ahora = datetime.now(pytz.utc).astimezone(
             pytz.timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M:%S")
-        fila = [ahora,
-                str(datos.get("rfc", "")), str(datos.get("nombre", "")),
-                str(datos.get("tipo", "")), str(datos.get("fecha_inicio", "")),
-                str(datos.get("fecha_fin", "")), str(datos.get("folio", "")),
-                resultado, str(detalle)[:300]]
-        st.session_state.setdefault("_bitacora_cola", []).append(fila)
+        st.session_state.setdefault("_bitacora_cola", []).append({
+            "FECHA_HORA": ahora,
+            "EVENTO": evento,
+            "FOLIO": str(folio),
+            "TIPO": str(tipo),
+            "NOMBRE": str(nombre),
+            "RFC": str(rfc),
+            "ESTADO_ANTERIOR": str(estado_anterior),
+            "ESTADO_NUEVO": str(estado_nuevo),
+            # Quién estaba dentro al hacerlo, que no siempre es el titular
+            # de la solicitud (un admin puede capturar o resolver por otro).
+            "USUARIO_SESION": str(st.session_state.get("nombre", "")),
+            "ROL": str(st.session_state.get("rol", "")),
+            "RESULTADO": resultado,
+            "DETALLE": str(detalle)[:300],
+            "FECHA_INICIO": str(fecha_inicio),
+            "FECHA_FIN": str(fecha_fin),
+        })
         _volcar_bitacora_sol()
     except Exception:
         pass
+
+
+def registrar_bitacora_sol(datos: dict, resultado: str, detalle: str = ""):
+    """Alta de una solicitud. Envoltura sobre registrar_bitacora_evento para
+    no cambiar los puntos de llamada que ya existían."""
+    registrar_bitacora_evento(
+        "ALTA",
+        folio=datos.get("folio", ""), tipo=datos.get("tipo", ""),
+        nombre=datos.get("nombre", ""), rfc=datos.get("rfc", ""),
+        estado_anterior="", estado_nuevo="PENDIENTE" if resultado == "GUARDADA" else "",
+        resultado=resultado, detalle=detalle,
+        fecha_inicio=datos.get("fecha_inicio", ""), fecha_fin=datos.get("fecha_fin", ""))
 
 
 def _estado_norm(serie) -> pd.Series:
@@ -1284,7 +1357,22 @@ def autorizar_incidencia(folio: str, obs: str = ""):
                 if obs and "OBSERVACIONES" in headers:
                     celdas.append(Cell(i, headers.index("OBSERVACIONES") + 1, obs))
                 ws.update_cells(celdas, value_input_option="USER_ENTERED")
+                # El estado ANTERIOR se toma del renglón tal como estaba antes
+                # de sobrescribirlo: es la mitad que faltaba para poder auditar
+                # una solicitud que desaparece del panel.
+                registrar_bitacora_evento(
+                    "AUTORIZACION", folio=folio, tipo=row.get("TIPO", ""),
+                    nombre=row.get("NOMBRE", ""), rfc=row.get("RFC", ""),
+                    estado_anterior=row.get("ESTADO", ""), estado_nuevo="AUTORIZADO",
+                    detalle=obs, fecha_inicio=row.get("FECHA_INICIO", ""),
+                    fecha_fin=row.get("FECHA_FIN", ""))
                 break
+        else:
+            # No se encontró el folio: eso también se asienta, porque es
+            # justo la huella de una solicitud que ya no está en el Sheet.
+            registrar_bitacora_evento("AUTORIZACION", folio=folio,
+                                      resultado="NO_ENCONTRADA",
+                                      detalle="el folio no está en la hoja Incidencias")
         cargar_incidencias.clear()
     except gspread.exceptions.APIError:
         st.error("⏳ Google Sheets está saturado temporalmente. Espera 5 segundos e intenta de nuevo.")
@@ -1307,7 +1395,16 @@ def rechazar_incidencia(folio: str, obs: str):
                 Cell(i, headers.index("FECHA_AUTORIZACION") + 1, ahora),
                 Cell(i, headers.index("OBSERVACIONES") + 1,      obs),
             ], value_input_option="USER_ENTERED")
+            registrar_bitacora_evento(
+                "RECHAZO", folio=folio, tipo=row.get("TIPO", ""),
+                nombre=row.get("NOMBRE", ""), rfc=row.get("RFC", ""),
+                estado_anterior=row.get("ESTADO", ""), estado_nuevo="RECHAZADO",
+                detalle=obs, fecha_inicio=row.get("FECHA_INICIO", ""),
+                fecha_fin=row.get("FECHA_FIN", ""))
             break
+    else:
+        registrar_bitacora_evento("RECHAZO", folio=folio, resultado="NO_ENCONTRADA",
+                                  detalle="el folio no está en la hoja Incidencias")
     cargar_incidencias.clear()
 
 def _localizar_fila_eco(ws, folio: str = "", rfc: str = "", fecha_inicio: str = "", fecha_registro: str = ""):
@@ -1337,11 +1434,22 @@ def rechazar_dia_economico(obs: str, folio: str = "", rfc: str = "", fecha_inici
         ws = sh.worksheet("Solicitudes")
         fila, headers = _localizar_fila_eco(ws, folio, rfc, fecha_inicio, fecha_registro)
         if fila is None:
+            registrar_bitacora_evento("RECHAZO", folio=folio, tipo="ECO", rfc=rfc,
+                                      resultado="NO_ENCONTRADA",
+                                      detalle="la solicitud no está en la hoja Solicitudes",
+                                      fecha_inicio=fecha_inicio)
             st.error(f"No encontré la solicitud {folio or rfc} en el Sheet. Recarga la página e intenta de nuevo.")
             return
         col_aprobado = headers.index("APROBADO POR") + 1 if "APROBADO POR" in headers else None
         if col_aprobado:
             ws.update_cell(fila, col_aprobado, f"RECHAZADO — {obs}")
+        # ESTADO_ANTERIOR es PENDIENTE por construcción: la lista de días
+        # económicos pendientes filtra justamente las que tienen "Aprobado Por"
+        # vacío, así que solo desde ahí se puede llegar a rechazar una.
+        registrar_bitacora_evento(
+            "RECHAZO", folio=folio, tipo="ECO", rfc=rfc,
+            estado_anterior="PENDIENTE", estado_nuevo="RECHAZADO",
+            detalle=obs, fecha_inicio=fecha_inicio)
         cargar_solicitudes_eco.clear()
         st.warning("Solicitud rechazada.")
     except Exception as e:
@@ -1359,6 +1467,10 @@ def aprobar_dia_economico(nombre_admin: str, folio: str = "", rfc: str = "", fec
         ws = sh.worksheet("Solicitudes")
         fila, headers = _localizar_fila_eco(ws, folio, rfc, fecha_inicio, fecha_registro)
         if fila is None:
+            registrar_bitacora_evento("AUTORIZACION", folio=folio, tipo="ECO", rfc=rfc,
+                                      resultado="NO_ENCONTRADA",
+                                      detalle="la solicitud no está en la hoja Solicitudes",
+                                      fecha_inicio=fecha_inicio)
             st.error(f"No encontré la solicitud {folio or rfc} en el Sheet. Recarga la página e intenta de nuevo.")
             return
         celdas = []
@@ -1369,6 +1481,10 @@ def aprobar_dia_economico(nombre_admin: str, folio: str = "", rfc: str = "", fec
             celdas.append(Cell(fila, col_fecha_aut, ahora))
         if celdas:
             ws.update_cells(celdas, value_input_option="USER_ENTERED")
+        registrar_bitacora_evento(
+            "AUTORIZACION", folio=folio, tipo="ECO", rfc=rfc,
+            estado_anterior="PENDIENTE", estado_nuevo="AUTORIZADO",
+            detalle=f"aprobó: {nombre_admin}", fecha_inicio=fecha_inicio)
         cargar_solicitudes_eco.clear()
         # Actualizar el saldo de DIAS DISPONIBLES de ese empleado en el Sheet Empleados
         try:
@@ -1551,6 +1667,19 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha
             break
     # Sin esto el horario nuevo tardaba hasta 5 min (ttl del cache) en verse,
     # y parecía que no se había guardado.
+    # Dónde quedó escrito el horario importa para auditar después: no es lo
+    # mismo "autorizado y aplicado" que "autorizado pero no se escribió".
+    _destinos = []
+    if encontro_padron:   _destinos.append("Padrón Maestro")
+    if encontro_empleado: _destinos.append("tab empleados")
+    registrar_bitacora_evento(
+        "CAMBIO_HORARIO", folio=folio, tipo="CHO", rfc=emp_id,
+        estado_anterior="PENDIENTE",
+        estado_nuevo="AUTORIZADO" if encontro_incidencia else "",
+        resultado="OK" if (encontro_padron or encontro_empleado) else "NO_APLICADO",
+        detalle=("horario escrito en: " + ", ".join(_destinos)) if _destinos
+                else "no se encontró a la persona ni en el padrón ni en la tab empleados")
+
     cargar_incidencias.clear()
     cargar_horarios.clear()
     cargar_padron.clear()
