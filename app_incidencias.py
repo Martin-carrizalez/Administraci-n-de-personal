@@ -750,7 +750,7 @@ def horas_pases_mes(rfc: str, incidencias_df: pd.DataFrame) -> float:
     df = incidencias_df[
         (incidencias_df["RFC"].astype(str).str.upper() == rfc.upper()) &
         (incidencias_df["TIPO"].isin(["PSE","PSR","PEN"])) &
-        (incidencias_df["ESTADO"].astype(str).str.contains("AUTORIZADO"))
+        (_estado_norm(incidencias_df["ESTADO"]).str.startswith("AUTORIZADO"))
     ].copy()
     if df.empty:
         return 0.0
@@ -997,24 +997,135 @@ def subir_anexo_drive(archivo, folio: str, rfc: str) -> str:
     ext = archivo.name.split(".")[-1].lower()
     return subir_archivo_drive(archivo, f"{folio}_{rfc}.{ext}", DRIVE_ANEXOS_FOLDER)
 
-def _envio_duplicado(clave: str) -> bool:
-    """Candado anti doble clic: True si esta MISMA solicitud ya se envió en los
-    últimos 2 minutos de esta sesión (doble clic o rerun de Streamlit).
-    Evita solicitudes y folios duplicados."""
+# ═══════════════════════════════════════════════════════════════════
+# BITÁCORA DE SOLICITUDES — trazabilidad de TODO intento de envío
+# ═══════════════════════════════════════════════════════════════════
+# Se registra el intento haya terminado bien o mal. Sin esto, una solicitud
+# que falla al escribirse no deja absolutamente ningún rastro: ni el empleado
+# ni RH pueden demostrar después que se intentó enviar.
+BITACORA_SOL_TAB = "Bitacora_Solicitudes"
+BITACORA_SOL_HEADERS = ["FECHA_HORA", "RFC", "NOMBRE", "TIPO", "FECHA_INICIO",
+                        "FECHA_FIN", "FOLIO", "RESULTADO", "DETALLE"]
+
+
+def _ws_bitacora_sol():
+    sh = get_client().open_by_key(st.secrets["sheet_checador_id"])
+    try:
+        return sh.worksheet(BITACORA_SOL_TAB)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(BITACORA_SOL_TAB, rows=2, cols=len(BITACORA_SOL_HEADERS))
+        ws.append_row(BITACORA_SOL_HEADERS, value_input_option="USER_ENTERED")
+        return ws
+
+
+def _volcar_bitacora_sol():
+    """Vacía la cola de la bitácora al Sheet. Si Google está caído la cola se
+    queda en sesión y se reintenta en el siguiente rerun: así un 429 no se
+    lleva también el registro de auditoría."""
+    cola = st.session_state.get("_bitacora_cola") or []
+    if not cola:
+        return
+    try:
+        _ws_bitacora_sol().append_rows(cola, value_input_option="USER_ENTERED",
+                                       insert_data_option="INSERT_ROWS")
+        st.session_state["_bitacora_cola"] = []
+    except Exception:
+        pass  # se reintenta solo; nunca debe tumbar la pantalla del empleado
+
+
+def registrar_bitacora_sol(datos: dict, resultado: str, detalle: str = ""):
+    """Anota un intento de envío. NUNCA lanza excepción: la bitácora no puede
+    ser el motivo de que una solicitud falle."""
+    try:
+        ahora = datetime.now(pytz.utc).astimezone(
+            pytz.timezone("America/Mexico_City")).strftime("%Y-%m-%d %H:%M:%S")
+        fila = [ahora,
+                str(datos.get("rfc", "")), str(datos.get("nombre", "")),
+                str(datos.get("tipo", "")), str(datos.get("fecha_inicio", "")),
+                str(datos.get("fecha_fin", "")), str(datos.get("folio", "")),
+                resultado, str(detalle)[:300]]
+        st.session_state.setdefault("_bitacora_cola", []).append(fila)
+        _volcar_bitacora_sol()
+    except Exception:
+        pass
+
+
+def _estado_norm(serie) -> pd.Series:
+    """ESTADO en mayúsculas y sin espacios sobrantes.
+
+    Las celdas del Sheet se editan a mano en la oficina, así que el ESTADO
+    llega con variantes: "PENDIENTE " con espacio, "Pendiente", o la celda
+    vaciada por accidente. Comparar con == contra el texto crudo hacía que la
+    solicitud desapareciera de la pantalla del admin aunque siguiera en el
+    Sheet, sin autorizar ni rechazar — mientras el empleado SÍ la seguía
+    viendo, porque su filtro usaba contains.
+    """
+    return serie.astype(str).str.upper().str.strip()
+
+
+def _mascara_pendiente(df: pd.DataFrame) -> pd.Series:
+    """Filas realmente pendientes: dice PENDIENTE en cualquier variante, o la
+    celda ESTADO quedó vacía SIN que nadie haya autorizado ni rechazado (una
+    solicitud sin estado nunca debe perderse de vista)."""
+    est = _estado_norm(df["ESTADO"])
+    if "AUTORIZADO_POR" in df.columns:
+        aut = df["AUTORIZADO_POR"].astype(str).str.strip()
+    else:
+        aut = pd.Series([""] * len(df), index=df.index)
+    return est.str.startswith("PENDIENTE") | (est.eq("") & aut.eq(""))
+
+
+def _hash_envio(clave: str) -> str:
     import hashlib
+    return hashlib.md5(clave.encode()).hexdigest()
+
+
+def _envio_duplicado(clave: str) -> bool:
+    """Candado anti doble clic: True solo si esta MISMA solicitud ya se guardó
+    CON ÉXITO en los últimos 2 minutos de esta sesión.
+
+    BUG QUE ESTO ARREGLA (solicitudes que "desaparecían" sin registro):
+    antes el candado se cerraba al ENTRAR, sin saber si el guardado iba a
+    funcionar. Si append_row tronaba (429 de cuota de Google, red), pasaba
+    esto:
+      1. intento 1 → candado cerrado → append_row falla → "espera 15 s y
+         vuelve a intentar";
+      2. el empleado reintenta a los 15 s, como se le indicó;
+      3. el candado respondía "esta solicitud ya se envió hace un momento";
+      4. el empleado se iba creyendo que quedó registrada.
+    Nunca se escribió nada. Los dos mensajes se contradecían y entre ambos
+    simulaban un registro exitoso.
+
+    Ahora solo bloquea un envío CONFIRMADO: un intento fallido deja el candado
+    abierto para que el reintento sí entre.
+    """
     import time as _time
-    h = hashlib.md5(clave.encode()).hexdigest()
+    h = _hash_envio(clave)
     ult = st.session_state.get("_ultimo_envio")
+    # ult = (hash, timestamp, confirmado). Las tuplas viejas de 2 elementos se
+    # tratan como confirmadas para no cambiar el comportamiento a media sesión.
     if ult and ult[0] == h and (_time.time() - ult[1]) < 120:
-        return True
-    st.session_state["_ultimo_envio"] = (h, _time.time())
+        confirmado = ult[2] if len(ult) > 2 else True
+        if confirmado:
+            return True
+    st.session_state["_ultimo_envio"] = (h, _time.time(), False)
     return False
+
+
+def _confirmar_envio(clave: str):
+    """Cierra el candado. Se llama SOLO después de que la fila ya quedó escrita
+    en el Sheet; a partir de aquí un segundo clic sí es un duplicado real."""
+    import time as _time
+    st.session_state["_ultimo_envio"] = (_hash_envio(clave), _time.time(), True)
 
 def _error_amable(e: Exception, contexto: str = ""):
     """Traduce errores de cuota de Google a un mensaje humano en vez de traceback."""
     if "429" in str(e) or "Quota" in str(e) or "quota" in str(e):
+        # Antes decía "Tu información no se perdió", y era falso: si el fallo
+        # ocurre al escribir, la solicitud NO quedó registrada. Ese mensaje era
+        # la mitad de la ilusión de solicitudes "desaparecidas".
         st.error("⏳ El sistema está ocupado en este momento (muchas personas usándolo a la vez). "
-                 "Espera 15 segundos y vuelve a intentar. Tu información no se perdió.")
+                 "**No se guardó nada todavía.** Espera 15 segundos y vuelve a intentar.")
     else:
         st.error(f"Error {contexto}: {e}")
 
@@ -1022,7 +1133,9 @@ def guardar_dia_economico(datos: dict):
     """Guarda día económico en tab Solicitudes del Sheet económicos — igual que app3."""
     # Candado: la misma persona + mismas fechas en <2 min = doble clic
     if _envio_duplicado(f"ECO|{datos.get('rfc','')}|{datos.get('fecha_inicio','')}|{datos.get('fecha_fin','')}"):
-        st.warning("Esta solicitud ya se envió hace un momento. Si crees que es un error, espera 2 minutos.")
+        # Solo llega aquí si el envío anterior SÍ quedó guardado.
+        st.warning("Esta solicitud **ya quedó registrada** hace un momento; no se "
+                   "duplicó. Búscala en 'Mis solicitudes'.")
         return
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_economicos_id"])
@@ -1074,14 +1187,27 @@ def guardar_dia_economico(datos: dict):
         datos["folio"],               # FOLIO
         link_anexo,                  # LINK_ANEXO
     ]
-    ws.append_row(fila, value_input_option="USER_ENTERED")
+    # insert_data_option="INSERT_ROWS" es OBLIGATORIO aquí.
+    # Sin él, gspread deja que la API de Google use su modo por defecto
+    # (OVERWRITE): Google detecta dónde "termina la tabla" y escribe a partir
+    # de ahí. Si la detección termina antes del final real de los datos —pasa
+    # cuando una fila quedó en blanco porque alguien borró su contenido con
+    # Supr en vez de eliminar la fila— el append ESCRIBE ENCIMA de las filas
+    # existentes y se las lleva, sin error y sin rastro. INSERT_ROWS fuerza a
+    # insertar renglones nuevos: nunca pisa lo que ya estaba.
+    ws.append_row(fila, value_input_option="USER_ENTERED",
+                  insert_data_option="INSERT_ROWS")
+    # La fila ya está en el Sheet: ahora sí se cierra el candado.
+    _confirmar_envio(f"ECO|{datos.get('rfc','')}|{datos.get('fecha_inicio','')}|{datos.get('fecha_fin','')}")
     cargar_solicitudes_eco.clear()
     return True
 
 def guardar_incidencia(datos: dict):
     # Candado: la misma persona + tipo + fechas en <2 min = doble clic
     if _envio_duplicado(f"{datos.get('tipo','')}|{datos.get('rfc','')}|{datos.get('fecha_inicio','')}|{datos.get('fecha_fin','')}"):
-        st.warning("Esta solicitud ya se envió hace un momento. Si crees que es un error, espera 2 minutos.")
+        # Solo llega aquí si el envío anterior SÍ quedó guardado.
+        st.warning("Esta solicitud **ya quedó registrada** hace un momento; no se "
+                   "duplicó. Búscala en 'Mis solicitudes'.")
         return False
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
@@ -1119,7 +1245,18 @@ def guardar_incidencia(datos: dict):
         "PENDIENTE",
         "", "", "",
     ]
-    ws.append_row(fila, value_input_option="USER_ENTERED")
+    # insert_data_option="INSERT_ROWS" es OBLIGATORIO aquí.
+    # Sin él, gspread deja que la API de Google use su modo por defecto
+    # (OVERWRITE): Google detecta dónde "termina la tabla" y escribe a partir
+    # de ahí. Si la detección termina antes del final real de los datos —pasa
+    # cuando una fila quedó en blanco porque alguien borró su contenido con
+    # Supr en vez de eliminar la fila— el append ESCRIBE ENCIMA de las filas
+    # existentes y se las lleva, sin error y sin rastro. INSERT_ROWS fuerza a
+    # insertar renglones nuevos: nunca pisa lo que ya estaba.
+    ws.append_row(fila, value_input_option="USER_ENTERED",
+                  insert_data_option="INSERT_ROWS")
+    # La fila ya está en el Sheet: ahora sí se cierra el candado.
+    _confirmar_envio(f"{datos.get('tipo','')}|{datos.get('rfc','')}|{datos.get('fecha_inicio','')}|{datos.get('fecha_fin','')}")
     cargar_incidencias.clear()
     return True
 
@@ -1246,13 +1383,118 @@ def aprobar_dia_economico(nombre_admin: str, folio: str = "", rfc: str = "", fec
     except Exception as e:
         _error_amable(e, "al aprobar")
 
+def _registrar_historial_horario(sh, rfc, nombre, row_anterior, horario_nuevo, fecha_aplicacion):
+    """Deja en HISTORIAL_HORARIOS dos filas: la que cierra el horario anterior
+    (FECHA_FIN = día previo al cambio) y la del nuevo (FECHA_INICIO = fecha de
+    aplicación, FECHA_FIN vacía porque es el vigente).
+
+    Se sacó del cuerpo de autorizar_cambio_horario para que el personal que
+    solo vive en el Padrón Maestro (Centros de Maestros, Dirección Académica)
+    también deje rastro: antes solo se escribía dentro del bucle de la tab
+    'empleados', así que para ellos el cambio no quedaba registrado.
+
+    row_anterior es el renglón previo como dict; sirve igual el de 'empleados'
+    que el del padrón porque ambos usan los mismos nombres de columna.
+    """
+    try:
+        ws_hist = sh.worksheet("HISTORIAL_HORARIOS")
+    except Exception as e:
+        st.warning(f"No se pudo guardar historial: {e}")
+        return
+    try:
+        fecha_cierre = (datetime.strptime(fecha_aplicacion, "%Y-%m-%d")
+                        - timedelta(days=1)).strftime("%Y-%m-%d")
+    except Exception:
+        fecha_cierre = ""
+    try:
+        # Fila 1: horario ANTERIOR, cerrado el día previo al cambio
+        ws_hist.append_row([
+            str(rfc), str(nombre), "", fecha_cierre,
+            str(row_anterior.get("ENTRADA_LUN", "")), str(row_anterior.get("SALIDA_LUN", "")),
+            str(row_anterior.get("ENTRADA_MAR", "")), str(row_anterior.get("SALIDA_MAR", "")),
+            str(row_anterior.get("ENTRADA_MIE", "")), str(row_anterior.get("SALIDA_MIE", "")),
+            str(row_anterior.get("ENTRADA_JUE", "")), str(row_anterior.get("SALIDA_JUE", "")),
+            str(row_anterior.get("ENTRADA_VIE", "")), str(row_anterior.get("SALIDA_VIE", "")),
+        ], value_input_option="USER_ENTERED", insert_data_option="INSERT_ROWS")
+        # Fila 2: horario NUEVO, vigente desde la fecha de aplicación
+        ws_hist.append_row([
+            str(rfc), str(nombre), str(fecha_aplicacion), "",
+            horario_nuevo.get("LUN", {}).get("entrada", ""), horario_nuevo.get("LUN", {}).get("salida", ""),
+            horario_nuevo.get("MAR", {}).get("entrada", ""), horario_nuevo.get("MAR", {}).get("salida", ""),
+            horario_nuevo.get("MIE", {}).get("entrada", ""), horario_nuevo.get("MIE", {}).get("salida", ""),
+            horario_nuevo.get("JUE", {}).get("entrada", ""), horario_nuevo.get("JUE", {}).get("salida", ""),
+            horario_nuevo.get("VIE", {}).get("entrada", ""), horario_nuevo.get("VIE", {}).get("salida", ""),
+        ], value_input_option="USER_ENTERED", insert_data_option="INSERT_ROWS")
+    except Exception as e:
+        st.warning(f"No se pudo guardar historial: {e}")
+
+
+def _escribir_horario_padron(emp_id: str, horario_nuevo: dict):
+    """Escribe el horario autorizado en el PADRÓN MAESTRO (tab Padron).
+
+    Esto faltaba por completo: el cambio de horario solo se guardaba en la tab
+    'empleados' del Sheet del checador. Quien no marca en el reloj de piso 5 y
+    6 —Centros de Maestros, Dirección Académica— no está en esa tab, así que su
+    horario autorizado no se escribía en ningún lado aunque la pantalla dijera
+    'autorizado'. El padrón es la fuente única, así que aquí siempre se escribe.
+
+    Devuelve (encontrado, row_anterior): row_anterior es el renglón del padrón
+    ANTES de sobrescribirlo, para poder archivarlo en HISTORIAL_HORARIOS.
+    """
+    try:
+        sh_p = get_client().open_by_key(st.secrets["sheet_padron_id"])
+        ws_p = sh_p.worksheet(PADRON_TAB)
+        headers_p = ws_p.row_values(1)
+        registros_p = ws_p.get_all_records(numericise_ignore=["all"])
+    except Exception as e:
+        st.warning(f"No se pudo abrir el Padrón Maestro para escribir el horario: {e}")
+        return False, {}
+
+    # El padrón puede no tener columnas de horario todavía: sin ellas no hay
+    # dónde escribir y hay que decirlo, no fallar en silencio.
+    cols_h = [c for par in COLUMNAS_HORARIO.values() for c in par]
+    if not any(c in headers_p for c in cols_h):
+        st.warning("El Padrón Maestro no tiene columnas de horario "
+                   "(ENTRADA_LUN, SALIDA_LUN, …): el horario no se pudo escribir ahí.")
+        return False, {}
+
+    from gspread.cell import Cell
+    objetivo = str(emp_id).upper().strip()
+    for i, row in enumerate(registros_p, start=2):
+        rfc_fila = str(row.get("RFC", "")).upper().strip()
+        nom_fila = str(row.get("NOMBRE", row.get("NOMBRE_COMPLETO", ""))).upper().strip()
+        if rfc_fila != objetivo and nom_fila != objetivo:
+            continue
+        celdas = []
+        for dia, (col_e, col_s) in COLUMNAS_HORARIO.items():
+            if dia not in horario_nuevo:
+                continue
+            if col_e in headers_p:
+                celdas.append(Cell(i, headers_p.index(col_e) + 1, horario_nuevo[dia]["entrada"]))
+            if col_s in headers_p:
+                celdas.append(Cell(i, headers_p.index(col_s) + 1, horario_nuevo[dia]["salida"]))
+        if celdas:
+            ws_p.update_cells(celdas, value_input_option="USER_ENTERED")
+        return True, row
+    return False, {}
+
+
 def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha_inicio_cho: str = None):
-    """Devuelve (encontro_empleado, encontro_incidencia). Antes esta función
-    no devolvía nada y el llamador mostraba éxito sin verificar: si el RFC/
-    NOMBRE no calzaba con ninguna fila de 'empleados' (típico en personal de
-    Centros de Maestros, que no vive en esa tab) o el FOLIO no se encontraba
-    en Incidencias, el cambio no se aplicaba en ningún lado pero la pantalla
-    igual decía 'autorizado'."""
+    """Devuelve (encontro_empleado, encontro_incidencia, encontro_padron).
+
+    Antes esta función no devolvía nada y el llamador mostraba éxito sin
+    verificar: si el RFC/NOMBRE no calzaba con ninguna fila de 'empleados'
+    (típico en personal de Centros de Maestros, que no vive en esa tab) o el
+    FOLIO no se encontraba en Incidencias, el cambio no se aplicaba en ningún
+    lado pero la pantalla igual decía 'autorizado'.
+
+    Ahora escribe en DOS lugares, porque cada uno lo lee alguien distinto:
+      · Padrón Maestro (tab Padron) — fuente única; es el único sitio donde
+        vive el personal de Centros de Maestros y Dirección Académica.
+      · tab 'empleados' del Sheet del checador — de ahí lee checador_module
+        para calcular retardos; si solo escribiéramos el padrón, el reloj
+        seguiría midiendo contra el horario viejo.
+    """
     client = get_client()
     sh = client.open_by_key(st.secrets["sheet_checador_id"])
     ws_emp = sh.worksheet("empleados")
@@ -1266,36 +1508,8 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha
         if str(row.get("RFC", "")).upper().strip() == str(emp_id).upper().strip() or str(row.get("NOMBRE", "")).upper().strip() == str(emp_id).upper().strip():
             encontro_empleado = True
             # Guardar horario ANTERIOR en HISTORIAL_HORARIOS antes de sobrescribir
-            try:
-                ws_hist = sh.worksheet("HISTORIAL_HORARIOS")
-                hist_data = ws_hist.get_all_records(numericise_ignore=["all"])
-                fila_hist = [
-                    str(row.get("RFC", emp_id)),
-                    str(row.get("NOMBRE", "")),
-                    "",  # FECHA_INICIO — se llenará con la del registro anterior
-                    (datetime.strptime(fecha_aplicacion, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d"),  # FECHA_FIN — día anterior al cambio
-                    str(row.get("ENTRADA_LUN", "")), str(row.get("SALIDA_LUN", "")),
-                    str(row.get("ENTRADA_MAR", "")), str(row.get("SALIDA_MAR", "")),
-                    str(row.get("ENTRADA_MIE", "")), str(row.get("SALIDA_MIE", "")),
-                    str(row.get("ENTRADA_JUE", "")), str(row.get("SALIDA_JUE", "")),
-                    str(row.get("ENTRADA_VIE", "")), str(row.get("SALIDA_VIE", "")),
-                ]
-                ws_hist.append_row(fila_hist, value_input_option="USER_ENTERED")
-                # Agregar también el nuevo horario con FECHA_INICIO
-                fila_nuevo = [
-                    str(row.get("RFC", emp_id)),
-                    str(row.get("NOMBRE", "")),
-                    str(fecha_aplicacion),  # FECHA_INICIO
-                    "",  # FECHA_FIN — vacío porque es el vigente
-                    horario_nuevo.get("LUN",{}).get("entrada",""), horario_nuevo.get("LUN",{}).get("salida",""),
-                    horario_nuevo.get("MAR",{}).get("entrada",""), horario_nuevo.get("MAR",{}).get("salida",""),
-                    horario_nuevo.get("MIE",{}).get("entrada",""), horario_nuevo.get("MIE",{}).get("salida",""),
-                    horario_nuevo.get("JUE",{}).get("entrada",""), horario_nuevo.get("JUE",{}).get("salida",""),
-                    horario_nuevo.get("VIE",{}).get("entrada",""), horario_nuevo.get("VIE",{}).get("salida",""),
-                ]
-                ws_hist.append_row(fila_nuevo, value_input_option="USER_ENTERED")
-            except Exception as e:
-                st.warning(f"No se pudo guardar historial: {e}")
+            _registrar_historial_horario(sh, row.get("RFC", emp_id), row.get("NOMBRE", ""),
+                                         row, horario_nuevo, fecha_aplicacion)
 
             # Sobrescribir horario actual en tab empleados
             from gspread.cell import Cell
@@ -1309,6 +1523,17 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha
             if celdas_horario:
                 ws_emp.update_cells(celdas_horario, value_input_option="USER_ENTERED")
             break
+
+    # ── Padrón Maestro: se escribe SIEMPRE, esté o no en 'empleados' ──
+    encontro_padron, _fila_padron = _escribir_horario_padron(emp_id, horario_nuevo)
+    # Si no estaba en 'empleados', el historial no se escribió arriba: hacerlo
+    # aquí con el renglón del padrón, para que el cambio no quede sin rastro.
+    if encontro_padron and not encontro_empleado:
+        _registrar_historial_horario(
+            sh, _fila_padron.get("RFC", emp_id),
+            _fila_padron.get("NOMBRE", _fila_padron.get("NOMBRE_COMPLETO", "")),
+            _fila_padron, horario_nuevo, fecha_aplicacion)
+
     ws_inc = sh.worksheet("Incidencias")
     inc_h  = ws_inc.row_values(1)
     inc_d  = ws_inc.get_all_records(numericise_ignore=["all"])
@@ -1324,8 +1549,12 @@ def autorizar_cambio_horario(emp_id: str, horario_nuevo: dict, folio: str, fecha
                 Cell(i, inc_h.index("FECHA_AUTORIZACION") + 1, ahora_inc),
             ], value_input_option="USER_ENTERED")
             break
+    # Sin esto el horario nuevo tardaba hasta 5 min (ttl del cache) en verse,
+    # y parecía que no se había guardado.
     cargar_incidencias.clear()
-    return encontro_empleado, encontro_incidencia
+    cargar_horarios.clear()
+    cargar_padron.clear()
+    return encontro_empleado, encontro_incidencia, encontro_padron
 
 # ─────────────────────────────────────────────
 # AUTENTICACIÓN
@@ -2159,7 +2388,15 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
                 else:
                     _guardado_ok = guardar_incidencia(datos)
             except Exception as _e_save:
+                # El fallo queda asentado ANTES de avisar al empleado: aunque
+                # la solicitud no se haya escrito, el intento sí deja rastro.
+                registrar_bitacora_sol(datos, "ERROR", f"{type(_e_save).__name__}: {_e_save}")
                 _error_amable(_e_save, "al registrar la solicitud")
+            else:
+                registrar_bitacora_sol(
+                    datos,
+                    "GUARDADA" if _guardado_ok else "NO_GUARDADA",
+                    "" if _guardado_ok else "el candado anti-duplicado bloqueó el envío")
 
         if _guardado_ok:
             folio = datos["folio"]  # puede haberse recalculado en vivo al guardar
@@ -2176,6 +2413,8 @@ def enviar_solicitud(rfc, nombre, tipo, fi, ff, dias, horas_pase, motivo, tiene_
 # ─────────────────────────────────────────────
 def vista_admin():
     st.markdown("### Panel de administración · Incidencias")
+    # Si algún intento quedó en cola porque Google estaba caído, se vuelca aquí.
+    _volcar_bitacora_sol()
 
     incidencias = cargar_incidencias()
     horarios_df = cargar_horarios()
@@ -2204,7 +2443,18 @@ def vista_admin():
         if col_aprobado and not solicitudes_eco.empty:
             eco_pend = solicitudes_eco[solicitudes_eco[col_aprobado].astype(str).str.strip() == ""]
 
-        pendientes = incidencias[incidencias["ESTADO"] == "PENDIENTE"]
+        # Antes: incidencias["ESTADO"] == "PENDIENTE" — comparación cruda. Un
+        # espacio o una minúscula en la celda del Sheet sacaba la solicitud de
+        # esta lista sin autorizarla ni rechazarla.
+        pendientes = incidencias[_mascara_pendiente(incidencias)]
+        # Las que solo entran por anomalía de la celda se señalan para revisar.
+        _raras = pendientes[~_estado_norm(pendientes["ESTADO"]).eq("PENDIENTE")]
+        if not _raras.empty:
+            st.warning("⚠️ " + str(len(_raras)) + " solicitud(es) con el campo ESTADO alterado "
+                       "en el Sheet (espacios, minúsculas o celda vacía): " +
+                       ", ".join(_raras["FOLIO"].astype(str).tolist()[:8]) +
+                       ". Se muestran aquí para que no se pierdan; corrige el ESTADO "
+                       "a PENDIENTE en el Sheet.")
         total_pend = len(pendientes) + len(eco_pend)
 
         if total_pend == 0:
@@ -2313,16 +2563,30 @@ def vista_admin():
                                 ns = st.text_input("Salida",  value=default_s, key=f"ns_{row['FOLIO']}_{dia}", max_chars=5)
                                 nuevo_horario[dia] = {"entrada": ne, "salida": ns}
                         if st.button("💾 Guardar horario y autorizar", key=f"hor_{row['FOLIO']}", type="primary"):
-                            _enc_emp, _enc_inc = autorizar_cambio_horario(row["RFC"], nuevo_horario, row["FOLIO"])
-                            if not _enc_emp:
-                                st.error(f"⚠️ No se encontró a {row['RFC']} en la tab 'empleados' — el "
-                                        "horario NO se actualizó ahí (típico si es personal de Centros "
-                                        "de Maestros, que vive en otra tab). Revisa antes de continuar.")
-                            elif not _enc_inc:
-                                st.warning(f"El horario se actualizó, pero no se encontró el folio "
-                                          f"{row['FOLIO']} en Incidencias para marcarlo autorizado.")
+                            _enc_emp, _enc_inc, _enc_pad = autorizar_cambio_horario(
+                                row["RFC"], nuevo_horario, row["FOLIO"])
+                            # El RFC se enmascara igual que en el resto de la
+                            # pantalla: no tiene por qué aparecer completo aquí.
+                            _rfc_msg = rfc_oculto(str(row["RFC"]))
+                            if not _enc_pad and not _enc_emp:
+                                st.error(f"⚠️ No se encontró a {_rfc_msg} ni en el Padrón Maestro ni "
+                                         "en la tab 'empleados': el horario NO se guardó en ningún "
+                                         "lado. Captura primero a esta persona en el padrón.")
+                            elif not _enc_pad:
+                                st.warning("Horario actualizado en la tab 'empleados' (reloj checador), "
+                                           f"pero {_rfc_msg} no está en el Padrón Maestro. Captúralo ahí: "
+                                           "el padrón es la fuente única.")
+                            elif not _enc_emp:
+                                st.success("Horario actualizado en el **Padrón Maestro**.")
+                                st.info("No está en la tab 'empleados' del reloj checador — normal si "
+                                        "no marca en piso 5 y 6.")
                             else:
-                                st.success("Horario actualizado y solicitud autorizada.")
+                                st.success("Horario actualizado en el **Padrón Maestro** y en la tab "
+                                           "'empleados' (reloj checador).")
+                            if not _enc_inc:
+                                st.warning(f"No se encontró el folio {row['FOLIO']} en Incidencias "
+                                           "para marcarlo autorizado.")
+                            elif _enc_pad or _enc_emp:
                                 st.rerun()
 
     with tab2:
@@ -2576,8 +2840,8 @@ def vista_admin():
                     Total=("FOLIO","count"),
                     Dias=("DIAS","sum"),
                     Horas_pase=("HORAS_PASE","sum"),
-                    Autorizadas=("ESTADO", lambda x: (x=="AUTORIZADO").sum()),
-                    Rechazadas=("ESTADO",  lambda x: (x=="RECHAZADO").sum()),
+                    Autorizadas=("ESTADO", lambda x: _estado_norm(x).str.startswith("AUTORIZADO").sum()),
+                    Rechazadas=("ESTADO",  lambda x: _estado_norm(x).str.startswith("RECHAZADO").sum()),
                 ).reset_index()
                 st.dataframe(detalle, use_container_width=True, hide_index=True)
                 st.download_button("⬇️ Descargar CSV",
@@ -3661,7 +3925,9 @@ def vista_ari():
                 partes.append(f"Días económicos: {dias_totales - usados} disponibles de {dias_totales} este año")
             if not incidencias.empty and "RFC" in incidencias.columns:
                 propias = incidencias[incidencias["RFC"].astype(str).str.upper() == rfc]
-                pend = propias[propias["ESTADO"].astype(str).str.contains("PENDIENTE", na=False)]
+                # Mismo criterio que el panel del admin: si las dos pantallas
+                # filtran distinto, el empleado ve pendientes que RH no ve.
+                pend = propias[_mascara_pendiente(propias)]
                 if not pend.empty:
                     folios = ", ".join(pend["FOLIO"].astype(str).tolist()[:5])
                     partes.append(f"Solicitudes pendientes de autorización: {folios}")
