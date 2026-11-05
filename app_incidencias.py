@@ -1102,7 +1102,7 @@ def registrar_bitacora_evento(evento: str, folio: str = "", tipo: str = "",
             "USUARIO_SESION": str(st.session_state.get("nombre", "")),
             "ROL": str(st.session_state.get("rol", "")),
             "RESULTADO": resultado,
-            "DETALLE": str(detalle)[:300],
+            "DETALLE": texto_seguro(str(detalle)[:300]),
             "FECHA_INICIO": str(fecha_inicio),
             "FECHA_FIN": str(fecha_fin),
         })
@@ -1118,9 +1118,34 @@ def registrar_bitacora_sol(datos: dict, resultado: str, detalle: str = ""):
         "ALTA",
         folio=datos.get("folio", ""), tipo=datos.get("tipo", ""),
         nombre=datos.get("nombre", ""), rfc=datos.get("rfc", ""),
-        estado_anterior="", estado_nuevo="PENDIENTE" if resultado == "GUARDADA" else "",
+        # "CREADA" y no "PENDIENTE": la bitácora es un histórico, y un renglón
+        # que dice PENDIENTE se lee como si la solicitud siguiera esperando
+        # aunque ya esté resuelta. Solo las filas de resolución hablan de
+        # PENDIENTE, y ahí sí describe de dónde venía.
+        estado_anterior="", estado_nuevo="CREADA" if resultado == "GUARDADA" else "",
         resultado=resultado, detalle=detalle,
         fecha_inicio=datos.get("fecha_inicio", ""), fecha_fin=datos.get("fecha_fin", ""))
+
+
+def texto_seguro(valor) -> str:
+    """Neutraliza el texto que escribe una persona antes de mandarlo al Sheet.
+
+    La app escribe con value_input_option="USER_ENTERED", así que Google
+    INTERPRETA lo que recibe. Un motivo que empiece con "=", "+", "-" o "@"
+    deja de ser texto y se convierte en una FÓRMULA VIVA dentro de la hoja.
+    Y una fórmula puede leer otras celdas y mandarlas fuera —por ejemplo con
+    IMPORTXML hacia un sitio ajeno— en el momento en que alguien de RH abre
+    el Sheet, sin que se vea nada raro en pantalla.
+
+    Anteponer un apóstrofo obliga a Google a tratarlo como texto. El apóstrofo
+    no se ve en la celda ni se copia al leerla, así que el motivo se sigue
+    mostrando igual en los reportes y en el PDF.
+
+    Solo se toca lo que empieza con esos cuatro caracteres: "Cita médica" o
+    "Junta a las 10:00" pasan intactos.
+    """
+    txt = "" if valor is None else str(valor)
+    return "'" + txt if txt[:1] in ("=", "+", "-", "@") else txt
 
 
 def _estado_norm(serie) -> pd.Series:
@@ -1253,7 +1278,7 @@ def guardar_dia_economico(datos: dict):
         datos["fecha_inicio"],        # Fecha Inicio
         datos["fecha_fin"],           # Fecha Fin
         datos["dias"],                # Dias Solicitados
-        datos["motivo"],              # Motivo
+        texto_seguro(datos["motivo"]),   # Motivo (saneado: ver texto_seguro)
         datos["fecha_solicitud"],     # Fecha Registro
         "",                          # Aprobado Por
         datos["nombre"],              # Registrado Por
@@ -1312,7 +1337,7 @@ def guardar_incidencia(datos: dict):
         datos["dias"],
         datos.get("horas_pase", ""),
         datos.get("hora_retorno", ""),
-        datos["motivo"],
+        texto_seguro(datos["motivo"]),   # saneado: ver texto_seguro
         "SÍ" if datos["tiene_anexo"] else "NO",
         datos.get("link_anexo", ""),
         "PENDIENTE",
@@ -1355,7 +1380,7 @@ def autorizar_incidencia(folio: str, obs: str = ""):
                     Cell(i, headers.index("FECHA_AUTORIZACION") + 1, ahora),
                 ]
                 if obs and "OBSERVACIONES" in headers:
-                    celdas.append(Cell(i, headers.index("OBSERVACIONES") + 1, obs))
+                    celdas.append(Cell(i, headers.index("OBSERVACIONES") + 1, texto_seguro(obs)))
                 ws.update_cells(celdas, value_input_option="USER_ENTERED")
                 # El estado ANTERIOR se toma del renglón tal como estaba antes
                 # de sobrescribirlo: es la mitad que faltaba para poder auditar
@@ -1393,7 +1418,7 @@ def rechazar_incidencia(folio: str, obs: str):
                 Cell(i, headers.index("ESTADO") + 1,             "RECHAZADO"),
                 Cell(i, headers.index("AUTORIZADO_POR") + 1,     st.session_state.get("nombre", "admin")),
                 Cell(i, headers.index("FECHA_AUTORIZACION") + 1, ahora),
-                Cell(i, headers.index("OBSERVACIONES") + 1,      obs),
+                Cell(i, headers.index("OBSERVACIONES") + 1,      texto_seguro(obs)),
             ], value_input_option="USER_ENTERED")
             registrar_bitacora_evento(
                 "RECHAZO", folio=folio, tipo=row.get("TIPO", ""),
@@ -1410,7 +1435,14 @@ def rechazar_incidencia(folio: str, obs: str):
 def _localizar_fila_eco(ws, folio: str = "", rfc: str = "", fecha_inicio: str = "", fecha_registro: str = ""):
     """Relee el Sheet EN VIVO y localiza la fila de la solicitud.
     Prioridad: FOLIO exacto; si no hay folio, RFC + Fecha Inicio + Fecha Registro
-    (para solicitudes viejas sin folio). Devuelve (num_fila, headers_norm) o (None, headers_norm).
+    (para solicitudes viejas sin folio).
+
+    Devuelve (num_fila, headers_norm, fila_norm). La TERCERA pieza es nueva:
+    la fila ya estaba leída aquí, pero antes se tiraba, y por eso la bitácora
+    de los días económicos salía sin NOMBRE y sin FECHA_FIN — se vio en
+    producción, con renglones que solo traían el RFC. Viene con las llaves en
+    MAYÚSCULAS ("NOMBRE COMPLETO", "FECHA FIN") y los valores ya recortados.
+
     NUNCA usar índices de DataFrames cacheados: si alguien insertó/borró filas
     en el Sheet, se aprobaría la solicitud equivocada."""
     headers = [h.upper().strip() for h in ws.row_values(1)]
@@ -1419,37 +1451,53 @@ def _localizar_fila_eco(ws, folio: str = "", rfc: str = "", fecha_inicio: str = 
     for i, row in enumerate(data, start=2):
         row_norm = {str(k).upper().strip(): str(v).strip() for k, v in row.items()}
         if folio and row_norm.get("FOLIO", "") == folio:
-            return i, headers
+            return i, headers, row_norm
         if not folio and rfc:
             if (row_norm.get("RFC", "").upper() == rfc.upper().strip()
                     and row_norm.get("FECHA INICIO", "") == str(fecha_inicio).strip()
                     and row_norm.get("FECHA REGISTRO", "") == str(fecha_registro).strip()):
-                return i, headers
-    return None, headers
+                return i, headers, row_norm
+    return None, headers, {}
+
+def _datos_eco_para_bitacora(fila_eco: dict, rfc: str, fecha_inicio: str):
+    """(nombre, fecha_inicio, fecha_fin) de una solicitud de día económico.
+
+    La hoja de económicos usa otros nombres de columna que la de incidencias
+    ("Nombre Completo" en vez de "NOMBRE", "Fecha Fin" en vez de "FECHA_FIN"),
+    así que se buscan por su nombre real y se cae a lo que haya si falta.
+    """
+    f = fila_eco or {}
+    nombre = (f.get("NOMBRE COMPLETO") or f.get("NOMBRE") or "").strip()
+    fi = (f.get("FECHA INICIO") or fecha_inicio or "").strip()
+    # Si no hay fecha fin, un día económico de un solo día tiene fin = inicio.
+    ff = (f.get("FECHA FIN") or fi or "").strip()
+    return nombre, fi, ff
+
 
 def rechazar_dia_economico(obs: str, folio: str = "", rfc: str = "", fecha_inicio: str = "", fecha_registro: str = ""):
     try:
         client = get_client()
         sh = client.open_by_key(st.secrets["sheet_economicos_id"])
         ws = sh.worksheet("Solicitudes")
-        fila, headers = _localizar_fila_eco(ws, folio, rfc, fecha_inicio, fecha_registro)
+        fila, headers, _fila_eco = _localizar_fila_eco(ws, folio, rfc, fecha_inicio, fecha_registro)
         if fila is None:
             registrar_bitacora_evento("RECHAZO", folio=folio, tipo="ECO", rfc=rfc,
                                       resultado="NO_ENCONTRADA",
                                       detalle="la solicitud no está en la hoja Solicitudes",
-                                      fecha_inicio=fecha_inicio)
+                                      fecha_inicio=fecha_inicio, fecha_fin=fecha_inicio)
             st.error(f"No encontré la solicitud {folio or rfc} en el Sheet. Recarga la página e intenta de nuevo.")
             return
         col_aprobado = headers.index("APROBADO POR") + 1 if "APROBADO POR" in headers else None
         if col_aprobado:
-            ws.update_cell(fila, col_aprobado, f"RECHAZADO — {obs}")
+            ws.update_cell(fila, col_aprobado, texto_seguro(f"RECHAZADO — {obs}"))
         # ESTADO_ANTERIOR es PENDIENTE por construcción: la lista de días
         # económicos pendientes filtra justamente las que tienen "Aprobado Por"
         # vacío, así que solo desde ahí se puede llegar a rechazar una.
+        _nom_eco, _fi_eco, _ff_eco = _datos_eco_para_bitacora(_fila_eco, rfc, fecha_inicio)
         registrar_bitacora_evento(
-            "RECHAZO", folio=folio, tipo="ECO", rfc=rfc,
+            "RECHAZO", folio=folio, tipo="ECO", nombre=_nom_eco, rfc=rfc,
             estado_anterior="PENDIENTE", estado_nuevo="RECHAZADO",
-            detalle=obs, fecha_inicio=fecha_inicio)
+            detalle=obs, fecha_inicio=_fi_eco, fecha_fin=_ff_eco)
         cargar_solicitudes_eco.clear()
         st.warning("Solicitud rechazada.")
     except Exception as e:
@@ -1465,12 +1513,12 @@ def aprobar_dia_economico(nombre_admin: str, folio: str = "", rfc: str = "", fec
         client = get_client()
         sh = client.open_by_key(st.secrets["sheet_economicos_id"])
         ws = sh.worksheet("Solicitudes")
-        fila, headers = _localizar_fila_eco(ws, folio, rfc, fecha_inicio, fecha_registro)
+        fila, headers, _fila_eco = _localizar_fila_eco(ws, folio, rfc, fecha_inicio, fecha_registro)
         if fila is None:
             registrar_bitacora_evento("AUTORIZACION", folio=folio, tipo="ECO", rfc=rfc,
                                       resultado="NO_ENCONTRADA",
                                       detalle="la solicitud no está en la hoja Solicitudes",
-                                      fecha_inicio=fecha_inicio)
+                                      fecha_inicio=fecha_inicio, fecha_fin=fecha_inicio)
             st.error(f"No encontré la solicitud {folio or rfc} en el Sheet. Recarga la página e intenta de nuevo.")
             return
         celdas = []
@@ -1481,10 +1529,12 @@ def aprobar_dia_economico(nombre_admin: str, folio: str = "", rfc: str = "", fec
             celdas.append(Cell(fila, col_fecha_aut, ahora))
         if celdas:
             ws.update_cells(celdas, value_input_option="USER_ENTERED")
+        _nom_eco, _fi_eco, _ff_eco = _datos_eco_para_bitacora(_fila_eco, rfc, fecha_inicio)
+        # El DETALLE ya no repite quién aprobó: eso vive en USUARIO_SESION.
         registrar_bitacora_evento(
-            "AUTORIZACION", folio=folio, tipo="ECO", rfc=rfc,
+            "AUTORIZACION", folio=folio, tipo="ECO", nombre=_nom_eco, rfc=rfc,
             estado_anterior="PENDIENTE", estado_nuevo="AUTORIZADO",
-            detalle=f"aprobó: {nombre_admin}", fecha_inicio=fecha_inicio)
+            fecha_inicio=_fi_eco, fecha_fin=_ff_eco)
         cargar_solicitudes_eco.clear()
         # Actualizar el saldo de DIAS DISPONIBLES de ese empleado en el Sheet Empleados
         try:
@@ -2289,6 +2339,57 @@ def vista_empleado():
         motivo = st.text_area("Motivo", max_chars=300)
         archivo_anexo = st.file_uploader("Adjuntar justificante (opcional)", type=["pdf","png","jpg","jpeg"])
         tiene_anexo   = archivo_anexo is not None
+
+        # ── La hora es OBLIGATORIA en un pase ────────────────────────────
+        # Antes se podía enviar sin ella: el pase quedaba con 0 horas y no se
+        # descontaba nada. Pasó de verdad (PSE-2026-0078 y PEN-2026-0068, que
+        # llevan la hora escrita dentro del texto del motivo y 0 en HORAS).
+        # Como la hora es lo que define cuánto se ausenta la persona, un pase
+        # sin hora no es un pase: aquí se detiene antes de llegar al botón.
+        _faltantes = []
+        if tipo in ("PSE", "PSR") and not hora_salida:
+            _faltantes.append("hora de salida")
+        if tipo == "PSR" and not hora_retorno:
+            _faltantes.append("hora de retorno")
+        if tipo == "PEN" and not hora_entrada:
+            _faltantes.append("hora de entrada")
+
+        # El formato también: "10:45 am" o "1045" dan 0 horas en silencio.
+        # Se exigen DOS dígitos en los minutos: "9:5" lo aceptaba strptime
+        # como 9:05, pero quien lo escribe bien puede haber querido 9:50.
+        # Una hora ambigua en un pase se traduce en horas de ausencia mal
+        # contadas, así que se pide que la escriba completa.
+        def _hora_valida(h):
+            txt = str(h).strip()
+            if not re.fullmatch(r"\d{1,2}:\d{2}", txt):
+                return False
+            try:
+                datetime.strptime(txt, "%H:%M")
+                return True
+            except Exception:
+                return False
+        _malformadas = [etq for etq, val in (("salida", hora_salida),
+                                             ("entrada", hora_entrada),
+                                             ("retorno", hora_retorno))
+                        if val and not _hora_valida(val)]
+
+        if _faltantes:
+            st.warning("⏰ Falta la **" + "** y la **".join(_faltantes) +
+                       "**. Captúrala en su campo (formato 24 horas, por ejemplo "
+                       "**14:30**); no la escribas en el motivo, porque entonces "
+                       "el sistema no puede calcular tus horas de ausencia.")
+            return
+        if _malformadas:
+            st.error("⏰ La hora de " + " y de ".join(_malformadas) +
+                     " no tiene el formato correcto. Usa 24 horas con dos puntos: "
+                     "**08:30**, **14:05**, **16:00**.")
+            return
+        if horas_pase <= 0:
+            st.error("⏰ El cálculo dio **0 horas de ausencia**. Revisa que las "
+                     "horas sean correctas; si tu horario de ese día no está en "
+                     "el sistema, avisa a Recursos Humanos antes de continuar.")
+            return
+
         detalle = subtipo
         if hora_salida:  detalle += f" | Salida: {hora_salida}"
         if hora_entrada: detalle += f" | Entrada: {hora_entrada}"
@@ -4066,7 +4167,26 @@ def vista_ari():
     elif st.session_state.get("rol") == "admin":
         contexto = "El usuario actual es el administrador de RH de la DFC."
 
-    ari_module.render_ari(contexto)
+    # deps_pase enciende la captura de pases por chat. Si se omite, ARI
+    # funciona igual que antes: solo responde dudas.
+    #
+    # ARI no escribe en ningún Sheet: arma los datos y llama a
+    # enviar_solicitud(), la MISMA función del formulario, para que todo pase
+    # por una sola puerta (folio en vivo, candado anti duplicado,
+    # INSERT_ROWS, bitácora y comprobante PDF incluidos).
+    _rfc_ari = str(st.session_state.get("rfc", "")).strip()
+    _nom_ari = str(st.session_state.get("nombre", "")).strip()
+    if _rfc_ari and _nom_ari:
+        ari_module.render_ari(contexto, deps_pase={
+            "enviar_solicitud":   enviar_solicitud,
+            "cargar_horarios":    cargar_horarios,
+            "cargar_incidencias": cargar_incidencias,
+            "rfc":                _rfc_ari,
+            "nombre":             _nom_ari,
+            "jefe_inmediato":     st.session_state.get("jefe_inmediato", ""),
+        })
+    else:
+        ari_module.render_ari(contexto)
 
 
 def main():

@@ -1392,6 +1392,17 @@ def render_validacion_oficio(get_client, token: str):
     cualquiera podría recorrer 1010, 1011, 1012 y cosechar información.
     """
     st.markdown("### 🔎 Verificación de oficio · RH · DFC")
+
+    # Un token vacío NO es un token. Los oficios históricos se dan de alta con
+    # TOKEN = "" (no llevan QR), y la búsqueda compara texto contra texto: la
+    # cadena vacía empataba con esas filas. Resultado: entrar a la app con
+    # "?validar_oficio=" y nada más devolvía un oficio histórico —asunto,
+    # destinatario y enlaces— sin iniciar sesión. Se corta antes de buscar.
+    if not str(token or "").strip():
+        st.error("Este código **no corresponde** a ningún oficio emitido por "
+                 "Recursos Humanos de la Dirección de Formación Continua.")
+        return
+
     try:
         df = cargar_oficios(get_client)
     except Exception as e:
