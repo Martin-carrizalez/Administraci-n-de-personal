@@ -591,7 +591,24 @@ def _panel_pase(deps):
             st.rerun()
 
 
-def build_system_prompt():
+# Lo que el prompt dice sobre levantar pases depende de si la captura está
+# encendida. Prometer el resumen cuando no existe deja al empleado esperando
+# algo que nunca va a aparecer: el bloque de captura solo se dibuja cuando
+# app_incidencias le pasa deps_pase a render_ari. Pasó en producción.
+_BLOQUE_CAPTURA_PASES = """- PUEDES LEVANTARLO AQUÍ MISMO: si el empleado te dice que necesita un pase
+  ("necesito salir hoy a las 12 y ya no regreso"), ayúdale a juntar los datos
+  conversando: tipo de pase, fecha, hora y motivo. Pregunta SOLO lo que falte,
+  de uno en uno. NO calcules las horas de ausencia: de eso se encarga el
+  sistema con su horario real. Cuando tengas todo, dile que revise el resumen
+  que le aparece abajo del chat y que ahí mismo registra su pase."""
+
+_BLOQUE_SIN_CAPTURA = """- Los pases se capturan en el formulario del portal, no en este chat. Si el
+  empleado te pide levantar uno, explícale con amabilidad cómo hacerlo en el
+  formulario. NUNCA le digas que revise un resumen abajo del chat ni le
+  prometas registrar su pase desde aquí: no puedes hacerlo."""
+
+
+def build_system_prompt(captura_pases: bool = False):
     prox, dias = get_proxima_quincena()
     if prox:
         info_prox = f"La próxima quincena es la {prox['q']} con pago el {prox['fecha'].strftime('%d de %B de %Y')} (en {dias} días). Concepto: {prox['concepto']}."
@@ -729,12 +746,7 @@ POR TIPO DE INCIDENCIA:
 - Pase de salida CON retorno (PSR): indicas también tu hora de retorno.
 - Pase de entrada (PEN): para llegar después de tu hora de entrada.
 - El portal acumula y te muestra las horas de pases autorizados que llevas en el mes.
-- PUEDES LEVANTARLO AQUÍ MISMO: si el empleado te dice que necesita un pase
-  ("necesito salir hoy a las 12 y ya no regreso"), ayúdale a juntar los datos
-  conversando: tipo de pase, fecha, hora y motivo. Pregunta SOLO lo que falte,
-  de uno en uno. NO calcules las horas de ausencia: de eso se encarga el
-  sistema con su horario real. Cuando tengas todo, dile que revise el resumen
-  que le aparece abajo del chat y que ahí mismo registra su pase.
+{_BLOQUE_CAPTURA_PASES if captura_pases else _BLOQUE_SIN_CAPTURA}
 
 🧳 COMISIÓN (COM)
 - Registra el periodo y el motivo de la comisión (trabajo fuera de tu lugar de adscripción).
@@ -1080,7 +1092,7 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
         st.session_state.ari_messages = []
 
     if "ari_chat" not in st.session_state:
-        prompt = build_system_prompt()
+        prompt = build_system_prompt(captura_pases=bool(deps_pase))
         if contexto_usuario:
             prompt += (
                 "\n\n═══════════════════════════════════════════════════════\n"
