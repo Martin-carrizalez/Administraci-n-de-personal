@@ -113,7 +113,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v17 · rapido (1 llamada por turno)"
+ARI_VERSION = "agente v18 · tope de 55s por turno (sin reintento doble)"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -339,7 +339,16 @@ def _horario_del_dia(deps, fecha_iso):
         return "", ""
 
 
-def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False, herramientas=None):
+PRESUPUESTO_TURNO = 55          # segundos para TODO el turno, no por llamada
+
+
+def _resta(fin):
+    """Segundos que quedan del presupuesto. Nunca negativo."""
+    return max(0.0, fin - time.monotonic()) if fin else 999.0
+
+
+def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
+                      herramientas=None, fin=None):
     """Llama al catálogo de NVIDIA. `mensajes` va en formato OpenAI.
 
     Recorre los modelos en orden; un 503/429 es "ocupado" y se reintenta el
@@ -350,6 +359,12 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False, herramientas=N
     api_key = _nvidia_key()
     errores = []
     for modelo in NVIDIA_MODELS:
+        # Sin esto, cada modelo extra multiplica la espera del empleado. El
+        # presupuesto manda sobre la lista: mas vale caer al formulario que
+        # dejar el spinner girando ocho minutos.
+        if _resta(fin) < 3:
+            errores.append("se acabo el tiempo del turno")
+            break
         for intento in range(REINTENTOS_503):
             try:
                 cuerpo = {"model": modelo, "messages": mensajes,
@@ -362,11 +377,11 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False, herramientas=N
                 hdr = {"Authorization": f"Bearer {api_key}",
                        "Accept": "application/json",
                        "Content-Type": "application/json"}
-                r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=40)
+                r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=min(40, _resta(fin)))
                 if r.status_code == 400:
                     # El modelo no entiende chat_template_kwargs: se reintenta sin eso.
                     cuerpo.pop("chat_template_kwargs", None)
-                    r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=40)
+                    r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=min(40, _resta(fin)))
                 if r.status_code == 200:
                     msg = r.json()["choices"][0]["message"]
                     if herramientas:
@@ -408,9 +423,19 @@ def _agente(sistema, mensajes, deps):
     hist = [{"role": "system", "content": "detailed thinking off"},
             {"role": "system", "content": sistema}] + list(mensajes)
     pasos = []
+    fin = time.monotonic() + PRESUPUESTO_TURNO
     for _ in range(MAX_PASOS_AGENTE):
+        if _resta(fin) < 3:
+            # Se agoto el presupuesto a media conversacion. Si ya hay un pase
+            # preparado, no se tira: se saca el boton y el empleado termina.
+            if st.session_state.get("ari_pase") and not _falta_del_pase(
+                    st.session_state["ari_pase"]):
+                st.session_state["_ari_mostrar_boton"] = True
+                return ("Ya tengo tu pase listo. Confirmalo con el boton de "
+                        "registrar."), pasos
+            raise RuntimeError("se acabo el presupuesto de tiempo del turno")
         msg = _responder_nvidia(hist, temperatura=0.2,
-                                herramientas=HERRAMIENTAS_PASE)
+                                herramientas=HERRAMIENTAS_PASE, fin=fin)
         llamadas = msg.get("tool_calls") or []
         if not llamadas:
             return (msg.get("content") or "").strip(), pasos
@@ -1847,8 +1872,11 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                 # emergencia. Degradar no es lo mismo que morir.
                 st.session_state["_ari_chat_error"] = f"{type(e).__name__}: {e}"
                 try:
+                    # Se va DIRECTO a Gemini, no por responder_ia: NVIDIA
+                    # acaba de fallar y reintentarlo aqui duplicaba la espera
+                    # del empleado sin ninguna posibilidad de exito.
                     with st.spinner("ARI esta pensando..."):
-                        texto, _c = responder_ia(
+                        texto = _responder_gemini(
                             st.session_state["ari_sistema"], _hist)
                     if deps_pase:
                         st.session_state["_ari_sin_tools"] = True
