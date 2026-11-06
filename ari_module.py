@@ -329,13 +329,45 @@ def calcular_horas_pase(tipo, fecha, hora_salida, hora_retorno, hora_entrada,
     return 0.0, ""
 
 
+def _codigo_tipo(valor) -> str:
+    """Traduce lo que devuelva el modelo al código PSE / PSR / PEN.
+
+    ESTE ERA EL BUG: el modelo casi nunca contesta "PSE"; contesta "Pase de
+    salida sin retorno", que es como lo tiene escrito el prompt. El código
+    exigía la sigla exacta y DESCARTABA todo lo demás, así que el tipo
+    quedaba vacío para siempre y el panel repetía "Falta: tipo de pase"
+    aunque la fecha, la hora y el motivo ya estuvieran capturados.
+
+    El orden de las comprobaciones importa: "pase de salida SIN RETORNO"
+    contiene tanto "salida" como "sin retorno", y lo que manda es el retorno.
+    """
+    t = _txt(valor).upper()
+    if t in TIPOS_PASE:
+        return t
+    tl = t.lower()
+    if not tl:
+        return ""
+    # entrada / llegar tarde
+    if any(w in tl for w in ("entrada", "pen", "llegar", "llego", "tarde")):
+        return "PEN"
+    # salida SIN retorno (va antes: la frase también dice "salida")
+    if any(w in tl for w in ("sin retorno", "no regres", "no vuelv", "no retorn")):
+        return "PSE"
+    # salida CON retorno
+    if any(w in tl for w in ("con retorno", "retorno", "regres", "vuelv")):
+        return "PSR"
+    # "salida" a secas: sin más datos, lo más común es sin retorno
+    if any(w in tl for w in ("salida", "salir", "salgo", "pse")):
+        return "PSE"
+    return ""
+
+
 def _normalizar_pase(d):
     """Deja el pase coherente con su tipo. Imprescindible porque el merge
     nunca borra: si alguien pide un PSR y luego dice "mejor ya no regreso"
     (PSE), la hora de retorno sobrevivía y acababa escrita en el motivo y en
     el PDF de un pase sin retorno."""
-    t = _txt(d.get("tipo")).upper()
-    d["tipo"] = t if t in TIPOS_PASE else ""
+    d["tipo"] = _codigo_tipo(d.get("tipo"))
     if not d["tipo"]:
         return d
     usados = CAMPOS_POR_TIPO[d["tipo"]]
@@ -348,8 +380,8 @@ def _normalizar_pase(d):
 def _falta_del_pase(d):
     """Qué campos siguen pendientes. Lo decide el código: si lo decidiera el
     modelo, diría "ya tengo todo" con campos vacíos."""
-    t = _txt(d.get("tipo")).upper()
-    if t not in TIPOS_PASE:
+    t = _codigo_tipo(d.get("tipo"))
+    if not t:
         return ["tipo de pase"]
     etiquetas = {"hora_salida": "hora de salida",
                  "hora_retorno": "hora de retorno",
@@ -383,7 +415,8 @@ HOY es {DIAS_ES[hoy.weekday()]} {hoy.day} de {MESES_ES[hoy.month-1]} de {hoy.yea
 Resuelve "hoy", "mañana" o "el viernes" contra esa fecha, en formato AAAA-MM-DD.
 Ante una fecha ambigua, elige la MÁS CERCANA EN EL FUTURO; si aun así dudas, déjala vacía.
 
-tipo: exactamente PSE, PSR o PEN, o vacío si no está claro.
+tipo: responde con la SIGLA DE TRES LETRAS y nada más —PSE, PSR o PEN—,
+nunca con el nombre largo. Déjalo vacío solo si de verdad no se puede saber.
   PSE = sale y ya no regresa ese día
   PSR = sale y regresa el mismo día
   PEN = llega tarde o entra después de su hora
@@ -470,8 +503,8 @@ def _actualizar_pase(texto_usuario):
     # de un turno anterior, que después la normalización volvía vacío: se
     # perdía un dato bueno por una respuesta mal formateada.
     _traza("3_extractor", dict(nuevo))
-    _t = _txt(nuevo.get("tipo")).upper()
-    if _t in TIPOS_PASE:
+    _t = _codigo_tipo(nuevo.get("tipo"))
+    if _t:
         acum["tipo"] = _t
     for k in ("fecha", "motivo") + _TODAS_LAS_HORAS:
         v = _txt(nuevo.get(k))
@@ -1283,7 +1316,10 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
     # Esto existe porque la captura falla en silencio: el chat se ve normal
     # y el panel simplemente no aparece, sin decir por qué. Aquí queda a la
     # vista en qué punto exacto se detuvo.
-    if st.session_state.get("rol") == "admin":
+    # Visible para el admin, o para cualquiera si se pone ari_debug = true en
+    # secrets: probar con una cuenta de empleado es justo cuando más falta
+    # hace ver esto.
+    if st.session_state.get("rol") == "admin" or st.secrets.get("ari_debug"):
         with st.expander("🔧 Diagnóstico de la captura de pases"):
             st.write("**¿Llegaron las dependencias?**",
                      "SÍ — " + ", ".join(sorted(deps_pase)) if deps_pase
