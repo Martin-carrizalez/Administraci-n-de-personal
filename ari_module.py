@@ -111,7 +111,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "captura de pases v7 · formulario en el chat"
+ARI_VERSION = "captura de pases v9 · resumen + errores con causa"
 
 TIPOS_PASE = {
     "PSE": "Pase de salida sin retorno",
@@ -469,6 +469,33 @@ Lo que no te hayan dicho, déjalo como cadena vacía. No inventes nada."""
         return json.loads(txt[i:j + 1])
 
 
+def _mensaje_de_fallo(e) -> str:
+    """Traduce el fallo de la API a algo accionable para quien está enfrente.
+
+    No es cosmética: cada causa se resuelve de forma distinta y con un único
+    mensaje genérico nadie sabe cuál le tocó. La cuota se espera o se sube de
+    plan; una llave vencida se cambia y esperar no sirve de nada; un corte de
+    red se reintenta. Se mira el texto del error porque el SDK no expone un
+    código estable entre versiones.
+    """
+    t = f"{type(e).__name__} {e}".lower()
+    if any(w in t for w in ("429", "quota", "resourceexhausted", "exhausted",
+                            "rate limit", "ratelimit")):
+        return ("⏳ Se agotó la cuota de la API de Gemini (por minuto o del "
+                "día). ARI vuelve sola cuando se libere. Mientras tanto, los "
+                "pases y las incidencias se capturan en el formulario del "
+                "portal, que no depende de esto.")
+    if any(w in t for w in ("api key", "api_key", "permission", "401", "403",
+                            "unauthenticated", "invalid argument: key")):
+        return ("🔑 ARI no pudo autenticarse con el servicio. Esto no se "
+                "arregla esperando: avisa al área de RH de la DFC.")
+    if any(w in t for w in ("not found", "404", "is not supported", "model")):
+        return ("⚙️ El modelo configurado no está disponible. Avisa al área de "
+                "RH de la DFC; esperando no se corrige.")
+    return ("⏳ ARI no está respondiendo en este momento. Intenta de nuevo en "
+            "un minuto, o consulta directamente con el área de RH de la DFC.")
+
+
 def _traza(clave, valor):
     """Deja constancia de cada paso de la captura para el panel de
     diagnóstico. Sin esto no hay forma de saber en qué punto se cae: el
@@ -582,13 +609,37 @@ def _formulario_pase(datos):
     corrigen a mano, así que un error del modelo deja de ser un callejón sin
     salida: es un dato mal puesto que el empleado cambia en dos segundos.
     """
-    st.caption("📝 Revisa tu pase y corrige lo que haga falta:")
+    # Qué se enseña y qué se esconde. El formulario completo siempre a la vista
+    # convierte a ARI en el formulario de la app pegado en el chat, y entonces
+    # no sirve de nada haber escrito la frase: es la crítica justa.
+    #
+    # Así que los campos que ARI YA sacó del mensaje se van a un desplegable, y
+    # arriba queda una sola línea de resumen. Solo lo que de verdad falta se
+    # pide a la vista. Lo que NO cambia es que todos los widgets se dibujan en
+    # cada pasada, escondidos o no: en Streamlit, un widget que no se dibuja
+    # pierde su valor en session_state, y perderlo aquí significa perder el
+    # pase a medio armar.
+    _faltantes = _falta_del_pase(datos)
+    if _faltantes:
+        st.caption("Me falta esto para armar tu pase:")
+    # Se aparta el sitio del resumen ANTES del desplegable, porque la frase se
+    # arma con lo que el empleado tenga en pantalla y eso no se sabe hasta
+    # haber dibujado los campos. Sin el hueco apartado, el resumen saldría
+    # debajo y se leería al revés.
+    marco = st.empty()
+    caja = st.expander("✏️ Cambiar lo que tomé de tu mensaje")
 
-    _prellenar("ari_f_tipo", _codigo_tipo(datos.get("tipo")))
-    tipo = st.selectbox(
-        "Tipo de pase", ["", "PSE", "PSR", "PEN"],
-        format_func=lambda c: TIPOS_PASE.get(c, "— elige el tipo —"),
-        key="ari_f_tipo")
+    def _donde(falta):
+        """A la vista si falta; en el desplegable si ya estaba bien."""
+        import contextlib as _c
+        return _c.nullcontext() if falta else caja
+
+    with _donde("tipo de pase" in _faltantes):
+        _prellenar("ari_f_tipo", _codigo_tipo(datos.get("tipo")))
+        tipo = st.selectbox(
+            "Tipo de pase", ["", "PSE", "PSR", "PEN"],
+            format_func=lambda c: TIPOS_PASE.get(c, "— elige el tipo —"),
+            key="ari_f_tipo")
 
     # La fecha nunca se queda vacía: si el modelo no la sacó, se propone HOY,
     # que es el caso real en la enorme mayoría de los pases, y queda visible
@@ -597,26 +648,39 @@ def _formulario_pase(datos):
         _f0 = datetime.strptime(_txt(datos.get("fecha")), "%Y-%m-%d").date()
     except Exception:
         _f0 = today_mx()
-    _prellenar("ari_f_fecha", _f0)
-    fecha = st.date_input("Fecha del pase", key="ari_f_fecha", format="DD/MM/YYYY")
+    with _donde("fecha" in _faltantes):
+        _prellenar("ari_f_fecha", _f0)
+        fecha = st.date_input("Fecha del pase", key="ari_f_fecha",
+                              format="DD/MM/YYYY")
 
     # Solo se piden las horas que ese tipo usa de verdad. Sin tipo todavía no
     # se sabe cuáles son, así que no se pinta ninguna.
     horas_pedidas = CAMPOS_POR_TIPO.get(tipo, ())
     for campo in horas_pedidas:
-        _prellenar(f"ari_f_{campo}", _txt(datos.get(campo)))
-        st.text_input(_ETIQUETA_HORA[campo] + " (HH:MM, 24 h)",
-                      placeholder="13:30", max_chars=5, key=f"ari_f_{campo}")
+        with _donde(_ETIQUETA_HORA[campo].lower() in _faltantes):
+            _prellenar(f"ari_f_{campo}", _txt(datos.get(campo)))
+            st.text_input(_ETIQUETA_HORA[campo] + " (HH:MM, 24 h)",
+                          placeholder="13:30", max_chars=5, key=f"ari_f_{campo}")
 
-    _prellenar("ari_pase_motivo", _txt(datos.get("motivo")))
-    st.text_area("Motivo", max_chars=300, height=70, key="ari_pase_motivo",
-                 placeholder="Para qué necesitas el pase")
+    with _donde("motivo" in _faltantes):
+        _prellenar("ari_pase_motivo", _txt(datos.get("motivo")))
+        st.text_area("Motivo", max_chars=300, height=70, key="ari_pase_motivo",
+                     placeholder="Para qué necesitas el pase")
 
     # Lo que manda es lo que está en pantalla, no lo que entendió el modelo.
     nuevo = {"tipo": tipo, "fecha": fecha.isoformat() if fecha else "",
              "motivo": _txt(st.session_state.get("ari_pase_motivo"))}
     for campo in horas_pedidas:
         nuevo[campo] = _txt(st.session_state.get(f"ari_f_{campo}"))
+
+    # Con todo listo, una sola línea en vez de cuatro cajas: el empleado lee,
+    # confirma y ya. Las cajas siguen ahí, dentro del desplegable, para el día
+    # que ARI entienda mal algo.
+    if not _falta_del_pase(nuevo):
+        _h = " · ".join(f"{_ETIQUETA_HORA[c].lower()} {nuevo[c]}"
+                        for c in horas_pedidas if nuevo.get(c))
+        marco.markdown(f"**{TIPOS_PASE[nuevo['tipo']]}** — "
+                       f"{_fecha_larga(fecha)} · {_h} · {nuevo['motivo']}")
     return nuevo
 
 
@@ -1393,19 +1457,21 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
             _parece_pase(pregunta) or st.session_state.get("ari_pase"))
         with st.chat_message("assistant"):
             if _de_pase:
-                texto = ("Te armo el pase aquí mismo. Revisa los campos de abajo, "
-                         "corrige lo que haga falta y **confírmalo tú** con el botón "
-                         "de registrar: hasta que lo aprietes, el pase no existe.")
+                texto = ("Te armo el pase aquí mismo. Revísalo y **confírmalo tú** "
+                         "con el botón de registrar: hasta que lo aprietes, el "
+                         "pase no existe.")
             else:
                 with st.spinner("ARI está pensando..."):
                     try:
                         respuesta = st.session_state.ari_chat.send_message(pregunta)
                         texto = respuesta.text
-                    except Exception:
-                        texto = (
-                            "⏳ ARI está saturada en este momento. Espera un minuto e "
-                            "intenta de nuevo, o consulta directamente con el área de RH de la DFC."
-                        )
+                    except Exception as e:
+                        # Antes todo fallo salía como "ARI está saturada": cuota
+                        # agotada, llave vencida, red caída y modelo inexistente
+                        # daban el MISMO mensaje. Con eso no se puede ni esperar
+                        # un minuto con criterio ni avisar a quien administra.
+                        texto = _mensaje_de_fallo(e)
+                        st.session_state["_ari_chat_error"] = f"{type(e).__name__}: {e}"
             st.markdown(texto)
         st.session_state.ari_messages.append({"role": "assistant", "content": texto})
 
@@ -1457,4 +1523,10 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                 for k in sorted(_tz):
                     st.write(f"**{k}**"); st.code(repr(_tz[k]), language=None)
             st.write("**ari_pase actual**"); st.code(repr(st.session_state.get("ari_pase")), language=None)
-            st.write("**último error**"); st.code(repr(st.session_state.get("_ari_pase_error")), language=None)
+            st.write("**último error del extractor**")
+            st.code(repr(st.session_state.get("_ari_pase_error")), language=None)
+            # El fallo del CHAT se guardaba en ninguna parte: el empleado veía
+            # "saturada" y nadie podía averiguar por qué. Aquí queda el motivo
+            # real, que es lo que distingue cuota agotada de llave vencida.
+            st.write("**último error del chat**")
+            st.code(repr(st.session_state.get("_ari_chat_error")), language=None)
