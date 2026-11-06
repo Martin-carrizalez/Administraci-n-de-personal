@@ -497,6 +497,13 @@ def _actualizar_pase(texto_usuario):
         # de saber por qué.
         st.session_state["_ari_pase_error"] = f"{type(e).__name__}: {e}"
         _traza("3_extractor", f"FALLÓ -> {type(e).__name__}: {e}")
+        # Aunque el extractor se caiga ENTERO —Gemini saturado, esquema
+        # rechazado, cambio de versión del SDK— el empleado tiene que poder
+        # levantar su pase. Se siembra un pase vacío para que el formulario se
+        # dibuje igual y lo llene a mano. Antes, un fallo aquí dejaba la
+        # captura muerta: ni panel, ni campos, ni forma de seguir.
+        st.session_state.setdefault("ari_pase", {"tipo": "", "fecha": "",
+                                                 "motivo": ""})
         return  # el panel lo muestra en el siguiente dibujo
     # El tipo se valida ANTES de fusionar. Si el modelo contesta "pase de
     # salida" en vez de "PSR", ese texto es truthy y pisaba un tipo correcto
@@ -523,9 +530,92 @@ def _actualizar_pase(texto_usuario):
 
 def _limpiar_pase():
     """Borra el pase y TAMBIÉN el estado de sus widgets. Sin lo segundo, el
-    motivo y el adjunto del pase anterior reaparecían en el siguiente."""
-    for k in ("ari_pase", "ari_pase_motivo", "_ari_motivo_visto", "ari_pase_anexo"):
+    motivo y el adjunto del pase anterior reaparecían en el siguiente.
+    Desde que el panel es un formulario, hay que barrer también sus campos
+    y las marcas `_visto_` del prellenado: si quedan, el pase nuevo nace con
+    el tipo, la fecha y las horas del anterior."""
+    for k in ("ari_pase", "ari_pase_motivo", "_ari_motivo_visto", "ari_pase_anexo",
+              "ari_f_tipo", "ari_f_fecha", "ari_f_hora_salida",
+              "ari_f_hora_retorno", "ari_f_hora_entrada"):
         st.session_state.pop(k, None)
+    for k in [k for k in list(st.session_state) if str(k).startswith("_visto_ari_f")]:
+        st.session_state.pop(k, None)
+
+
+def _prellenar(key, valor):
+    """Prellena un widget que tiene `key`.
+
+    En Streamlit, un widget con `key` IGNORA el parámetro `value` en todos los
+    reruns posteriores al primero: manda lo que ya hay en session_state. Por eso
+    el prellenado se escribe a mano. Y solo cuando el dato extraído CAMBIÓ: si se
+    escribiera en cada rerun, pisaría lo que el empleado acaba de corregir a mano,
+    que es justo lo que este formulario viene a permitir.
+    """
+    visto = f"_visto_{key}"
+    if st.session_state.get(visto) != valor:
+        st.session_state[key] = valor
+        st.session_state[visto] = valor
+
+
+_ETIQUETA_HORA = {"hora_salida": "Hora de salida",
+                  "hora_retorno": "Hora de retorno",
+                  "hora_entrada": "Hora de entrada"}
+
+
+def _formulario_pase(datos):
+    """Mini formulario dentro del chat. Devuelve el pase con lo que el
+    empleado tenga en pantalla.
+
+    ESTE ES EL CAMBIO DE FONDO. Antes, el pase solo se podía completar si el
+    modelo acertaba los cinco campos: si faltaba uno, el panel se quedaba en
+    "Falta: X" y la única salida era volver a redactar la frase y rezar.
+
+    Con el motivo era un círculo cerrado y PERMANENTE: casi nadie dice el
+    motivo al pedir un pase ("necesito salir hoy a las 12 y ya no regreso" no
+    lo trae), el modelo lo devolvía vacío, y el único sitio donde se podía
+    escribir era un cuadro de texto que solo se dibujaba cuando YA no faltaba
+    nada. El botón de registrar era inalcanzable por diseño.
+
+    Ahora el extractor solo PRELLENA. Los campos están a la vista y se
+    corrigen a mano, así que un error del modelo deja de ser un callejón sin
+    salida: es un dato mal puesto que el empleado cambia en dos segundos.
+    """
+    st.caption("📝 Revisa tu pase y corrige lo que haga falta:")
+
+    _prellenar("ari_f_tipo", _codigo_tipo(datos.get("tipo")))
+    tipo = st.selectbox(
+        "Tipo de pase", ["", "PSE", "PSR", "PEN"],
+        format_func=lambda c: TIPOS_PASE.get(c, "— elige el tipo —"),
+        key="ari_f_tipo")
+
+    # La fecha nunca se queda vacía: si el modelo no la sacó, se propone HOY,
+    # que es el caso real en la enorme mayoría de los pases, y queda visible
+    # para cambiarla. Un campo vacío solo sirve para volver a bloquear el flujo.
+    try:
+        _f0 = datetime.strptime(_txt(datos.get("fecha")), "%Y-%m-%d").date()
+    except Exception:
+        _f0 = today_mx()
+    _prellenar("ari_f_fecha", _f0)
+    fecha = st.date_input("Fecha del pase", key="ari_f_fecha", format="DD/MM/YYYY")
+
+    # Solo se piden las horas que ese tipo usa de verdad. Sin tipo todavía no
+    # se sabe cuáles son, así que no se pinta ninguna.
+    horas_pedidas = CAMPOS_POR_TIPO.get(tipo, ())
+    for campo in horas_pedidas:
+        _prellenar(f"ari_f_{campo}", _txt(datos.get(campo)))
+        st.text_input(_ETIQUETA_HORA[campo] + " (HH:MM, 24 h)",
+                      placeholder="13:30", max_chars=5, key=f"ari_f_{campo}")
+
+    _prellenar("ari_pase_motivo", _txt(datos.get("motivo")))
+    st.text_area("Motivo", max_chars=300, height=70, key="ari_pase_motivo",
+                 placeholder="Para qué necesitas el pase")
+
+    # Lo que manda es lo que está en pantalla, no lo que entendió el modelo.
+    nuevo = {"tipo": tipo, "fecha": fecha.isoformat() if fecha else "",
+             "motivo": _txt(st.session_state.get("ari_pase_motivo"))}
+    for campo in horas_pedidas:
+        nuevo[campo] = _txt(st.session_state.get(f"ari_f_{campo}"))
+    return nuevo
 
 
 def _panel_pase_en_chat(deps):
@@ -549,7 +639,7 @@ def _panel_pase(deps):
     _err = st.session_state.pop("_ari_pase_error", None)
     if _err:
         st.warning("No pude leer los datos de tu pase automáticamente. "
-                   "Puedes capturarlo en el formulario de siempre.")
+                   "Llénalos aquí abajo y queda igual.")
         if st.session_state.get("rol") == "admin":
             st.caption(f"Detalle técnico (solo admin): {_err}")
 
@@ -557,13 +647,30 @@ def _panel_pase(deps):
     if not datos:
         return
 
-    faltan = _falta_del_pase(datos)
-    if faltan:
-        st.caption("📝 Voy armando tu pase. Falta: **" + "**, **".join(faltan) + "**.")
-        if st.button("🗑️ Cancelar este pase", key="ari_pase_cancel_parcial"):
-            _limpiar_pase()
-            st.rerun()
-        return
+    # ¿Este pase ya se registró? Hay que saberlo ANTES de dibujar nada: con el
+    # pase cerrado no se edita, solo se pinta el acuse con su folio y su PDF.
+    # La clave se arma igual que abajo (tipo + rfc + fecha normalizada), para
+    # que las dos comprobaciones no puedan discrepar.
+    _t0 = _codigo_tipo(datos.get("tipo"))
+    _f0 = _txt(datos.get("fecha"))
+    ya_registrado = bool(
+        _t0 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", _f0)
+        and st.session_state.get(f"registrado_{_t0}_{deps['rfc']}_{_f0}_{_f0}"))
+
+    if not ya_registrado:
+        # El formulario manda sobre el extractor: devuelve lo que el empleado
+        # tiene en pantalla, ya corregido. Si todavía falta algo, falta en el
+        # formulario, donde se puede llenar — no en un callejón sin salida.
+        datos = _formulario_pase(datos)
+        st.session_state["ari_pase"] = datos
+
+        faltan = _falta_del_pase(datos)
+        if faltan:
+            st.caption("Para registrarlo falta: **" + "**, **".join(faltan) + "**.")
+            if st.button("🗑️ Cancelar este pase", key="ari_pase_cancel_parcial"):
+                _limpiar_pase()
+                st.rerun()
+            return
 
     tipo = datos["tipo"]          # _falta_del_pase ya garantizó que es válido
     try:
@@ -618,16 +725,10 @@ def _panel_pase(deps):
         if horas > 0:
             st.info(f"⏱️ **{horas} h de ausencia** — {explica}")
 
-        # El motivo sigue siendo editable: lo que se guarda es este texto, no
-        # lo que el modelo haya entendido.
-        # OJO con Streamlit: en un widget con key, el `value` se ignora en los
-        # reruns siguientes porque manda lo que ya hay en session_state. Por
-        # eso la key se sincroniza a mano cuando el motivo capturado cambia.
-        if st.session_state.get("_ari_motivo_visto") != motivo:
-            st.session_state["ari_pase_motivo"] = motivo
-            st.session_state["_ari_motivo_visto"] = motivo
-        motivo = st.text_area("Motivo", max_chars=300, height=70,
-                              key="ari_pase_motivo")
+        # El motivo ya se captura arriba, en el formulario, y de ahí viene
+        # `datos["motivo"]`. Aquí había un SEGUNDO cuadro de motivo: era el
+        # único sitio donde se podía escribirlo y solo se dibujaba cuando ya
+        # no faltaba nada — incluido el motivo. Esa era la trampa.
 
         if f < today_mx():
             st.warning(f"Ojo: esa fecha ya pasó ({_fecha_larga(f)}).")
