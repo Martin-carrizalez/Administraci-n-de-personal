@@ -643,6 +643,28 @@ def render_pendientes_nomina(cargar_directorio_nomina, get_client=None,
     except Exception as e:
         st.error(f"Error generando el PDF: {e}")
 
+    # 7. El MISMO listado pero por maestro: un renglon por persona con todas
+    # sus quincenas juntas. El PDF de arriba no se toca; los dos quedan.
+    st.markdown("#### 6. Relación por maestro en PDF (un renglón por persona)")
+    st.caption("Mismo dato que el PDF de arriba, volteado: cada maestro con todas sus "
+               "quincenas pendientes en un solo renglón, numerado y alfabético. "
+               "Un archivo por centro de trabajo.")
+    _cols_pdf_m = st.columns(len(NOMINAS))
+    for _i_m, _nom_m in enumerate(NOMINAS):
+        with _cols_pdf_m[_i_m]:
+            try:
+                _pdf_m = generar_pdf_por_maestro(lista, _nom_m)
+                if _pdf_m:
+                    st.download_button(f"📄 {_nom_m}", data=_pdf_m,
+                                       file_name=f"Pendientes_{_nom_m}.pdf",
+                                       mime="application/pdf",
+                                       key=f"dl_x_maestro_{_nom_m}",
+                                       use_container_width=True)
+                else:
+                    st.caption(f"{_nom_m}: sin pendientes capturados.")
+            except Exception as _e_m:
+                st.error(f"{_nom_m}: no se pudo generar el PDF — {_e_m}")
+
 
 def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False, conceptos_por_nomina=None):
     """Genera la RELACIÓN de pendientes de firma en PDF, clonando el formato
@@ -772,5 +794,135 @@ def generar_pdf_cartas_nomina(lista, nominas, segundo_aviso=False, conceptos_por
 
     if not elems:
         return None
+    doc.build(elems)
+    return buf.getvalue()
+
+
+def generar_pdf_por_maestro(lista, nomina, anio=None):
+    """Relación de pendientes VERTICAL: un renglón por maestro, con todas sus
+    quincenas juntas en una sola celda.
+
+    Es el MISMO dato que generar_pdf_cartas_nomina(), nada más volteado:
+      · aquélla va por columnas de concepto  -> sirve para pasar lista de una
+        quincena ("¿quién debe la Q20?")
+      · ésta va por persona                  -> sirve para atender al que llega
+        al escritorio ("¿qué me falta a mí?")
+    Las dos quedan disponibles; esta función no toca la otra.
+
+    Un archivo por centro de trabajo, con el formato que ya usan las asistentes:
+      · Fila 1: CENTRO DE TRABAJO <CCT>
+      · Fila 2: Relación de quincenas pendientes por maestro | Qmin a Qmax del año
+      · Tabla de 3 columnas: No. | NOMBRE DEL MAESTRO | QUINCENAS PENDIENTES
+      · Orden alfabético, numeración corrida y encabezado repetido en cada hoja.
+
+    Devuelve los bytes del PDF, o None si esa nómina no trae pendientes."""
+    if not lista:
+        return None
+    import io
+    import re
+    from datetime import datetime
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+
+    def _con_q(c):
+        # Solo se le pone la Q a lo que es un numero pelon ("18" -> "Q18").
+        # Un concepto con texto ("Aguinaldo", "Ayuda de Libros") se deja tal
+        # cual: con la regla anterior salia escrito "QAGUINALDO".
+        c = str(c).strip()
+        return f"Q{c}" if re.fullmatch(r"\d+", c) else c
+
+    # {nombre: [conceptos]} SOLO de esta nómina. Quien no deba nada en este CCT
+    # no aparece, aunque deba en el otro: cada hoja es de su centro de trabajo.
+    por_persona = {}
+    for x in lista:
+        conceptos = x.get("pendientes", {}).get(nomina, [])
+        if not conceptos:
+            continue
+        acum = por_persona.setdefault(str(x.get("nombre", "")).strip(), [])
+        for c in conceptos:
+            c = _con_q(c)
+            # Se compara ya normalizado: si se capturo "18" en una nomina y
+            # "Q18" en otra es la MISMA quincena y debe salir una sola vez.
+            if c and c not in acum:
+                acum.append(c)
+    por_persona = {n: c for n, c in por_persona.items() if n and c}
+    if not por_persona:
+        return None
+
+    # Dentro de la celda las quincenas van por número, y las variantes de una
+    # misma quincena pegadas a la suya (Q17, Q17-RETRO, Q18, Q19, Q20), no
+    # tiradas al final: así se lee de corrido qué se le debe.
+    def _clave_q(c):
+        txt = str(c).strip().upper()
+        m = re.search(r"(\d+)", txt)
+        if not m:
+            return (9999, 1, txt)        # lo que no trae número, al final
+        simple = re.fullmatch(r"Q?\s*\d+", txt) is not None
+        return (int(m.group(1)), 0 if simple else 1, txt)
+
+    # Encabezado "Q17 a Q20 del 2026" sacado de los conceptos capturados,
+    # no de una fecha: si solo se capturó Q20, dice Q20 a Q20.
+    nums = []
+    for conceptos in por_persona.values():
+        for c in conceptos:
+            m = re.search(r"(\d+)", str(c))
+            if m:
+                nums.append(int(m.group(1)))
+    anio = anio or datetime.now().year
+    rango = f"Q{min(nums)} a Q{max(nums)} del {anio}" if nums else f"del {anio}"
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=letter, title=f"Pendientes {nomina}",
+        leftMargin=51, rightMargin=51, topMargin=42, bottomMargin=42)
+    styles = getSampleStyleSheet()
+    AZUL = colors.HexColor("#1F3864")     # franja del encabezado
+    BANDA = colors.HexColor("#F2F5F9")    # renglón alterno
+    REJILLA = colors.HexColor("#9AA5B1")
+
+    st_cct = ParagraphStyle("cct", parent=styles["Normal"], fontName="Helvetica-Bold",
+                            fontSize=13, leading=15.6, alignment=TA_CENTER, spaceAfter=4)
+    st_sub = ParagraphStyle("sub", parent=styles["Normal"], fontName="Helvetica",
+                            fontSize=9.5, leading=11.4, alignment=TA_CENTER, spaceAfter=10)
+    st_hdr = ParagraphStyle("hdrm", parent=styles["Normal"], fontName="Helvetica-Bold",
+                            fontSize=8.5, leading=10, alignment=TA_CENTER,
+                            textColor=colors.white)
+    st_hdr_izq = ParagraphStyle("hdrmi", parent=st_hdr, alignment=TA_LEFT)
+    st_num = ParagraphStyle("numm", parent=styles["Normal"], fontName="Helvetica",
+                            fontSize=8.2, leading=10, alignment=TA_CENTER)
+    st_nom = ParagraphStyle("nomm", parent=styles["Normal"], fontName="Helvetica",
+                            fontSize=8.2, leading=10, alignment=TA_LEFT)
+    st_qna = ParagraphStyle("qnam", parent=styles["Normal"], fontName="Helvetica",
+                            fontSize=8.2, leading=10, alignment=TA_CENTER)
+
+    data = [[Paragraph("No.", st_hdr),
+             Paragraph("NOMBRE DEL MAESTRO", st_hdr_izq),
+             Paragraph("QUINCENAS PENDIENTES", st_hdr)]]
+    # Alfabético: es el orden en que viene la nómina física.
+    for i, nombre in enumerate(sorted(por_persona), start=1):
+        qnas = ", ".join(_con_q(c) for c in sorted(por_persona[nombre], key=_clave_q))
+        data.append([Paragraph(str(i), st_num),
+                     Paragraph(nombre, st_nom),
+                     Paragraph(qnas, st_qna)])
+
+    elems = [Paragraph(f"CENTRO DE TRABAJO {nomina}", st_cct),
+             Paragraph(f"Relación de quincenas pendientes por maestro | {rango}", st_sub)]
+    # Paragraph en cada celda: un nombre o una lista larga de quincenas se
+    # parte en dos renglones en vez de desbordarse sobre la columna de al lado.
+    tb = Table(data, colWidths=[34, 278, 198], repeatRows=1)
+    tb.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), AZUL),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BANDA]),
+        ("GRID", (0, 0), (-1, -1), 0.4, REJILLA),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    elems.append(tb)
     doc.build(elems)
     return buf.getvalue()
