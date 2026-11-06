@@ -113,7 +113,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "captura de pases v11 · dos cerebros (NVIDIA + Gemini)"
+ARI_VERSION = "agente v12 · herramientas (tool calling)"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -161,7 +161,122 @@ def _nvidia_key():
     return k
 
 
-def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False):
+# ═══════════════════════════════════════════════════════════════
+# HERRAMIENTAS DEL AGENTE
+# ═══════════════════════════════════════════════════════════════
+# El modelo NO escribe en el Sheet y NO calcula horas. Decide CUÁNDO llamar a
+# una herramienta y con qué argumentos; la herramienta la ejecuta el código,
+# que valida contra el horario real y es el único que toca enviar_solicitud.
+#
+# Esto reemplaza al extractor: ya no hay lista de palabras clave decidiendo si
+# un mensaje "suena a pase", ni un JSON que el código pega en campos. El modelo
+# conversa y llama; si le falta un dato, la herramienta se lo dice y él lo
+# pregunta con sus palabras.
+
+HERRAMIENTAS_PASE = [
+    {"type": "function", "function": {
+        "name": "consultar_mi_horario",
+        "description": ("Consulta el horario programado del empleado para una "
+                        "fecha. Úsala ANTES de preparar un pase si necesitas "
+                        "saber a qué hora entra o sale ese día."),
+        "parameters": {"type": "object", "properties": {
+            "fecha": {"type": "string",
+                      "description": "Fecha en formato AAAA-MM-DD"}},
+            "required": ["fecha"]}}},
+    {"type": "function", "function": {
+        "name": "preparar_pase",
+        "description": ("Prepara el pase con los datos que te dio el empleado y "
+                        "calcula sus horas de ausencia contra su horario real. "
+                        "NO lo registra. Si falta algo o una hora es imposible, "
+                        "te devuelve el detalle para que se lo preguntes."),
+        "parameters": {"type": "object", "properties": {
+            "tipo": {"type": "string", "enum": ["PSE", "PSR", "PEN"],
+                     "description": ("PSE = sale y ya no regresa ese día. "
+                                     "PSR = sale y regresa el mismo día. "
+                                     "PEN = llega tarde.")},
+            "fecha": {"type": "string", "description": "AAAA-MM-DD"},
+            "hora_salida": {"type": "string", "description": "HH:MM 24h, solo PSE y PSR"},
+            "hora_retorno": {"type": "string", "description": "HH:MM 24h, solo PSR"},
+            "hora_entrada": {"type": "string", "description": "HH:MM 24h, solo PEN"},
+            "motivo": {"type": "string", "description": "Para qué necesita el pase"}},
+            "required": ["tipo", "fecha", "motivo"]}}},
+    {"type": "function", "function": {
+        "name": "mostrar_boton_registrar",
+        "description": ("Muestra al empleado el botón para registrar el pase ya "
+                        "preparado. Llámala SOLO cuando preparar_pase haya "
+                        "respondido listo=true y el empleado haya confirmado. "
+                        "Tú no registras nada: el empleado aprieta el botón."),
+        "parameters": {"type": "object", "properties": {}}}},
+]
+
+
+def _ejecutar_herramienta(nombre, args, deps):
+    """Ejecuta una herramienta y devuelve su resultado como dict.
+
+    Todo lo que el modelo NO debe decidir vive aquí: el horario real sale del
+    padrón, las horas se calculan con la fórmula del formulario, y lo que falta
+    lo dictamina el código. El modelo solo recibe el veredicto y lo conversa.
+    """
+    if nombre == "consultar_mi_horario":
+        e, s = _horario_del_dia(deps, _txt(args.get("fecha")))
+        if not (e or s):
+            return {"encontrado": False,
+                    "nota": "Ese día no tiene horario registrado en el sistema."}
+        return {"encontrado": True, "entrada": e, "salida": s}
+
+    if nombre == "preparar_pase":
+        d = {k: _txt(args.get(k)) for k in
+             ("tipo", "fecha", "hora_salida", "hora_retorno", "hora_entrada", "motivo")}
+        d["tipo"] = _codigo_tipo(d["tipo"])
+        _normalizar_pase(d)
+        faltan = _falta_del_pase(d)
+        if faltan:
+            return {"listo": False, "falta": faltan,
+                    "nota": "Pregúntale al empleado SOLO lo que falta, de uno en uno."}
+        f = datetime.strptime(d["fecha"], "%Y-%m-%d").date()
+        ep, sp = _horario_del_dia(deps, d["fecha"])
+        horas, explica = calcular_horas_pase(d["tipo"], f, d.get("hora_salida"),
+                                             d.get("hora_retorno"),
+                                             d.get("hora_entrada"), ep, sp)
+        if horas <= 0:
+            # Un pase de 0 h no descuenta nada y no se registra. El modelo
+            # recibe el porqué en texto para poder repreguntar con sentido.
+            return {"listo": False, "problema": explica,
+                    "nota": "Explícaselo y pídele la hora corregida."}
+        st.session_state["ari_pase"] = d
+        return {"listo": True, "horas_de_ausencia": horas, "calculo": explica,
+                "tipo": TIPOS_PASE[d["tipo"]], "fecha": _fecha_larga(f),
+                "nota": ("Dile en UNA frase el tipo, la fecha y las horas, y "
+                         "pídele que confirme. Si confirma, llama a "
+                         "mostrar_boton_registrar.")}
+
+    if nombre == "mostrar_boton_registrar":
+        if not st.session_state.get("ari_pase"):
+            return {"ok": False, "nota": "No hay pase preparado. Llama primero a preparar_pase."}
+        st.session_state["_ari_mostrar_boton"] = True
+        return {"ok": True, "nota": ("El botón ya está en pantalla. Dile que lo "
+                                     "apriete. NO digas que tú registraste nada.")}
+
+    return {"error": f"herramienta desconocida: {nombre}"}
+
+
+def _horario_del_dia(deps, fecha_iso):
+    """Entrada y salida programadas de ESE empleado ESE día, desde el padrón."""
+    try:
+        f = datetime.strptime(_txt(fecha_iso), "%Y-%m-%d").date()
+        dfh = deps["cargar_horarios"]()
+        fila = dfh[dfh["RFC"].astype(str).str.upper().str.strip()
+                   == str(deps["rfc"]).upper().strip()]
+        if fila.empty:
+            return "", ""
+        nd = ["LUN", "MAR", "MIE", "JUE", "VIE", "SAB", "DOM"][f.weekday()]
+        return (_txt(fila.iloc[0].get(f"ENTRADA_{nd}", "")),
+                _txt(fila.iloc[0].get(f"SALIDA_{nd}", "")))
+    except Exception:
+        return "", ""
+
+
+def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False, herramientas=None):
     """Llama al catálogo de NVIDIA. `mensajes` va en formato OpenAI.
 
     Recorre los modelos en orden; un 503/429 es "ocupado" y se reintenta el
@@ -178,6 +293,9 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False):
                           "temperature": temperatura, "top_p": 0.9,
                           "max_tokens": 1024, "stream": False,
                           "chat_template_kwargs": {"thinking": False}}
+                if herramientas:
+                    cuerpo["tools"] = herramientas
+                    cuerpo["tool_choice"] = "auto"
                 hdr = {"Authorization": f"Bearer {api_key}",
                        "Accept": "application/json",
                        "Content-Type": "application/json"}
@@ -187,8 +305,16 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False):
                     cuerpo.pop("chat_template_kwargs", None)
                     r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=90)
                 if r.status_code == 200:
-                    txt = _limpiar_razonamiento(
-                        r.json()["choices"][0]["message"].get("content") or "")
+                    msg = r.json()["choices"][0]["message"]
+                    if herramientas:
+                        # Con herramientas se devuelve el mensaje COMPLETO: el
+                        # agente necesita tool_calls, no solo el texto.
+                        msg["content"] = _limpiar_razonamiento(msg.get("content") or "")
+                        if msg.get("tool_calls") or msg["content"]:
+                            return msg
+                        errores.append(f"{modelo} → respuesta vacía")
+                        break
+                    txt = _limpiar_razonamiento(msg.get("content") or "")
                     if txt:
                         return txt
                     errores.append(f"{modelo} → respuesta vacía")
@@ -202,6 +328,46 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False):
                 errores.append(f"{modelo} → {type(e).__name__}: {e}")
                 break
     raise RuntimeError(" | ".join(errores) or "NVIDIA no respondió")
+
+
+MAX_PASOS_AGENTE = 5
+
+
+def _agente(sistema, mensajes, deps):
+    """Bucle del agente: el modelo decide, las herramientas ejecutan.
+
+    Devuelve (texto_final, pasos) donde pasos es la lista de herramientas que
+    se llamaron, para el panel de diagnóstico.
+
+    El tope de MAX_PASOS_AGENTE existe porque un modelo puede encadenar
+    llamadas sin parar; sin tope, una conversación se convierte en una factura.
+    """
+    hist = [{"role": "system", "content": "detailed thinking off"},
+            {"role": "system", "content": sistema}] + list(mensajes)
+    pasos = []
+    for _ in range(MAX_PASOS_AGENTE):
+        msg = _responder_nvidia(hist, temperatura=0.2,
+                                herramientas=HERRAMIENTAS_PASE)
+        llamadas = msg.get("tool_calls") or []
+        if not llamadas:
+            return (msg.get("content") or "").strip(), pasos
+        hist.append(msg)
+        for lc in llamadas:
+            nombre = lc["function"]["name"]
+            try:
+                args = json.loads(lc["function"].get("arguments") or "{}")
+            except Exception:
+                args = {}
+            resultado = _ejecutar_herramienta(nombre, args, deps)
+            pasos.append({"herramienta": nombre, "args": args,
+                          "resultado": resultado})
+            hist.append({"role": "tool", "tool_call_id": lc.get("id", ""),
+                         "name": nombre,
+                         "content": json.dumps(resultado, ensure_ascii=False)})
+    # Se acabaron los pasos sin una respuesta final: no se deja al empleado
+    # con la pantalla muda.
+    return ("Preparé lo que pude de tu solicitud. Revisa el resumen de abajo "
+            "o dime si falta algo."), pasos
 
 
 def _responder_gemini(sistema, mensajes, temperatura=0.2, json_mode=False):
@@ -702,6 +868,7 @@ def _limpiar_pase():
         st.session_state.pop(k, None)
     for k in [k for k in list(st.session_state) if str(k).startswith("_visto_ari_f")]:
         st.session_state.pop(k, None)
+    st.session_state.pop("_ari_mostrar_boton", None)
 
 
 def _prellenar(key, valor):
@@ -861,12 +1028,18 @@ def _panel_pase(deps):
         _t0 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", _f0)
         and st.session_state.get(f"registrado_{_t0}_{deps['rfc']}_{_f0}_{_f0}"))
 
+    # Con el agente funcionando NO se pinta formulario: el pase se arma
+    # conversando y aquí solo aparece el botón, cuando el modelo llamó a
+    # mostrar_boton_registrar. El formulario es el modo de emergencia, para
+    # cuando no hay modelo con herramientas — sin él, un corte de la API
+    # dejaría al empleado sin forma alguna de levantar su pase.
+    _manual = bool(st.session_state.get("_ari_sin_tools"))
     if not ya_registrado:
-        # El formulario manda sobre el extractor: devuelve lo que el empleado
-        # tiene en pantalla, ya corregido. Si todavía falta algo, falta en el
-        # formulario, donde se puede llenar — no en un callejón sin salida.
-        datos = _formulario_pase(datos)
-        st.session_state["ari_pase"] = datos
+        if _manual:
+            datos = _formulario_pase(datos)
+            st.session_state["ari_pase"] = datos
+        elif not st.session_state.get("_ari_mostrar_boton"):
+            return   # el agente sigue conversando; todavía no hay nada que pintar
 
         faltan = _falta_del_pase(datos)
         if faltan:
@@ -1020,15 +1193,19 @@ def _panel_pase(deps):
 # encendida. Prometer el resumen cuando no existe deja al empleado esperando
 # algo que nunca va a aparecer: el bloque de captura solo se dibuja cuando
 # app_incidencias le pasa deps_pase a render_ari. Pasó en producción.
-_BLOQUE_CAPTURA_PASES = """- PUEDES LEVANTARLO AQUÍ MISMO: si el empleado te dice que necesita un pase
-  ("necesito salir hoy a las 12 y ya no regreso"), ayúdale a juntar los datos
-  conversando: tipo de pase, fecha, hora y motivo. Pregunta SOLO lo que falte,
-  de uno en uno. NO calcules las horas de ausencia: de eso se encarga el
-  sistema con su horario real. Cuando ya tengas todo, dile UNA sola frase:
-  que confirme con el botón "Registrar solicitud" que aparece enseguida.
-  NUNCA le digas que mire "abajo del chat", NUNCA le repitas los datos otra
-  vez y NUNCA afirmes que tú registraste el pase: lo registra él al apretar
-  ese botón."""
+_BLOQUE_CAPTURA_PASES = """- PUEDES LEVANTARLO AQUÍ MISMO, CON TUS HERRAMIENTAS:
+  1. Si el empleado dice que necesita salir, que no regresa, que llegará tarde
+     o que pide un pase, junta conversando: tipo, fecha, hora y motivo.
+     Pregunta SOLO lo que falte, de uno en uno, con tus palabras.
+  2. Llama a `preparar_pase` en cuanto creas tener los datos. Si falta algo o
+     una hora no cuadra, la herramienta te lo dirá y tú se lo preguntas.
+  3. Cuando responda listo=true, dile en UNA frase el tipo, la fecha y las
+     horas de ausencia que te devolvió, y pídele que confirme.
+  4. Si confirma, llama a `mostrar_boton_registrar` y dile que apriete el botón.
+  NUNCA calcules tú las horas de ausencia: para eso está `preparar_pase`, que
+  usa su horario real. NUNCA inventes el horario: para eso está
+  `consultar_mi_horario`. Y NUNCA digas que tú registraste el pase ni que "ya
+  quedó": el pase solo existe cuando el empleado aprieta el botón."""
 
 _BLOQUE_SIN_CAPTURA = """- Los pases se capturan en el formulario del portal, no en este chat. Si el
   empleado te pide levantar uno, explícale con amabilidad cómo hacerlo en el
@@ -1581,68 +1758,50 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
             st.markdown(pregunta)
         st.session_state.ari_messages.append({"role": "user", "content": pregunta})
         _registrar_pregunta(pregunta, "portal_incidencias", st.session_state.get("rol", ""))
-        # Cuando el mensaje es sobre un pase, el modelo NO habla. Responde una
-        # frase fija escrita en código.
-        #
-        # Por qué: por prompt se le prohibió decir que él registra el pase, y
-        # aun así contestaba "Ya he registrado tu pase de salida sin retorno".
-        # Era mentira —el registro lo hace el empleado con el botón— y es la
-        # peor mentira posible: el trabajador se va confiado, sin folio, sin
-        # PDF y sin firmas, y RH no tiene nada. Un prompt es una súplica, no
-        # un control. La única forma de garantizar que no vuelva a decirlo es
-        # que no sea él quien conteste en estos mensajes.
-        _de_pase = bool(deps_pase) and not st.session_state.get("_ari_pase_cerrado") and (
-            _parece_pase(pregunta) or st.session_state.get("ari_pase"))
         with st.chat_message("assistant"):
-            if _de_pase:
-                texto = ("Te armo el pase aquí mismo. Revísalo y **confírmalo tú** "
-                         "con el botón de registrar: hasta que lo aprietes, el "
-                         "pase no existe.")
-            else:
-                try:
-                    # Historial reconstruido en cada turno: así no se pierde el
-                    # contexto aunque un turno lo conteste NVIDIA y el siguiente
-                    # Gemini. Se recorta a los últimos MAX_TURNOS mensajes.
-                    _hist = [{"role": m["role"], "content": m["content"]}
-                             for m in st.session_state.ari_messages[-MAX_TURNOS:]]
-                    with st.spinner("ARI está pensando..."):
-                        texto, _cerebro = responder_ia(
+            # Historial reconstruido en cada turno: con dos cerebros no puede
+            # haber una sesion viva de uno solo.
+            _hist = [{"role": m["role"], "content": m["content"]}
+                     for m in st.session_state.ari_messages[-MAX_TURNOS:]]
+            try:
+                if deps_pase:
+                    # EL AGENTE. El modelo decide si esto es un pase y que
+                    # herramienta usar. Ya no hay lista de palabras clave
+                    # adivinando: "necesito salir", "se me hizo tarde" o
+                    # "manana llego a las 10" los resuelve el mismo camino.
+                    with st.spinner("ARI esta trabajando..."):
+                        texto, _pasos = _agente(
+                            st.session_state["ari_sistema"], _hist, deps_pase)
+                    _traza("agente_pasos", _pasos)
+                    st.session_state.pop("_ari_sin_tools", None)
+                else:
+                    with st.spinner("ARI esta pensando..."):
+                        texto, _c = responder_ia(
                             st.session_state["ari_sistema"], _hist)
-                    if _cerebro != CEREBRO_PRINCIPAL:
-                        st.caption("⚡ Respondido por el motor de respaldo")
-                except Exception as e:
-                    # Llegar aquí significa que fallaron LOS DOS cerebros. El
-                    # mensaje nombra la causa en vez del viejo "ARI está
-                    # saturada", que decía lo mismo para cuota agotada, llave
-                    # vencida, red caída y modelo inexistente — cuatro cosas que
-                    # se arreglan distinto.
-                    texto = _mensaje_de_fallo(e)
-                    st.session_state["_ari_chat_error"] = f"{type(e).__name__}: {e}"
+            except Exception as e:
+                # El agente vive en NVIDIA (es quien soporta herramientas). Si
+                # se cae, Gemini contesta igual pero SIN herramientas: ARI
+                # sigue resolviendo dudas y el pase pasa al formulario de
+                # emergencia. Degradar no es lo mismo que morir.
+                st.session_state["_ari_chat_error"] = f"{type(e).__name__}: {e}"
+                try:
+                    with st.spinner("ARI esta pensando..."):
+                        texto, _c = responder_ia(
+                            st.session_state["ari_sistema"], _hist)
+                    if deps_pase:
+                        st.session_state["_ari_sin_tools"] = True
+                        st.session_state.setdefault(
+                            "ari_pase", {"tipo": "", "fecha": "", "motivo": ""})
+                        st.caption("Modo de respaldo: captura tu pase en los campos de abajo.")
+                except Exception as e2:
+                    texto = _mensaje_de_fallo(e2)
+                    st.session_state["_ari_chat_error"] = f"{type(e).__name__}: {e} || {type(e2).__name__}: {e2}"
+                    if deps_pase:
+                        st.session_state["_ari_sin_tools"] = True
+                        st.session_state.setdefault(
+                            "ari_pase", {"tipo": "", "fecha": "", "motivo": ""})
             st.markdown(texto)
         st.session_state.ari_messages.append({"role": "assistant", "content": texto})
-
-        # Solo si el mensaje huele a pase se gasta una llamada de extracción:
-        # las preguntas normales de RH no pagan ese costo.
-        if deps_pase:
-            _p = " ".join(str(pregunta).lower().split())
-            _traza("0_rama", "cancelar" if (st.session_state.get("ari_pase") and _pide_cancelar(_p))
-                   else ("pase_cerrado" if st.session_state.get("_ari_pase_cerrado")
-                         else ("extraer" if (_parece_pase(pregunta) or st.session_state.get("ari_pase"))
-                               else "NO SE TOCA (no parece pase)")))
-            # Solo se considera cancelación si HAY un pase abierto: sin pase
-            # que cancelar, el mensaje tiene que seguir su camino al extractor.
-            if st.session_state.get("ari_pase") and _pide_cancelar(_p):
-                _limpiar_pase()
-                st.info("Listo, cancelé ese pase.")
-            elif st.session_state.get("_ari_pase_cerrado"):
-                pass   # pase ya registrado: no se toca hasta que lo cierren
-            elif _parece_pase(pregunta) or (
-                    st.session_state.get("ari_pase") and not any(
-                        f in _p for f in _FRASES_NO_PASE)):
-                # Con un pase abierto se sigue extrayendo (el empleado está
-                # contestando lo que falta), pero las preguntas de consulta
-                # quedan fuera: antes cualquier mensaje entraba al extractor.
-                _actualizar_pase(pregunta)
 
     # El resumen vive debajo del chat, en la misma pantalla: ARI sigue siendo
     # una sola, no dos asistentes separados.
