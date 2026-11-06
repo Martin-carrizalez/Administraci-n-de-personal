@@ -111,6 +111,8 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
+ARI_VERSION = "captura de pases v7 · formulario en el chat"
+
 TIPOS_PASE = {
     "PSE": "Pase de salida sin retorno",
     "PSR": "Pase de salida con retorno",
@@ -1315,6 +1317,11 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
         "Información de apoyo: no sustituye la información oficial ni los "
         "dictámenes del área de RH de la SEJ."
     )
+    # Marca de versión A LA VISTA. Existe por una razón práctica: durante
+    # varios días no hubo forma de saber si la app estaba corriendo el archivo
+    # nuevo o uno viejo en caché, y se depuró a ciegas. Si esta línea no dice
+    # ARI_VERSION, lo que está desplegado NO es este archivo.
+    st.caption(f"· {ARI_VERSION} ·")
 
     if "ari_messages" not in st.session_state:
         st.session_state.ari_messages = []
@@ -1372,16 +1379,33 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
             st.markdown(pregunta)
         st.session_state.ari_messages.append({"role": "user", "content": pregunta})
         _registrar_pregunta(pregunta, "portal_incidencias", st.session_state.get("rol", ""))
+        # Cuando el mensaje es sobre un pase, el modelo NO habla. Responde una
+        # frase fija escrita en código.
+        #
+        # Por qué: por prompt se le prohibió decir que él registra el pase, y
+        # aun así contestaba "Ya he registrado tu pase de salida sin retorno".
+        # Era mentira —el registro lo hace el empleado con el botón— y es la
+        # peor mentira posible: el trabajador se va confiado, sin folio, sin
+        # PDF y sin firmas, y RH no tiene nada. Un prompt es una súplica, no
+        # un control. La única forma de garantizar que no vuelva a decirlo es
+        # que no sea él quien conteste en estos mensajes.
+        _de_pase = bool(deps_pase) and not st.session_state.get("_ari_pase_cerrado") and (
+            _parece_pase(pregunta) or st.session_state.get("ari_pase"))
         with st.chat_message("assistant"):
-            with st.spinner("ARI está pensando..."):
-                try:
-                    respuesta = st.session_state.ari_chat.send_message(pregunta)
-                    texto = respuesta.text
-                except Exception:
-                    texto = (
-                        "⏳ ARI está saturada en este momento. Espera un minuto e "
-                        "intenta de nuevo, o consulta directamente con el área de RH de la DFC."
-                    )
+            if _de_pase:
+                texto = ("Te armo el pase aquí mismo. Revisa los campos de abajo, "
+                         "corrige lo que haga falta y **confírmalo tú** con el botón "
+                         "de registrar: hasta que lo aprietes, el pase no existe.")
+            else:
+                with st.spinner("ARI está pensando..."):
+                    try:
+                        respuesta = st.session_state.ari_chat.send_message(pregunta)
+                        texto = respuesta.text
+                    except Exception:
+                        texto = (
+                            "⏳ ARI está saturada en este momento. Espera un minuto e "
+                            "intenta de nuevo, o consulta directamente con el área de RH de la DFC."
+                        )
             st.markdown(texto)
         st.session_state.ari_messages.append({"role": "assistant", "content": texto})
 
