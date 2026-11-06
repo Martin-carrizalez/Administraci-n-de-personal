@@ -434,10 +434,19 @@ Lo que no te hayan dicho, déjalo como cadena vacía. No inventes nada."""
         return json.loads(txt[i:j + 1])
 
 
+def _traza(clave, valor):
+    """Deja constancia de cada paso de la captura para el panel de
+    diagnóstico. Sin esto no hay forma de saber en qué punto se cae: el
+    chat se ve normal y el pase simplemente no aparece."""
+    st.session_state.setdefault("_ari_traza", {})[clave] = valor
+
+
 def _actualizar_pase(texto_usuario):
     """Fusiona lo nuevo con lo capturado. Un valor vacío NO borra lo que ya
     estaba: así responder solo "a las 12" no tira el resto."""
     acum = dict(st.session_state.get("ari_pase") or {})
+    _traza("1_mensaje", texto_usuario[:120])
+    _traza("2_acumulado_antes", dict(acum))
     try:
         # La última respuesta de ARI da el contexto que el extractor no tiene:
         # son dos modelos distintos y no comparten memoria. Sin esto, un
@@ -454,11 +463,13 @@ def _actualizar_pase(texto_usuario):
         # si la extracción no funciona, ARI nunca arma pases y no hay forma
         # de saber por qué.
         st.session_state["_ari_pase_error"] = f"{type(e).__name__}: {e}"
+        _traza("3_extractor", f"FALLÓ -> {type(e).__name__}: {e}")
         return  # el panel lo muestra en el siguiente dibujo
     # El tipo se valida ANTES de fusionar. Si el modelo contesta "pase de
     # salida" en vez de "PSR", ese texto es truthy y pisaba un tipo correcto
     # de un turno anterior, que después la normalización volvía vacío: se
     # perdía un dato bueno por una respuesta mal formateada.
+    _traza("3_extractor", dict(nuevo))
     _t = _txt(nuevo.get("tipo")).upper()
     if _t in TIPOS_PASE:
         acum["tipo"] = _t
@@ -470,8 +481,11 @@ def _actualizar_pase(texto_usuario):
     # No se abre un pase a medias por una frase ambigua: si no hay un tipo
     # válido y nada más que guardar, se deja todo como estaba.
     if not acum.get("tipo") and not any(_txt(acum.get(k)) for k in ("fecha",) + _TODAS_LAS_HORAS):
+        _traza("4_resultado", "DESCARTADO: el extractor no devolvió ni tipo ni fecha ni hora")
         return
     st.session_state["ari_pase"] = acum
+    _traza("4_resultado", dict(acum))
+    _traza("5_falta", _falta_del_pase(acum))
 
 
 def _limpiar_pase():
@@ -1241,6 +1255,10 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
         # las preguntas normales de RH no pagan ese costo.
         if deps_pase:
             _p = " ".join(str(pregunta).lower().split())
+            _traza("0_rama", "cancelar" if (st.session_state.get("ari_pase") and _pide_cancelar(_p))
+                   else ("pase_cerrado" if st.session_state.get("_ari_pase_cerrado")
+                         else ("extraer" if (_parece_pase(pregunta) or st.session_state.get("ari_pase"))
+                               else "NO SE TOCA (no parece pase)")))
             # Solo se considera cancelación si HAY un pase abierto: sin pase
             # que cancelar, el mensaje tiene que seguir su camino al extractor.
             if st.session_state.get("ari_pase") and _pide_cancelar(_p):
@@ -1260,3 +1278,22 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
     # una sola, no dos asistentes separados.
     if deps_pase:
         _panel_pase_en_chat(deps_pase)
+
+    # ── Diagnóstico (solo admin) ──────────────────────────────────────
+    # Esto existe porque la captura falla en silencio: el chat se ve normal
+    # y el panel simplemente no aparece, sin decir por qué. Aquí queda a la
+    # vista en qué punto exacto se detuvo.
+    if st.session_state.get("rol") == "admin":
+        with st.expander("🔧 Diagnóstico de la captura de pases"):
+            st.write("**¿Llegaron las dependencias?**",
+                     "SÍ — " + ", ".join(sorted(deps_pase)) if deps_pase
+                     else "NO — render_ari se llamó sin deps_pase")
+            _tz = st.session_state.get("_ari_traza") or {}
+            if not _tz:
+                st.caption("Todavía no se ha procesado ningún mensaje de pase "
+                           "en esta conversación.")
+            else:
+                for k in sorted(_tz):
+                    st.write(f"**{k}**"); st.code(repr(_tz[k]), language=None)
+            st.write("**ari_pase actual**"); st.code(repr(st.session_state.get("ari_pase")), language=None)
+            st.write("**último error**"); st.code(repr(st.session_state.get("_ari_pase_error")), language=None)
