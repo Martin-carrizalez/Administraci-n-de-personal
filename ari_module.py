@@ -113,7 +113,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v12 · herramientas (tool calling)"
+ARI_VERSION = "agente v14 · boton Probar los motores"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -1796,6 +1796,16 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                 except Exception as e2:
                     texto = _mensaje_de_fallo(e2)
                     st.session_state["_ari_chat_error"] = f"{type(e).__name__}: {e} || {type(e2).__name__}: {e2}"
+                    # Cuando fallan LOS DOS cerebros, el motivo se muestra
+                    # SIEMPRE, sin depender de ari_debug ni de ser admin.
+                    # Estuvo escondido detrás de una bandera y eso dejó la
+                    # causa invisible durante días: el empleado veía "sin
+                    # cuota" y nadie podía saber si era la llave, el nombre
+                    # del modelo o de verdad la cuota. No expone secretos:
+                    # son códigos HTTP y nombres de modelo.
+                    st.caption("Detalle técnico — NVIDIA: "
+                               f"{type(e).__name__}: {str(e)[:400]}")
+                    st.caption(f"Detalle técnico — GEMINI: {type(e2).__name__}: {str(e2)[:200]}")
                     if deps_pase:
                         st.session_state["_ari_sin_tools"] = True
                         st.session_state.setdefault(
@@ -1815,6 +1825,64 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
     # Visible para el admin, o para cualquiera si se pone ari_debug = true en
     # secrets: probar con una cuenta de empleado es justo cuando más falta
     # hace ver esto.
+    # El autodiagnóstico NO va detrás de ari_debug: es justo lo que hace falta
+    # cuando nada funciona, y esconderlo detrás de una bandera que hay que
+    # poner a mano fue parte del problema durante días.
+    with st.expander("🔧 Probar los motores de IA"):
+        st.caption("Llama a cada motor una vez y muestra qué contesta. "
+                   "Nombres de modelo y códigos HTTP; no muestra llaves.")
+        if st.button("▶️ Probar ahora", key="ari_probar_motores"):
+            st.write("**Llaves detectadas**")
+            _nk = st.secrets.get("NVIDIA_API_KEY")
+            _gk = st.secrets.get("GEMINI_API_KEY")
+            # Se dice si la llave ESTÁ y si tiene el prefijo correcto, nunca
+            # su valor: lo que hace falta saber es si llegó al proceso.
+            st.code(f"NVIDIA_API_KEY: "
+                    f"{'ausente' if not _nk else ('prefijo ok' if str(_nk).startswith('nvapi-') else 'presente, prefijo RARO')}"
+                    f"  (largo {len(str(_nk)) if _nk else 0})\n"
+                    f"GEMINI_API_KEY: {'ausente' if not _gk else 'presente'}"
+                    f"  (largo {len(str(_gk)) if _gk else 0})", language=None)
+
+            st.write("**NVIDIA — modelo por modelo**")
+            for _m in NVIDIA_MODELS:
+                try:
+                    _r = requests.post(
+                        NVIDIA_URL,
+                        headers={"Authorization": f"Bearer {_nvidia_key()}",
+                                 "Accept": "application/json",
+                                 "Content-Type": "application/json"},
+                        json={"model": _m, "max_tokens": 5, "stream": False,
+                              "messages": [{"role": "user", "content": "di ok"}]},
+                        timeout=45)
+                    st.code(f"{_m} → HTTP {_r.status_code} {_r.text[:160]}", language=None)
+                except Exception as _e:
+                    st.code(f"{_m} → {type(_e).__name__}: {str(_e)[:160]}", language=None)
+
+            st.write("**NVIDIA — ¿acepta herramientas?**")
+            try:
+                _r = requests.post(
+                    NVIDIA_URL,
+                    headers={"Authorization": f"Bearer {_nvidia_key()}",
+                             "Accept": "application/json",
+                             "Content-Type": "application/json"},
+                    json={"model": NVIDIA_MODELS[0], "max_tokens": 60,
+                          "stream": False, "tools": HERRAMIENTAS_PASE,
+                          "tool_choice": "auto",
+                          "messages": [{"role": "user",
+                                        "content": "necesito salir hoy a las 12 y ya no regreso"}]},
+                    timeout=60)
+                st.code(f"HTTP {_r.status_code} {_r.text[:300]}", language=None)
+            except Exception as _e:
+                st.code(f"{type(_e).__name__}: {str(_e)[:200]}", language=None)
+
+            st.write("**Gemini**")
+            try:
+                genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                _t = genai.GenerativeModel(GEMINI_MODEL).generate_content("di ok")
+                st.code(f"{GEMINI_MODEL} → OK: {str(_t.text)[:120]}", language=None)
+            except Exception as _e:
+                st.code(f"{GEMINI_MODEL} → {type(_e).__name__}: {str(_e)[:300]}", language=None)
+
     if st.session_state.get("rol") == "admin" or st.secrets.get("ari_debug"):
         with st.expander("🔧 Diagnóstico de la captura de pases"):
             st.write("**¿Llegaron las dependencias?**",
