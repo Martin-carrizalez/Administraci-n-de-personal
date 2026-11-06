@@ -133,12 +133,23 @@ _TODAS_LAS_HORAS = ("hora_salida", "hora_retorno", "hora_entrada")
 
 # Disparadores locales: evitan gastar una llamada a Gemini en cada pregunta
 # normal de RH. Solo cuando el mensaje suena a pase se enciende la extracción.
-_PALABRAS_PASE = ("pase", "salir", "salida", "retorno", "llegar tarde",
-                  "voy a llegar", "llegare tarde", "llegaré tarde",
-                  "permiso para salir", "entrada tarde", "me tengo que ir",
-                  "necesito ausentarme", "me retiro antes", "se me hizo tarde",
-                  "voy al doctor", "voy al medico", "voy al médico",
-                  "tengo cita", "ausentarme")
+# Formas en que la gente pide un pase de verdad, incluidas las conjugadas:
+# la lista solo traía los infinitivos ("salir", "llegar tarde") y se le
+# escapaban "salgo a la 1" o "no llego hasta las 10", que es como se dice.
+_PALABRAS_PASE = (
+    # pedir el pase por su nombre
+    "pase", "permiso para salir", "ausentarme", "necesito ausentarme",
+    # salir
+    "salir", "salida", "salgo", "saldré", "saldre", "me salgo",
+    "me retiro", "me tengo que ir", "tengo que irme", "me voy a las",
+    # no volver
+    "retorno", "no regreso", "no vuelvo", "no voy a regresar",
+    "no voy a volver", "ya no regreso", "ya no vuelvo",
+    # llegar tarde
+    "llegar tarde", "llego tarde", "no llego", "llegaré", "llegare",
+    "voy a llegar", "entrada tarde", "se me hizo tarde", "voy tarde",
+    # motivos típicos que vienen con un pase
+    "voy al doctor", "voy al medico", "voy al médico", "tengo cita")
 
 # Frases que llevan "salida" o "salir" pero NO piden un pase. Sin esto,
 # "¿a qué hora es mi salida?" encendía el modo captura y ya no se soltaba.
@@ -180,6 +191,31 @@ def _txt(v) -> str:
         return ""
     t = str(v).strip()
     return "" if t.lower() in ("nan", "none", "nat") else t
+
+
+# Frases que de verdad piden cancelar. Antes la lista traía trozos sueltos
+# como "ya no" o "mejor no", y eso rompía el caso MÁS COMÚN de todos:
+# "necesito salir hoy a las 12 y YA NO regreso" es la forma natural de pedir
+# un pase sin retorno, y se interpretaba como "cancela". El mensaje jamás
+# llegaba al extractor y el pase nunca se armaba.
+_FRASES_CANCELAR = ("cancelar", "cancélalo", "cancelalo", "cancela el pase",
+                    "cancela la solicitud", "olvídalo", "olvidalo",
+                    "bórralo", "borralo", "ya no quiero", "mejor ya no",
+                    "déjalo así", "dejalo asi", "no quiero el pase",
+                    "anular", "anúlalo", "anulalo")
+
+
+def _pide_cancelar(texto_norm: str) -> bool:
+    """True solo si el mensaje es una orden de cancelar, no una frase larga
+    que de pasada contiene una de esas palabras.
+
+    Dos condiciones: que traiga una frase inequívoca Y que sea un mensaje
+    corto. Quien cancela escribe "cancelar" o "ya no quiero"; quien está
+    pidiendo un pase escribe una frase con hora, fecha y motivo.
+    """
+    if len(texto_norm) > 60:
+        return False
+    return any(f in texto_norm for f in _FRASES_CANCELAR)
 
 
 def _parece_pase(texto: str) -> bool:
@@ -445,6 +481,20 @@ def _limpiar_pase():
         st.session_state.pop(k, None)
 
 
+def _panel_pase_en_chat(deps):
+    """Dibuja el panel COMO UN MENSAJE DE ARI dentro de la conversación.
+
+    Antes vivía debajo del chat y ARI decía "revisa el resumen abajo". Con la
+    conversación larga eso queda fuera de vista: la indicación apunta a un
+    sitio que el empleado no está mirando. Dentro del hilo, el botón aparece
+    justo después de la respuesta de ARI, donde ya tiene los ojos.
+    """
+    if not (st.session_state.get("ari_pase") or st.session_state.get("_ari_pase_error")):
+        return
+    with st.chat_message("assistant"):
+        _panel_pase(deps)
+
+
 def _panel_pase(deps):
     """Resumen y registro, debajo del chat. deps trae lo que vive en
     app_incidencias: enviar_solicitud, cargar_horarios, cargar_incidencias,
@@ -460,10 +510,9 @@ def _panel_pase(deps):
     if not datos:
         return
 
-    st.divider()
     faltan = _falta_del_pase(datos)
     if faltan:
-        st.info("📝 Voy armando tu pase. Falta: **" + "**, **".join(faltan) + "**.")
+        st.caption("📝 Voy armando tu pase. Falta: **" + "**, **".join(faltan) + "**.")
         if st.button("🗑️ Cancelar este pase", key="ari_pase_cancel_parcial"):
             _limpiar_pase()
             st.rerun()
@@ -623,8 +672,11 @@ _BLOQUE_CAPTURA_PASES = """- PUEDES LEVANTARLO AQUÍ MISMO: si el empleado te di
   ("necesito salir hoy a las 12 y ya no regreso"), ayúdale a juntar los datos
   conversando: tipo de pase, fecha, hora y motivo. Pregunta SOLO lo que falte,
   de uno en uno. NO calcules las horas de ausencia: de eso se encarga el
-  sistema con su horario real. Cuando tengas todo, dile que revise el resumen
-  que le aparece abajo del chat y que ahí mismo registra su pase."""
+  sistema con su horario real. Cuando ya tengas todo, dile UNA sola frase:
+  que confirme con el botón "Registrar solicitud" que aparece enseguida.
+  NUNCA le digas que mire "abajo del chat", NUNCA le repitas los datos otra
+  vez y NUNCA afirmes que tú registraste el pase: lo registra él al apretar
+  ese botón."""
 
 _BLOQUE_SIN_CAPTURA = """- Los pases se capturan en el formulario del portal, no en este chat. Si el
   empleado te pide levantar uno, explícale con amabilidad cómo hacerlo en el
@@ -1161,7 +1213,7 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
         # panel se pinta antes de salir. Sin esto, quien llegara al límite con
         # su pase listo veía desaparecer el resumen y el botón de registrar.
         if deps_pase:
-            _panel_pase(deps_pase)
+            _panel_pase_en_chat(deps_pase)
         return
 
     pendiente = st.session_state.pop("ari_pendiente", None)
@@ -1189,13 +1241,11 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
         # las preguntas normales de RH no pagan ese costo.
         if deps_pase:
             _p = " ".join(str(pregunta).lower().split())
-            if any(w in _p for w in ("cancelar", "olvidalo", "olvídalo",
-                                     "ya no", "dejalo", "déjalo", "mejor no")):
-                # Cancelar por texto: antes solo existía el botón, y con un
-                # pase abierto cada mensaje gastaba una llamada a Gemini.
-                if st.session_state.get("ari_pase"):
-                    _limpiar_pase()
-                    st.info("Listo, cancelé ese pase.")
+            # Solo se considera cancelación si HAY un pase abierto: sin pase
+            # que cancelar, el mensaje tiene que seguir su camino al extractor.
+            if st.session_state.get("ari_pase") and _pide_cancelar(_p):
+                _limpiar_pase()
+                st.info("Listo, cancelé ese pase.")
             elif st.session_state.get("_ari_pase_cerrado"):
                 pass   # pase ya registrado: no se toca hasta que lo cierren
             elif _parece_pase(pregunta) or (
@@ -1209,4 +1259,4 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
     # El resumen vive debajo del chat, en la misma pantalla: ARI sigue siendo
     # una sola, no dos asistentes separados.
     if deps_pase:
-        _panel_pase(deps_pase)
+        _panel_pase_en_chat(deps_pase)
