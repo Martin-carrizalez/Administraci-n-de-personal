@@ -10,7 +10,7 @@ import time
 import requests
 import streamlit as st
 import google.generativeai as genai
-from datetime import date
+from datetime import date, timedelta
 from PIL import Image
 import pytz
 from datetime import datetime
@@ -113,7 +113,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v14 · boton Probar los motores"
+ARI_VERSION = "agente v16 · modelos verificados + tool calling real"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -127,12 +127,14 @@ ARI_VERSION = "agente v14 · boton Probar los motores"
 # fallan LOS DOS se le dice algo al empleado.
 
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+# Lista verificada contra TU cuenta el 6-nov-2026, no copiada de un catálogo:
+# los dos emiten tool_calls de verdad. gpt-oss-20b va primero porque devuelve
+# fecha ISO y hora HH:MM; llama-3.2-90b funciona pero manda "6 de noviembre" y
+# "12", que el código normaliza. Los cinco anteriores estaban muertos (410) o
+# no habilitados para la cuenta (404).
 NVIDIA_MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b",
-    "nvidia/nemotron-3-nano-30b-a3b",
-    "moonshotai/kimi-k2.6",
-    "qwen/qwen3.5-397b-a17b",
-    "minimaxai/minimax-m2.5",
+    "openai/gpt-oss-20b",
+    "meta/llama-3.2-90b-vision-instruct",
 ]
 CEREBRO_PRINCIPAL = "nvidia"   # "nvidia" o "gemini"
 GEMINI_MODEL = "gemini-2.5-flash-lite"
@@ -210,6 +212,70 @@ HERRAMIENTAS_PASE = [
 ]
 
 
+def _normalizar_hora(v) -> str:
+    """'12' -> '12:00', '1 pm' -> '13:00', '9:5' se deja como vino.
+
+    Existe por evidencia, no por si acaso: probando los modelos de NVIDIA,
+    llama-3.2-90b llamó a la herramienta con hora_salida="12" mientras
+    gpt-oss-20b mandó "12:00". Exigir HH:MM haría que el agente rechazara una
+    llamada correcta y volviera a preguntar lo que el empleado ya dijo. La
+    normalización va en el CÓDIGO: así da igual qué modelo conteste.
+    """
+    t = _txt(v).lower().replace(".", "").strip()
+    if not t:
+        return ""
+    m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(a\s*m|p\s*m)?", t)
+    if not m:
+        return _txt(v)          # que falle la validación de siempre, no aquí
+    h = int(m.group(1))
+    mi = m.group(2) or "00"
+    suf = (m.group(3) or "").replace(" ", "")
+    if suf == "pm" and h < 12:
+        h += 12
+    elif suf == "am" and h == 12:
+        h = 0
+    elif not suf and 1 <= h <= 6:
+        # En jornada laboral "a la 1", "a las 2" y "a las 3" son 13, 14 y 15.
+        # Las 7 a 11 se dejan en AM porque ahí sí suelen ser de la mañana.
+        h += 12
+    return f"{h:02d}:{mi}" if h <= 23 else _txt(v)
+
+
+def _normalizar_fecha(v) -> str:
+    """'6 de noviembre' -> '2026-11-06'. También 'hoy', 'mañana' y 06/11/2026.
+
+    Mismo motivo que las horas: un modelo manda ISO y otro manda el texto tal
+    cual lo dijo el empleado. El que se adapta es el código.
+    """
+    t = _txt(v).lower().strip()
+    if not t:
+        return ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t):
+        return t
+    hoy = today_mx()
+    if t.startswith("hoy"):
+        return hoy.isoformat()
+    if t.startswith("mañana") or t.startswith("manana"):
+        return (hoy + timedelta(days=1)).isoformat()
+    m = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", t)
+    if m:      # dd/mm/aaaa, que es como se escribe aquí
+        d, mes, a = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(a, mes, d).isoformat()
+        except Exception:
+            return _txt(v)
+    m = re.search(r"(\d{1,2})\s*(?:de\s+)?([a-záéíóúñ]+)(?:\s*(?:de\s+)?(\d{4}))?", t)
+    if m and m.group(2) in MESES_ES:
+        d = int(m.group(1))
+        mes = MESES_ES.index(m.group(2)) + 1
+        a = int(m.group(3)) if m.group(3) else hoy.year
+        try:
+            return date(a, mes, d).isoformat()
+        except Exception:
+            return _txt(v)
+    return _txt(v)
+
+
 def _ejecutar_herramienta(nombre, args, deps):
     """Ejecuta una herramienta y devuelve su resultado como dict.
 
@@ -228,6 +294,12 @@ def _ejecutar_herramienta(nombre, args, deps):
         d = {k: _txt(args.get(k)) for k in
              ("tipo", "fecha", "hora_salida", "hora_retorno", "hora_entrada", "motivo")}
         d["tipo"] = _codigo_tipo(d["tipo"])
+        # Se normaliza ANTES de validar: el modelo puede mandar "6 de
+        # noviembre" y "12" en vez de ISO y HH:MM, y ambas cosas son
+        # llamadas correctas que no deben rechazarse.
+        d["fecha"] = _normalizar_fecha(d["fecha"])
+        for _h in _TODAS_LAS_HORAS:
+            d[_h] = _normalizar_hora(d[_h])
         _normalizar_pase(d)
         faltan = _falta_del_pase(d)
         if faltan:
@@ -1872,6 +1944,26 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                                         "content": "necesito salir hoy a las 12 y ya no regreso"}]},
                     timeout=60)
                 st.code(f"HTTP {_r.status_code} {_r.text[:300]}", language=None)
+            except Exception as _e:
+                st.code(f"{type(_e).__name__}: {str(_e)[:200]}", language=None)
+
+            st.write("**NVIDIA — modelos que SÍ puede usar esta cuenta**")
+            # Esto es lo que cierra el diagnóstico: la lista NVIDIA_MODELS se
+            # escribió a mano y los modelos se mueren con fecha (410) o no
+            # están habilitados para la cuenta (404). Preguntarle al endpoint
+            # qué hay disponible es la única fuente que no envejece.
+            try:
+                _r = requests.get(
+                    "https://integrate.api.nvidia.com/v1/models",
+                    headers={"Authorization": f"Bearer {_nvidia_key()}",
+                             "Accept": "application/json"},
+                    timeout=45)
+                if _r.status_code == 200:
+                    _ids = sorted(d.get("id", "") for d in _r.json().get("data", []))
+                    st.caption(f"{len(_ids)} modelos disponibles:")
+                    st.code("\n".join(_ids), language=None)
+                else:
+                    st.code(f"HTTP {_r.status_code} {_r.text[:200]}", language=None)
             except Exception as _e:
                 st.code(f"{type(_e).__name__}: {str(_e)[:200]}", language=None)
 
