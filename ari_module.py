@@ -113,7 +113,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v16 · modelos verificados + tool calling real"
+ARI_VERSION = "agente v17 · rapido (1 llamada por turno)"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -133,13 +133,13 @@ NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # "12", que el código normaliza. Los cinco anteriores estaban muertos (410) o
 # no habilitados para la cuenta (404).
 NVIDIA_MODELS = [
-    "openai/gpt-oss-20b",
     "meta/llama-3.2-90b-vision-instruct",
+    "openai/gpt-oss-20b",
 ]
 CEREBRO_PRINCIPAL = "nvidia"   # "nvidia" o "gemini"
 GEMINI_MODEL = "gemini-2.5-flash-lite"
-REINTENTOS_503 = 3
-ESPERA_503 = 2.0
+REINTENTOS_503 = 2
+ESPERA_503 = 1.5
 MAX_TURNOS = 12                # cuántos mensajes previos se mandan de contexto
 
 
@@ -176,15 +176,6 @@ def _nvidia_key():
 # pregunta con sus palabras.
 
 HERRAMIENTAS_PASE = [
-    {"type": "function", "function": {
-        "name": "consultar_mi_horario",
-        "description": ("Consulta el horario programado del empleado para una "
-                        "fecha. Úsala ANTES de preparar un pase si necesitas "
-                        "saber a qué hora entra o sale ese día."),
-        "parameters": {"type": "object", "properties": {
-            "fecha": {"type": "string",
-                      "description": "Fecha en formato AAAA-MM-DD"}},
-            "required": ["fecha"]}}},
     {"type": "function", "function": {
         "name": "preparar_pase",
         "description": ("Prepara el pase con los datos que te dio el empleado y "
@@ -371,11 +362,11 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False, herramientas=N
                 hdr = {"Authorization": f"Bearer {api_key}",
                        "Accept": "application/json",
                        "Content-Type": "application/json"}
-                r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=90)
+                r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=40)
                 if r.status_code == 400:
                     # El modelo no entiende chat_template_kwargs: se reintenta sin eso.
                     cuerpo.pop("chat_template_kwargs", None)
-                    r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=90)
+                    r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=40)
                 if r.status_code == 200:
                     msg = r.json()["choices"][0]["message"]
                     if herramientas:
@@ -402,7 +393,7 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False, herramientas=N
     raise RuntimeError(" | ".join(errores) or "NVIDIA no respondió")
 
 
-MAX_PASOS_AGENTE = 5
+MAX_PASOS_AGENTE = 3
 
 
 def _agente(sistema, mensajes, deps):
@@ -1274,10 +1265,9 @@ _BLOQUE_CAPTURA_PASES = """- PUEDES LEVANTARLO AQUÍ MISMO, CON TUS HERRAMIENTAS
   3. Cuando responda listo=true, dile en UNA frase el tipo, la fecha y las
      horas de ausencia que te devolvió, y pídele que confirme.
   4. Si confirma, llama a `mostrar_boton_registrar` y dile que apriete el botón.
-  NUNCA calcules tú las horas de ausencia: para eso está `preparar_pase`, que
-  usa su horario real. NUNCA inventes el horario: para eso está
-  `consultar_mi_horario`. Y NUNCA digas que tú registraste el pase ni que "ya
-  quedó": el pase solo existe cuando el empleado aprieta el botón."""
+  NUNCA calcules tú las horas de ausencia ni inventes su horario: `preparar_pase`
+  ya lo consulta y lo calcula. Y NUNCA digas que tú registraste el pase ni que
+  "ya quedó": el pase solo existe cuando el empleado aprieta el botón."""
 
 _BLOQUE_SIN_CAPTURA = """- Los pases se capturan en el formulario del portal, no en este chat. Si el
   empleado te pide levantar uno, explícale con amabilidad cómo hacerlo en el
