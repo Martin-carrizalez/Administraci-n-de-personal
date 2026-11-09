@@ -113,7 +113,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v18 · tope de 55s por turno (sin reintento doble)"
+ARI_VERSION = "agente v21 · modelos verificados 9-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -127,15 +127,30 @@ ARI_VERSION = "agente v18 · tope de 55s por turno (sin reintento doble)"
 # fallan LOS DOS se le dice algo al empleado.
 
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-# Lista verificada contra TU cuenta el 6-nov-2026, no copiada de un catálogo:
-# los dos emiten tool_calls de verdad. gpt-oss-20b va primero porque devuelve
-# fecha ISO y hora HH:MM; llama-3.2-90b funciona pero manda "6 de noviembre" y
-# "12", que el código normaliza. Los cinco anteriores estaban muertos (410) o
-# no habilitados para la cuenta (404).
-NVIDIA_MODELS = [
-    "meta/llama-3.2-90b-vision-instruct",
-    "openai/gpt-oss-20b",
+# Listas VERIFICADAS contra tu cuenta el 9-nov-2026 con probar3.ps1, no
+# copiadas de un catálogo ni elegidas por fama. De 8 candidatos probados con el
+# prompt corto real: 4 dieron 404 (no habilitados para esta cuenta), 2 pasaron
+# de 15 s, y solo uno emitió tool_calls.
+#
+# Van separadas a propósito, porque los dos trabajos piden cosas distintas:
+#
+# TOOLS — el agente de pases. Aquí no vale "contesta rápido": si el modelo no
+# emite tool_calls, el pase NO se prepara y el fallo es mudo. Solo entra lo
+# comprobado. Un modelo de más en esta lista no es un respaldo, es una trampa.
+NVIDIA_MODELS_TOOLS = [
+    "meta/llama-3.2-90b-vision-instruct",   # 6.0 s · tool_calls OK
 ]
+
+# CHAT — dudas de RH, sin herramientas. Aquí sí manda la velocidad.
+# nemotron-lightning contestó en 3.4 s (el más rápido que responde) y va
+# primero; si devuelve vacío, el código ya salta solo al siguiente.
+NVIDIA_MODELS_CHAT = [
+    "nvidia/nemotron-3.5-lightning-30b-a3b",  # 3.4 s
+    "meta/llama-3.2-90b-vision-instruct",     # 6.0 s
+]
+
+# Compatibilidad: el código viejo que no distingue las dos rutas usa esta.
+NVIDIA_MODELS = NVIDIA_MODELS_TOOLS
 CEREBRO_PRINCIPAL = "nvidia"   # "nvidia" o "gemini"
 GEMINI_MODEL = "gemini-2.5-flash-lite"
 REINTENTOS_503 = 2
@@ -339,7 +354,7 @@ def _horario_del_dia(deps, fecha_iso):
         return "", ""
 
 
-PRESUPUESTO_TURNO = 55          # segundos para TODO el turno, no por llamada
+PRESUPUESTO_TURNO = 32          # segundos para TODO el turno, no por llamada
 
 
 def _resta(fin):
@@ -348,7 +363,7 @@ def _resta(fin):
 
 
 def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
-                      herramientas=None, fin=None):
+                      herramientas=None, fin=None, forzar=None):
     """Llama al catálogo de NVIDIA. `mensajes` va en formato OpenAI.
 
     Recorre los modelos en orden; un 503/429 es "ocupado" y se reintenta el
@@ -358,7 +373,7 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
     """
     api_key = _nvidia_key()
     errores = []
-    for modelo in NVIDIA_MODELS:
+    for modelo in (NVIDIA_MODELS_TOOLS if herramientas else NVIDIA_MODELS_CHAT):
         # Sin esto, cada modelo extra multiplica la espera del empleado. El
         # presupuesto manda sobre la lista: mas vale caer al formulario que
         # dejar el spinner girando ocho minutos.
@@ -373,15 +388,17 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
                           "chat_template_kwargs": {"thinking": False}}
                 if herramientas:
                     cuerpo["tools"] = herramientas
-                    cuerpo["tool_choice"] = "auto"
+                    cuerpo["tool_choice"] = (
+                        {"type": "function", "function": {"name": forzar}}
+                        if forzar else "auto")
                 hdr = {"Authorization": f"Bearer {api_key}",
                        "Accept": "application/json",
                        "Content-Type": "application/json"}
-                r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=min(40, _resta(fin)))
+                r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=min(15, _resta(fin)))
                 if r.status_code == 400:
                     # El modelo no entiende chat_template_kwargs: se reintenta sin eso.
                     cuerpo.pop("chat_template_kwargs", None)
-                    r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=min(40, _resta(fin)))
+                    r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=min(15, _resta(fin)))
                 if r.status_code == 200:
                     msg = r.json()["choices"][0]["message"]
                     if herramientas:
@@ -408,10 +425,41 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
     raise RuntimeError(" | ".join(errores) or "NVIDIA no respondió")
 
 
-MAX_PASOS_AGENTE = 3
+MAX_PASOS_AGENTE = 2
 
 
-def _agente(sistema, mensajes, deps):
+def prompt_agente(nombre=""):
+    """El prompt CORTO del agente. ~200 tokens contra los ~7,000 del chat.
+
+    Esta es la separación que faltaba. El agente venía recibiendo el prompt
+    completo de ARI —quincenas, licencias, incapacidades, SEPIFAPE, tabulador—
+    en CADA una de sus llamadas, hasta tres por turno: unos 21,000 tokens para
+    averiguar una hora y un motivo. Eso explicaba la lentitud, y además lo
+    distraía: con 28 mil caracteres de normativa encima, un modelo de 20B
+    prefiere contestar en texto antes que llamar a una herramienta.
+
+    Para levantar un pase no hace falta nada de esa normativa. Hace falta saber
+    qué día es hoy, qué significan las tres siglas, y cuándo llamar a qué.
+    """
+    hoy = today_mx()
+    quien = f" Hablas con {nombre}." if nombre else ""
+    return (
+        f"Eres ARI, asistente de RH de la DFC. Ayudas a levantar pases.{quien}\n"
+        f"Hoy es {_fecha_larga(hoy)} ({hoy.isoformat()}).\n"
+        "Tipos: PSE = sale y ya no regresa ese día. PSR = sale y regresa el "
+        "mismo día. PEN = llega tarde.\n"
+        "Pregunta SOLO lo que falte, de uno en uno, con tus palabras.\n"
+        "Cuando tengas tipo, fecha, hora y motivo, llama a preparar_pase.\n"
+        "NO calcules las horas de ausencia y NO inventes su horario: "
+        "preparar_pase lo consulta y lo calcula.\n"
+        "Si preparar_pase responde listo=true, di en UNA frase el tipo, la "
+        "fecha y las horas, y pide que confirme.\n"
+        "Si confirma, llama a mostrar_boton_registrar.\n"
+        "NUNCA digas que tú registraste el pase ni que ya quedó: el pase solo "
+        "existe cuando el empleado aprieta el botón.")
+
+
+def _agente(mensajes, deps, nombre=""):
     """Bucle del agente: el modelo decide, las herramientas ejecutan.
 
     Devuelve (texto_final, pasos) donde pasos es la lista de herramientas que
@@ -419,9 +467,11 @@ def _agente(sistema, mensajes, deps):
 
     El tope de MAX_PASOS_AGENTE existe porque un modelo puede encadenar
     llamadas sin parar; sin tope, una conversación se convierte en una factura.
+
+    Ya no recibe el prompt del chat: usa el suyo, corto. Ver prompt_agente.
     """
     hist = [{"role": "system", "content": "detailed thinking off"},
-            {"role": "system", "content": sistema}] + list(mensajes)
+            {"role": "system", "content": prompt_agente(nombre)}] + list(mensajes)
     pasos = []
     fin = time.monotonic() + PRESUPUESTO_TURNO
     for _ in range(MAX_PASOS_AGENTE):
@@ -438,7 +488,17 @@ def _agente(sistema, mensajes, deps):
                                 herramientas=HERRAMIENTAS_PASE, fin=fin)
         llamadas = msg.get("tool_calls") or []
         if not llamadas:
-            return (msg.get("content") or "").strip(), pasos
+            # Primer paso sin tool_call en un mensaje que el router ya marco
+            # como pase: se fuerza la herramienta una vez. Varios modelos
+            # soportan tools pero prefieren texto si no se les insiste, y sin
+            # esto el pase nunca se prepara y nadie sabe por que.
+            if not pasos and not st.session_state.get("ari_pase") and _resta(fin) > 5:
+                msg = _responder_nvidia(
+                    hist, temperatura=0.2, herramientas=HERRAMIENTAS_PASE, fin=fin,
+                    forzar="preparar_pase")
+                llamadas = msg.get("tool_calls") or []
+            if not llamadas:
+                return (msg.get("content") or "").strip(), pasos
         hist.append(msg)
         for lc in llamadas:
             nombre = lc["function"]["name"]
@@ -1850,15 +1910,27 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
             # haber una sesion viva de uno solo.
             _hist = [{"role": m["role"], "content": m["content"]}
                      for m in st.session_state.ari_messages[-MAX_TURNOS:]]
+            # EL RUTEO. Dos trabajos distintos, dos prompts distintos:
+            #   · pase  -> agente corto (~200 tokens) con herramientas
+            #   · duda  -> chat largo (~7,000 tokens) con toda la normativa
+            # Antes todo iba al agente CON el prompt largo, y una pregunta
+            # sobre quincenas arrastraba las herramientas mientras un pase
+            # arrastraba el tabulador de sueldos. Cada uno estorbaba al otro.
+            #
+            # Un pase ya abierto sigue en el agente aunque el mensaje suelto
+            # ("a las 2", "sí") no parezca un pase: es la respuesta a lo que
+            # ARI acaba de preguntar.
+            _es_pase = bool(deps_pase) and not st.session_state.get("_ari_pase_cerrado") and (
+                _parece_pase(pregunta) or st.session_state.get("ari_pase"))
+            _traza("0_ruta", "agente (pase)" if _es_pase else "chat (duda de RH)")
             try:
-                if deps_pase:
-                    # EL AGENTE. El modelo decide si esto es un pase y que
-                    # herramienta usar. Ya no hay lista de palabras clave
-                    # adivinando: "necesito salir", "se me hizo tarde" o
-                    # "manana llego a las 10" los resuelve el mismo camino.
+                if _es_pase:
+                    # El agente tampoco necesita doce turnos de contexto: le
+                    # bastan los últimos del propio pase, y cada turno extra
+                    # son tokens que vuelven a viajar en cada paso.
                     with st.spinner("ARI esta trabajando..."):
-                        texto, _pasos = _agente(
-                            st.session_state["ari_sistema"], _hist, deps_pase)
+                        texto, _pasos = _agente(_hist[-4:], deps_pase,
+                                                deps_pase.get("nombre", ""))
                     _traza("agente_pasos", _pasos)
                     st.session_state.pop("_ari_sin_tools", None)
                 else:
@@ -1878,7 +1950,11 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                     with st.spinner("ARI esta pensando..."):
                         texto = _responder_gemini(
                             st.session_state["ari_sistema"], _hist)
-                    if deps_pase:
+                    # El formulario de emergencia solo sale si esto ERA un
+                    # pase. Antes salía también cuando lo que falló era una
+                    # pregunta de nómina, y el empleado se encontraba campos
+                    # de pase sin haber pedido ninguno.
+                    if _es_pase:
                         st.session_state["_ari_sin_tools"] = True
                         st.session_state.setdefault(
                             "ari_pase", {"tipo": "", "fecha": "", "motivo": ""})
@@ -1896,7 +1972,7 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                     st.caption("Detalle técnico — NVIDIA: "
                                f"{type(e).__name__}: {str(e)[:400]}")
                     st.caption(f"Detalle técnico — GEMINI: {type(e2).__name__}: {str(e2)[:200]}")
-                    if deps_pase:
+                    if _es_pase:
                         st.session_state["_ari_sin_tools"] = True
                         st.session_state.setdefault(
                             "ari_pase", {"tipo": "", "fecha": "", "motivo": ""})
