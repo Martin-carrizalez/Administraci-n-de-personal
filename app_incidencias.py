@@ -3141,9 +3141,33 @@ PAGOS = [
         ("27 Nov", "Q-22", [("Bono anual 24 días inicial", "🟡"), ("Apoyo a la integración educativa especial", "🟡")]),
     ]),
     ("Diciembre", [
-        ("Por definir", "", [("Fecha de pago por definir", "")]),
+        # Aguinaldo y prima vacacional (32) los cobran los CUATRO subsistemas.
+        ("14 Dic", "Q-23", [
+            ("Aguinaldo", "🟡🟣🟢🔵"),
+            ("32 Prima vacacional", "🟡🟣🟢🔵"),
+        ]),
+        # Los G y la CF los cobran docentes Y apoyo de nivel superior.
+        # BE es solo de docentes; GU y BN solo de apoyo.
+        # El G9 se marca en esta quincena pero el depósito cae hasta enero:
+        # va dicho en el nombre para que nadie lo reclame en diciembre.
+        ("17 Dic", "Q-24", [
+            ("G4 Prima dominical", "🟣🔵"),
+            ("G5 Ajuste de calendario", "🟣🔵"),
+            ("G6 Días económicos no disfrutados", "🟣🔵"),
+            ("G7 Días de descanso obligatorio", "🟣🔵"),
+            ("G9 Estímulo puntualidad y asistencia (se paga hasta enero)", "🟣🔵"),
+            ("CF Compensación de fin de año", "🟣🔵"),
+            ("BE Bono extraordinario de superación académica", "🟣"),
+            ("GU Gratificación única", "🔵"),
+            ("BN Bono anual", "🔵"),
+        ]),
     ]),
 ]
+# OJO con enero: esta lista NO guarda el año — quincena_pago_actual arma la
+# fecha con date(anio_actual, mes, dia). Por eso las dos filas de "Enero" de
+# arriba son las de 2026 (Q-01 el 14 y Q-02 el 29). En 2027 el Q-02 cae el
+# 28, así que al entrar enero hay que cambiar ese "29 Ene" por "28 Ene".
+# En ari_module.py no hace falta: allá la fecha lleva el año escrito.
 
 def quincena_pago_actual(anio: int = None):
     """(numero_quincena, fecha_de_pago) de la quincena vigente, leída del

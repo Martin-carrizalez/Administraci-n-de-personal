@@ -43,6 +43,17 @@ QUINCENAS = [
     {"q":"Q-20","fecha":date(2026,10,29),"concepto":"Fortalecimiento CC/CT según ajustes salariales (Básica / Apoyo Básica)"},
     {"q":"Q-21","fecha":date(2026,11,12),"concepto":"Sueldo ordinario"},
     {"q":"Q-22","fecha":date(2026,11,27),"concepto":"Bono anual 24 días inicial + Apoyo a la integración educativa especial (Docentes Básica)"},
+    {"q":"Q-23","fecha":date(2026,12,14),"concepto":"Aguinaldo + 32 Prima vacacional (los cobran los cuatro subsistemas: Docentes Básica, Docentes Nivel Superior, Apoyo Básica y Apoyo No Docente Nivel Superior)"},
+    # El G9 se marca en la Q-24 pero el depósito cae hasta enero. Va dicho
+    # dentro del concepto para que ARI lo aclare sin que nadie se lo pregunte:
+    # si no, en diciembre lo reclaman como si faltara.
+    {"q":"Q-24","fecha":date(2026,12,17),"concepto":"Para Docentes y Personal de Apoyo de Nivel Superior: G4 Prima dominical + G5 Ajuste de calendario + G6 Días económicos no disfrutados + G7 Días de descanso obligatorio + G9 Estímulo por puntualidad y asistencia (se marca en esta quincena pero se paga hasta enero) + CF Compensación de fin de año. Solo Docentes Nivel Superior: BE Bono extraordinario de superación académica. Solo Personal de Apoyo No Docente Nivel Superior: GU Gratificación única + BN Bono anual"},
+    # Enero reinicia la numeración: estas dos son de 2027. El año va explícito
+    # en date(), así que get_proxima_quincena las ordena bien aunque el nombre
+    # Q-01 se repita con las de enero de 2026.
+    # Cuando se sepan los bonos, se agregan al concepto sin tocar las fechas.
+    {"q":"Q-01","fecha":date(2027,1,14),"concepto":"Sueldo ordinario"},
+    {"q":"Q-02","fecha":date(2027,1,28),"concepto":"Sueldo ordinario"},
 ]
 
 DIAS_INHABILES_2026 = [
@@ -1405,7 +1416,7 @@ Desde el portal puedes descargar todos los formatos y acceder a:
 - Número de Seguro Social IMSS: https://serviciosdigitales.imss.gob.mx/gestionAsegurados-web-externo/asignacionNSS/
 
 ═══════════════════════════════════════════════════════
-CALENDARIO DE QUINCENAS 2026
+CALENDARIO DE QUINCENAS 2026 Y PRIMERAS DE 2027
 ═══════════════════════════════════════════════════════
 
 {info_prox}
