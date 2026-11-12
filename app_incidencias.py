@@ -4445,6 +4445,25 @@ def main():
         # El detalle de por qué ese secret y no otro está en
         # _puede_pendientes_rh.
         if render_pendientes_rh is not None and _puede_pendientes_rh():
+            # Azul metálico: se tiñe SOLO este botón, por la clase que
+            # Streamlit le pone a un widget con key (st-key-<key>). Si el
+            # botón sale gris, la versión de Streamlit es anterior a esa
+            # clase y hay que teñirlo de otra forma.
+            st.markdown("""
+<style>
+.st-key-btn_pend_rh_sidebar button{
+  background:linear-gradient(135deg,#16324F 0%,#2E6F9E 55%,#4FA3D1 100%)!important;
+  border:1px solid #7FD3F5!important; color:#EAF6FF!important;
+  font-weight:600!important; letter-spacing:.02em!important;
+  box-shadow:0 0 10px rgba(79,163,209,.35), inset 0 1px 0 rgba(255,255,255,.18)!important;
+}
+.st-key-btn_pend_rh_sidebar button:hover{
+  background:linear-gradient(135deg,#1D4468 0%,#3A86BC 55%,#6CC0E8 100%)!important;
+  border-color:#A8E6FF!important; color:#FFFFFF!important;
+  box-shadow:0 0 16px rgba(108,192,232,.55), inset 0 1px 0 rgba(255,255,255,.25)!important;
+}
+.st-key-btn_pend_rh_sidebar button p{color:inherit!important;}
+</style>""", unsafe_allow_html=True)
             if st.button("📋 Pendientes RH DFC", key="btn_pend_rh_sidebar",
                          use_container_width=True):
                 st.session_state["vista"] = "pendientes_rh"

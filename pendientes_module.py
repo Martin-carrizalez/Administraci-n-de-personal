@@ -37,7 +37,8 @@ MESES_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
             "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
 
 TAB_PROP = "Propuestas_RH"
-COLS_PROP = ["ID", "NOMBRE", "ETAPA", "NOTA", "ACTUALIZADO", "CREADO_POR"]
+COLS_PROP = ["ID", "NOMBRE", "ETAPA", "SUBSISTEMA", "NOTA",
+             "ACTUALIZADO", "CREADO_POR"]
 
 # Los documentos firmados NO van aquí: van al Sheet del minutario, en su
 # propia hoja. El minutario es donde ya vive el resguardo de oficios y
@@ -57,19 +58,37 @@ MESES_CORTO = ["ene", "feb", "mar", "abr", "may", "jun",
 ETAPAS = ["Elaboración",
           "Firma de la directora",
           "Firma de la subsecretaria",
+          "Entregado a RH",
           "Concluido"]
 
-# Lo que dice el sello, según dónde va el trámite.
-SELLOS = ["EN ELABORACIÓN",
-          "EN FIRMA · DIRECTORA",
-          "EN FIRMA · SUBSECRETARÍA",
-          "CONCLUIDO"]
+# Quién recibe en RH según el subsistema. Si un día cambia la persona, se
+# cambia aquí y el sello, el botón y la nota se actualizan solos.
+RECIBE_EN_RH = {"ESTATAL": "Aurora", "FEDERAL": "Alejandra"}
 
-# El botón dice lo que ACABA de pasar, no "siguiente": así se aprieta cuando
-# el trámite cambia de manos de verdad y no por error.
-BOTON_AVANZA = ["Ya se elaboró · pasa a firma de la directora",
-                "La directora firmó · pasa a la subsecretaria",
-                "La subsecretaria firmó · concluido"]
+
+def quien_recibe(subsistema):
+    return RECIBE_EN_RH.get(str(subsistema or "").upper().strip(), "")
+
+
+def sello_de(etapa, subsistema=""):
+    """Lo que dice el sello según dónde va el trámite."""
+    base = ["EN ELABORACIÓN", "EN FIRMA · DIRECTORA", "EN FIRMA · SUBSECRETARÍA",
+            "ENTREGADO A RH", "CONCLUIDO"]
+    if etapa == 3:
+        quien = quien_recibe(subsistema)
+        return f"EN RH · {quien.upper()}" if quien else "ENTREGADO A RH"
+    return base[etapa]
+
+
+def boton_de(etapa, subsistema=""):
+    """El botón dice lo que ACABA de pasar, no "siguiente": así se aprieta
+    cuando el trámite cambia de manos de verdad y no por error."""
+    quien = quien_recibe(subsistema)
+    destino = f"RH · {quien}" if quien else "RH"
+    return ["Ya se elaboró · pasa a firma de la directora",
+            "La directora firmó · pasa a la subsecretaria",
+            f"La subsecretaria firmó · se entrega a {destino}",
+            f"{quien or 'RH'} ya revisó · concluido"][etapa]
 
 VERDE = "#1B5E3F"
 GRIS = "#8A94A6"
@@ -313,6 +332,13 @@ def _apartado_pendientes(get_client, puede_pegar):
             st.caption("Pega la lista como la tengas: con ✅ y ⬜, con casillas "
                        "de markdown o a secas. Lo nuevo se agrega, lo marcado "
                        "se cierra, y nada se borra.")
+            # El vaciado del recuadro se pide con una bandera y se ejecuta
+            # AQUÍ, antes de crear el widget. Streamlit prohíbe asignarle
+            # valor a una key después de instanciarla, y hacerlo reventaba la
+            # sincronización: los pendientes se guardaban, pero el error
+            # tapaba el rerun y la pantalla decía que no había ninguno.
+            if st.session_state.pop("_limpiar_pegar", False):
+                st.session_state["pend_pegar"] = ""
             txt = st.text_area("Lista", height=200, key="pend_pegar",
                                placeholder="✅ Entregar reportes a la directora\n⬜ Enviar los reclamos de pago")
             if st.button("Sincronizar con el Sheet", type="primary", key="pend_sync"):
@@ -320,7 +346,7 @@ def _apartado_pendientes(get_client, puede_pegar):
                     n, c, ig = sincronizar(get_client, txt)
                     st.session_state["_msg_pend"] = (
                         f"Listo: {n} nuevo(s), {c} cerrado(s), {ig} sin cambio.")
-                    st.session_state["pend_pegar"] = ""
+                    st.session_state["_limpiar_pegar"] = True
                     st.rerun()
                 except Exception as e:
                     st.error(f"No se pudo sincronizar: {e}")
@@ -395,7 +421,7 @@ def _apartado_pendientes(get_client, puede_pegar):
 
 # ── 2. PROPUESTAS ────────────────────────────────────────────────────────
 def leer_propuestas(get_client):
-    """[(n_fila, id, nombre, etapa_int, nota, actualizado)] de Propuestas_RH.
+    """[(n_fila, id, nombre, etapa, subsistema, nota, actualizado)].
 
     El ID viaja porque los documentos del minutario se atan a él: con el
     número de renglón se despegarían al borrar una propuesta de arriba, y con
@@ -415,6 +441,7 @@ def leer_propuestas(get_client):
         etapa = max(0, min(etapa, len(ETAPAS) - 1))
         id_prop = str(_celda(f, idx["ID"])).strip() or f"T{nf - 1}"
         filas.append((nf, id_prop, nombre, etapa,
+                      str(_celda(f, idx["SUBSISTEMA"])).strip().upper(),
                       str(_celda(f, idx["NOTA"])).strip(),
                       str(_celda(f, idx["ACTUALIZADO"])).strip()))
     return ws, idx, filas
@@ -600,10 +627,16 @@ def _apartado_documentos(get_client, id_propuesta, nombre):
             # El periodo que CUBRE el documento, que no es la fecha en que se
             # sube: una prórroga de enero a marzo puede subirse en abril.
             cp1, cp2 = st.columns(2)
-            ini = cp1.date_input("Desde", key=f"pi_{tipo}_{id_propuesta}",
-                                 format="DD/MM/YYYY")
-            fin = cp2.date_input("Hasta", key=f"pf_{tipo}_{id_propuesta}",
-                                 format="DD/MM/YYYY")
+            # value=None para que nazcan VACÍOS. Sin esto, Streamlit los
+            # prellena con la fecha de hoy: no se leen como una pregunta y,
+            # peor, la validación de "es obligatorio" nunca se dispara, así
+            # que se guardaría "hoy a hoy" como periodo sin que nadie lo note.
+            ini = cp1.date_input("Desde", value=None, format="DD/MM/YYYY",
+                                 key=f"pi_{tipo}_{id_propuesta}")
+            fin = cp2.date_input("Hasta", value=None, format="DD/MM/YYYY",
+                                 key=f"pf_{tipo}_{id_propuesta}")
+            if not (ini and fin):
+                st.caption("⚠️ Captura el periodo que cubre el documento.")
             if ini and fin:
                 if fin < ini:
                     st.warning("La fecha de término es anterior a la de inicio.")
@@ -638,6 +671,16 @@ def _apartado_documentos(get_client, id_propuesta, nombre):
                     st.rerun()
 
 
+def _guardar_sub(ws, idx, n_fila, subsistema):
+    """Deja fijo si el trámite es estatal o federal: de ahí sale a quién se
+    entrega en RH, y con eso el sello y el botón cambian solos."""
+    from gspread.cell import Cell
+    celdas = [Cell(n_fila, idx["SUBSISTEMA"] + 1, str(subsistema).upper())]
+    if idx["ACTUALIZADO"] >= 0:
+        celdas.append(Cell(n_fila, idx["ACTUALIZADO"] + 1, _hoy()))
+    ws.update_cells(celdas, value_input_option="USER_ENTERED")
+
+
 def _guardar_etapa(ws, idx, n_fila, etapa, nota=None):
     """Una sola escritura para etapa + fecha (+ nota si cambió)."""
     from gspread.cell import Cell
@@ -664,7 +707,7 @@ def _apartado_propuestas(get_client):
         # El avance cuenta ETAPAS cumplidas, no trámites: un trámite a medias
         # se ve a medias, que es lo honesto cuando falta una firma.
         cumplidas = sum(f[3] for f in filas)
-        total = len(ETAPAS[:-1]) * len(filas)
+        total = (len(ETAPAS) - 1) * len(filas)
         _barra(cumplidas, total,
                f"{cumplidas} de {total} etapas completadas en "
                f"{len(filas)} trámite{'s' if len(filas) != 1 else ''}.")
@@ -672,20 +715,43 @@ def _apartado_propuestas(get_client):
     if st.session_state.get("_msg_prop"):
         st.success(st.session_state.pop("_msg_prop"))
 
-    for nf, id_prop, nombre, etapa, nota, actualizado in filas:
+    for nf, id_prop, nombre, etapa, subsis, nota, actualizado in filas:
         with st.container(border=True):
             c1, c2 = st.columns([3, 2])
             c1.markdown(f"**{nombre}**")
             c2.markdown(
                 f'<div style="text-align:right;"><span style="border:1.5px solid #C2410C;'
                 f'color:#C2410C;border-radius:4px;padding:3px 10px;font-size:0.72rem;'
-                f'font-weight:700;letter-spacing:0.04em;">{SELLOS[etapa]}</span></div>',
+                f'font-weight:700;letter-spacing:0.04em;">{sello_de(etapa, subsis)}</span></div>',
                 unsafe_allow_html=True)
             st.markdown(_escalera(etapa), unsafe_allow_html=True)
 
+            # Sin subsistema no se sabe si va con Aurora o con Alejandra, y
+            # el trámite no puede entregarse "a quien sea": se pide antes de
+            # dejar la firma de la subsecretaria.
+            if not subsis:
+                nuevo_sub = st.radio(
+                    "¿Es estatal o federal?", ["", "ESTATAL", "FEDERAL"],
+                    horizontal=True, key=f"prop_sub_{nf}",
+                    format_func=lambda v: "— elige —" if not v else
+                    f"{v.capitalize()} · {RECIBE_EN_RH[v]}")
+                if nuevo_sub and st.button("Guardar", key=f"prop_gs_{nf}"):
+                    try:
+                        _guardar_sub(ws, idx, nf, nuevo_sub)
+                        st.session_state["_msg_prop"] = (
+                            f"{nombre}: {nuevo_sub.capitalize()}, "
+                            f"la recibe {RECIBE_EN_RH[nuevo_sub]}.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo guardar: {e}")
+
             if etapa < len(ETAPAS) - 1:
-                if st.button(BOTON_AVANZA[etapa], key=f"prop_av_{nf}",
-                             type="primary", use_container_width=True):
+                _falta_sub = (etapa == 2 and not subsis)
+                if _falta_sub:
+                    st.caption("Elige estatal o federal para poder entregarla.")
+                if (not _falta_sub) and st.button(
+                        boton_de(etapa, subsis), key=f"prop_av_{nf}",
+                        type="primary", use_container_width=True):
                     try:
                         _guardar_etapa(ws, idx, nf, etapa + 1)
                         st.session_state["_msg_prop"] = f"{nombre}: {ETAPAS[etapa + 1]}."
@@ -735,16 +801,22 @@ def _apartado_propuestas(get_client):
                         st.error(f"No se pudo eliminar: {e}")
 
     with st.form("prop_alta", clear_on_submit=True):
-        c1, c2 = st.columns([5, 1])
+        c1, c2, c3 = st.columns([4, 2, 1])
         nombre = c1.text_input("Nueva propuesta", label_visibility="collapsed",
                                placeholder="Agregar propuesta por nombre...")
-        if c2.form_submit_button("Agregar") and nombre.strip():
+        # Se pregunta desde el alta porque decide quién la recibe en RH; se
+        # puede dejar en blanco y elegirlo después, antes de entregarla.
+        sub = c2.selectbox("Subsistema", ["", "ESTATAL", "FEDERAL"],
+                           label_visibility="collapsed",
+                           format_func=lambda v: "Estatal o federal..." if not v
+                           else f"{v.capitalize()} · {RECIBE_EN_RH[v]}")
+        if c3.form_submit_button("Agregar") and nombre.strip():
             try:
                 if _norm(nombre) in {_norm(f[2]) for f in filas}:
                     st.warning("Ya hay una propuesta con ese nombre.")
                 else:
-                    ws.append_row([f"T{len(filas) + 1}", nombre.strip(), "0", "",
-                                   _hoy(), _quien()],
+                    ws.append_row([f"T{len(filas) + 1}", nombre.strip(), "0",
+                                   sub, "", _hoy(), _quien()],
                                   value_input_option="USER_ENTERED")
                     st.session_state["_msg_prop"] = f"{nombre.strip()} agregada."
                     st.rerun()
