@@ -786,12 +786,13 @@ def _apartado_propuestas(get_client):
                     except Exception as e:
                         st.error(f"No se pudo regresar: {e}")
 
-            # Los documentos aparecen solo con el trámite CONCLUIDO: antes de
-            # la última firma no existe nada firmado que resguardar, y un
-            # recuadro de subida abierto desde el principio invita a guardar
-            # borradores como si fueran definitivos.
-            if etapa == len(ETAPAS) - 1:
-                _apartado_documentos(get_client, id_prop, nombre)
+            # Los dos botones de subida van SIEMPRE visibles, en cualquier
+            # etapa. Antes solo aparecían en Concluido y eso los volvía
+            # inalcanzables: un trámite tarda semanas en llegar ahí y los
+            # documentos se tienen antes. Si alguien sube algo a destiempo,
+            # se ve en la lista y se vuelve a subir; esconder el botón cuesta
+            # mucho más que eso.
+            _apartado_documentos(get_client, id_prop, nombre)
 
             nueva_nota = st.text_area("Nota", value=nota, height=80,
                                       key=f"prop_nota_{nf}")
