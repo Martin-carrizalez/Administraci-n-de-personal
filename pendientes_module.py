@@ -193,6 +193,22 @@ def _abrir(get_client, tab, cols):
     if not valores:
         ws.append_row(cols)
         valores = [cols]
+        return ws, valores
+
+    # Migración de encabezados. Una tab creada por una versión anterior no
+    # tiene las columnas que se agregaron después (SUBSISTEMA, FECHA_LIMITE).
+    # Sin esto, _indices devuelve -1, el código arma una celda en la columna
+    # 0 y gspread revienta con un error ilegible tipo "(2, 0)" justo al
+    # guardar — que es como se perdió el avance de una propuesta.
+    #
+    # Las columnas nuevas se AGREGAN al final: así no se mueve ningún dato ya
+    # capturado y las que ya existen se quedan donde están.
+    actuales = [h.strip().upper() for h in valores[0]]
+    faltan = [c for c in cols if c not in actuales]
+    if faltan:
+        nuevos = valores[0] + faltan
+        ws.update([nuevos], f"A1", value_input_option="USER_ENTERED")
+        valores[0] = nuevos
     return ws, valores
 
 
