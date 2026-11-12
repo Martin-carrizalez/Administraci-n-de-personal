@@ -178,22 +178,57 @@ def _quien():
     return st.session_state.get("nombre", "RH")
 
 
-def _abrir(get_client, tab, cols):
+@st.cache_resource(show_spinner=False)
+def _hoja(_get_client, sheet_id, tab, cols_tuple):
+    """La worksheet, guardada entre recargas.
+
+    Cada open_by_key() y cada worksheet() es UNA llamada a la API de Google,
+    y Streamlit vuelve a correr todo el script con cada clic. Sin esta caché
+    se gastaban dos llamadas por tab por recarga nada más para llegar a los
+    datos, y el límite son 60 lecturas por minuto: tres clics y 429.
+    El guion bajo de _get_client le dice a Streamlit que no intente usarlo
+    como parte de la llave de caché.
+    """
+    import gspread
+    sh = _get_client().open_by_key(sheet_id)
+    try:
+        return sh.worksheet(tab)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(tab, rows=2, cols=len(cols_tuple))
+        ws.append_row(list(cols_tuple))
+        return ws
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _valores(_ws, sheet_id, tab):
+    """El contenido de la tab. ttl=300 como el resto de la app.
+
+    Lo que vuelve es una copia: si quien la recibe la modificara, estaría
+    modificando lo que ve el resto de la pantalla. La caché se limpia a mano
+    después de cada escritura, así que un cambio propio se ve de inmediato;
+    los 30 segundos solo afectan a lo que cambie otra persona.
+    """
+    return [list(f) for f in _ws.get_all_values()]
+
+
+def _refrescar():
+    """Tira la caché de lecturas. Se llama después de CADA escritura."""
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+
+def _abrir(get_client, tab, cols, sheet_id=None):
     """Devuelve (ws, valores). Crea la tab con sus encabezados si no existe,
     para que el módulo funcione desde el primer día sin preparar nada."""
-    import gspread
-    sh = get_client().open_by_key(st.secrets["sheet_checador_id"])
-    try:
-        ws = sh.worksheet(tab)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(tab, rows=2, cols=len(cols))
-        ws.append_row(cols)
-        return ws, [cols]
-    valores = ws.get_all_values()
+    sid = sheet_id or st.secrets["sheet_checador_id"]
+    ws = _hoja(get_client, sid, tab, tuple(cols))
+    valores = _valores(ws, sid, tab)
     if not valores:
         ws.append_row(cols)
-        valores = [cols]
-        return ws, valores
+        _refrescar()
+        return ws, [cols]
 
     # Migración de encabezados. Una tab creada por una versión anterior no
     # tiene las columnas que se agregaron después (SUBSISTEMA, FECHA_LIMITE).
@@ -208,6 +243,7 @@ def _abrir(get_client, tab, cols):
     if faltan:
         nuevos = valores[0] + faltan
         ws.update([nuevos], f"A1", value_input_option="USER_ENTERED")
+        _refrescar()
         valores[0] = nuevos
     return ws, valores
 
@@ -304,11 +340,13 @@ def sincronizar(get_client, texto):
 
     if nuevas:
         ws.append_rows(nuevas, value_input_option="USER_ENTERED")
+        _refrescar()
     if cierres:
         celdas = [Cell(nf, idx["ESTADO"] + 1, "HECHO") for nf in cierres]
         if idx["FECHA_CIERRE"] >= 0:
             celdas += [Cell(nf, idx["FECHA_CIERRE"] + 1, _hoy()) for nf in cierres]
         ws.update_cells(celdas, value_input_option="USER_ENTERED")
+        _refrescar()
     return len(nuevas), len(cierres), iguales
 
 
@@ -383,6 +421,7 @@ def _apartado_pendientes(get_client, puede_pegar):
                                    "PENDIENTE", resp.strip(), _quien(), "",
                                    detectar_fecha(nuevo)],
                                   value_input_option="USER_ENTERED")
+                    _refrescar()
                     st.session_state["_msg_pend"] = "Pendiente agregado."
                     st.rerun()
             except Exception as e:
@@ -423,6 +462,7 @@ def _apartado_pendientes(get_client, puede_pegar):
             if idx["FECHA_CIERRE"] >= 0:
                 celdas += [Cell(nf, idx["FECHA_CIERRE"] + 1, _hoy()) for nf in marcar]
             ws.update_cells(celdas, value_input_option="USER_ENTERED")
+            _refrescar()
             st.session_state["_msg_pend"] = f"{len(marcar)} cerrado(s)."
             st.rerun()
         except Exception as e:
@@ -540,23 +580,16 @@ def _abrir_docs(get_client):
     el seguimiento. Es a propósito: el seguimiento es trabajo en curso y los
     documentos firmados son resguardo, que es justo lo que el minutario hace.
     """
-    import gspread
-    sh = get_client().open_by_key(st.secrets["sheet_oficios_id"])
-    try:
-        ws = sh.worksheet(TAB_DOCS)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(TAB_DOCS, rows=2, cols=len(COLS_DOCS))
-        ws.append_row(COLS_DOCS)
-        return ws, [COLS_DOCS]
-    valores = ws.get_all_values()
-    if not valores:
-        ws.append_row(COLS_DOCS)
-        valores = [COLS_DOCS]
-    return ws, valores
+    # Pasa por _abrir para heredar la caché y la migración de encabezados.
+    # Tenía su propia copia de esa lógica y por eso seguía gastando una
+    # apertura y una lectura en cada recarga, aunque las otras dos tabs ya
+    # estuvieran cacheadas.
+    return _abrir(get_client, TAB_DOCS, COLS_DOCS,
+                  sheet_id=st.secrets["sheet_oficios_id"])
 
 
 def leer_docs(get_client, id_propuesta=None):
-    """[(tipo, archivo, url, subido_por, fecha, periodo)] de esa propuesta."""
+    """[(id, tipo, archivo, url, subido_por, fecha, periodo)]."""
     ws, valores = _abrir_docs(get_client)
     idx = _indices(valores, COLS_DOCS)
     docs = []
@@ -565,7 +598,8 @@ def leer_docs(get_client, id_propuesta=None):
             continue
         if not str(_celda(f, idx["URL"])).strip():
             continue
-        docs.append((str(_celda(f, idx["TIPO"])).strip().upper(),
+        docs.append((str(_celda(f, idx["ID_PROPUESTA"])).strip(),
+                     str(_celda(f, idx["TIPO"])).strip().upper(),
                      str(_celda(f, idx["ARCHIVO"])).strip(),
                      str(_celda(f, idx["URL"])).strip(),
                      str(_celda(f, idx["SUBIDO_POR"])).strip(),
@@ -613,6 +647,7 @@ def guardar_doc(get_client, id_propuesta, nombre_propuesta, tipo, archivo,
                        archivo.name, url, sha256_bytes(contenido),
                        _quien(), _hoy()],
                       value_input_option="USER_ENTERED")
+        _refrescar()
     except Exception as e:
         # El archivo YA está en Drive: se devuelve la liga para que no se
         # pierda aunque el registro en el Sheet haya fallado.
@@ -620,23 +655,30 @@ def guardar_doc(get_client, id_propuesta, nombre_propuesta, tipo, archivo,
     return True, url
 
 
-def _apartado_documentos(get_client, id_propuesta, nombre):
-    """Subida de firmadas y acuses. Solo aparece con el trámite concluido."""
-    try:
-        _ws, docs = leer_docs(get_client, id_propuesta)
-    except Exception as e:
-        st.caption(f"No se pudo leer el minutario: {e}")
-        docs = []
+def _apartado_documentos(get_client, id_propuesta, nombre, docs=None):
+    """Subida de firmadas y acuses.
 
-    firmadas = [d for d in docs if d[0] == "FIRMADA"]
-    acuses = [d for d in docs if d[0] == "ACUSE"]
+    `docs` llega YA leído desde arriba. Antes esta función leía el minutario
+    por su cuenta, o sea una lectura por cada propuesta en pantalla: con seis
+    trámites eran seis lecturas por cada clic, y el límite de Google son 60
+    por minuto. De ahí el 429. El minutario se lee UNA vez y se reparte.
+    """
+    if docs is None:
+        try:
+            _ws, docs = leer_docs(get_client, id_propuesta)
+        except Exception as e:
+            st.caption(f"No se pudo leer el minutario: {e}")
+            docs = []
+
+    firmadas = [d for d in docs if d[1] == "FIRMADA"]
+    acuses = [d for d in docs if d[1] == "ACUSE"]
     st.markdown(f"**Documentos** · {len(firmadas)} firmada(s) · {len(acuses)} acuse(s)")
 
     for tipo, etiqueta in TIPOS_DOC.items():
-        ya = [d for d in docs if d[0] == tipo]
+        ya = [d for d in docs if d[1] == tipo]
         with st.expander(f"{'📄' if tipo == 'FIRMADA' else '🧾'} {etiqueta}"
                          + (f" ({len(ya)})" if ya else "")):
-            for _t, archivo, url, quien, cuando, periodo in ya:
+            for _i, _t, archivo, url, quien, cuando, periodo in ya:
                 st.markdown(f"- **{periodo or 'sin periodo'}** — [{archivo}]({url})"
                             f"  ·  {quien} · {cuando}")
 
@@ -695,6 +737,7 @@ def _guardar_sub(ws, idx, n_fila, subsistema):
     if idx["ACTUALIZADO"] >= 0:
         celdas.append(Cell(n_fila, idx["ACTUALIZADO"] + 1, _hoy()))
     ws.update_cells(celdas, value_input_option="USER_ENTERED")
+    _refrescar()
 
 
 def _guardar_etapa(ws, idx, n_fila, etapa, nota=None):
@@ -706,6 +749,7 @@ def _guardar_etapa(ws, idx, n_fila, etapa, nota=None):
     if nota is not None and idx["NOTA"] >= 0:
         celdas.append(Cell(n_fila, idx["NOTA"] + 1, nota))
     ws.update_cells(celdas, value_input_option="USER_ENTERED")
+    _refrescar()
 
 
 def _apartado_propuestas(get_client):
@@ -730,6 +774,16 @@ def _apartado_propuestas(get_client):
 
     if st.session_state.get("_msg_prop"):
         st.success(st.session_state.pop("_msg_prop"))
+
+    # Una sola lectura del minutario para TODAS las propuestas de la
+    # pantalla, agrupada por el ID de cada una.
+    por_prop = {}
+    try:
+        _wsd, todos = leer_docs(get_client)
+        for d in todos:
+            por_prop.setdefault(d[0], []).append(d)
+    except Exception as e:
+        st.caption(f"No se pudo leer el minutario: {e}")
 
     for nf, id_prop, nombre, etapa, subsis, nota, actualizado in filas:
         with st.container(border=True):
@@ -792,7 +846,8 @@ def _apartado_propuestas(get_client):
             # documentos se tienen antes. Si alguien sube algo a destiempo,
             # se ve en la lista y se vuelve a subir; esconder el botón cuesta
             # mucho más que eso.
-            _apartado_documentos(get_client, id_prop, nombre)
+            _apartado_documentos(get_client, id_prop, nombre,
+                                 por_prop.get(id_prop, []))
 
             nueva_nota = st.text_area("Nota", value=nota, height=80,
                                       key=f"prop_nota_{nf}")
@@ -835,6 +890,7 @@ def _apartado_propuestas(get_client):
                     ws.append_row([f"T{len(filas) + 1}", nombre.strip(), "0",
                                    sub, "", _hoy(), _quien()],
                                   value_input_option="USER_ENTERED")
+                    _refrescar()
                     st.session_state["_msg_prop"] = f"{nombre.strip()} agregada."
                     st.rerun()
             except Exception as e:
