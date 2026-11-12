@@ -7,6 +7,12 @@ try:
 except Exception as _e_nomina:
     render_pendientes_nomina = None
     _ERROR_NOMINA = str(_e_nomina)
+# Mismo import protegido: si el módulo falta, solo se apaga su botón.
+try:
+    from pendientes_module import render_pendientes_rh
+except Exception as _e_prh:
+    render_pendientes_rh = None
+    _ERROR_PENDIENTES_RH = str(_e_prh)
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
@@ -3083,9 +3089,16 @@ def vista_admin():
 # MAIN
 # ─────────────────────────────────────────────
 PAGOS = [
+    # OJO: esta lista NO guarda el año — quincena_pago_actual arma la fecha
+    # con date(año_actual, mes, día). O sea que es el calendario de UN año, y
+    # al entrar 2027 estas mismas filas se leen como fechas de 2027.
+    # Las fechas ya son las de 2027 (Q-01 el 14 y Q-02 el 28, que en 2026 fue
+    # el 29). Los CONCEPTOS siguen siendo los de 2026: cuando salga el
+    # calendario oficial de 2027 hay que cambiarlos, no solo aquí sino en todo
+    # PAGOS. En ari_module.py no hace falta: allá la fecha lleva el año.
     ("Enero", [
         ("14 Ene", "Q-01", [("Estímulo puntualidad y asistencia 2ª parte", "🟣🔵"), ("Prima Dominical", "🟣🔵")]),
-        ("29 Ene", "Q-02", [("Compensación Nacional Única 1ª Parte", "🟡🟢")]),
+        ("28 Ene", "Q-02", [("Compensación Nacional Única 1ª Parte", "🟡🟢")]),
     ]),
     ("Febrero", [
         ("12 Feb", "Q-03", [("Sueldo ordinario", "")]),
@@ -3163,11 +3176,6 @@ PAGOS = [
         ]),
     ]),
 ]
-# OJO con enero: esta lista NO guarda el año — quincena_pago_actual arma la
-# fecha con date(anio_actual, mes, dia). Por eso las dos filas de "Enero" de
-# arriba son las de 2026 (Q-01 el 14 y Q-02 el 29). En 2027 el Q-02 cae el
-# 28, así que al entrar enero hay que cambiar ese "29 Ene" por "28 Ene".
-# En ari_module.py no hace falta: allá la fecha lleva el año escrito.
 
 def quincena_pago_actual(anio: int = None):
     """(numero_quincena, fecha_de_pago) de la quincena vigente, leída del
@@ -3780,6 +3788,29 @@ def registrar_consulta_emergencia(rfc: str, nombre: str, companero: str):
         ws.append_row([nuevo_id, rfc, nombre, companero, ahora], value_input_option="USER_ENTERED")
     except Exception:
         pass
+
+def _puede_pendientes_rh() -> bool:
+    """Quién entra a Pendientes RH DFC: el admin y sus asesores.
+
+    Reusa rfcs_oficios, que son exactamente esas tres personas (el admin y
+    sus dos asesores del área de RH). Tener dos listas con la misma gente
+    garantiza que un día se desfasen y alguien pierda o gane acceso sin que
+    nadie lo note.
+
+    Cuidado con el día en que eso deje de ser cierto: rfcs_oficios dice
+    "quién puede emitir oficios". Si mañana se le da esa facultad a alguien
+    más, entraría aquí de pasada, sin que nadie lo haya decidido. Cuando pase
+    —o antes, si se prefiere— se agrega el secret rfcs_pendientes_rh con su
+    propia lista y esta función lo prefiere automáticamente, sin tocar código.
+    """
+    if st.session_state.get("rol") == "admin":
+        return True
+    rfc = str(st.session_state.get("rfc", "")).upper().strip()
+    if not rfc:
+        return False
+    propios = _rfcs_secret("rfcs_pendientes_rh")
+    return rfc in (propios if propios else _rfcs_secret("rfcs_oficios"))
+
 
 def _rfcs_secret(clave: str) -> list[str]:
     try:
@@ -4410,6 +4441,14 @@ def main():
         if st.button("🤖 Pregúntale a ARI la IA de RH"):
             st.session_state["vista"] = "ari"
             st.rerun()
+        # Pendientes RH DFC: SOLO el admin y sus dos asesores (rfcs_oficios).
+        # El detalle de por qué ese secret y no otro está en
+        # _puede_pendientes_rh.
+        if render_pendientes_rh is not None and _puede_pendientes_rh():
+            if st.button("📋 Pendientes RH DFC", key="btn_pend_rh_sidebar",
+                         use_container_width=True):
+                st.session_state["vista"] = "pendientes_rh"
+                st.rerun()
         if st.button("🏠 Inicio"):
             st.session_state["vista"] = "inicio"
             st.rerun()
@@ -4427,6 +4466,16 @@ def main():
         vista_contacto_emergencia()
     elif vista == "pendientes_cm":
         vista_pendientes_cm()
+    elif vista == "pendientes_rh":
+        # Se vuelve a revisar aquí, no solo al pintar el botón: esconder un
+        # botón no es un permiso, y la vista queda guardada en la sesión.
+        if not _puede_pendientes_rh():
+            st.error("No tienes acceso a esta sección.")
+        elif render_pendientes_rh is None:
+            st.error("El módulo de Pendientes RH no está disponible: "
+                     + globals().get("_ERROR_PENDIENTES_RH", ""))
+        else:
+            render_pendientes_rh(get_client)
     elif vista == "mi_asistencia":
         vista_mi_asistencia()
     elif vista == "qr_pantalla":
