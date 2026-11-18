@@ -26,7 +26,7 @@ Conexión desde app_incidencias.py:
 
 import re
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -337,6 +337,25 @@ def _apartado_saldos(gente, saldo_fn):
                      "están dados de alta ahí.")
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _cruce(_cli, desde, hasta, _f_eco, _f_inc, _f_ind, _f_cruce):
+    """(justificantes, hora de lectura). Cacheada 300 s como el resto.
+
+    La hora se calcula DENTRO de la función cacheada, así que es la hora de
+    la lectura real y no la del reloj al pintar: si se devolviera fuera,
+    diría "leído ahora" mostrando datos de hace cinco minutos.
+    """
+    vacio = pd.DataFrame()
+    fi_s, ff_s = desde.isoformat(), hasta.isoformat()
+    eco = _f_eco(_cli, fi_s, ff_s)
+    inc = _f_inc(_cli, fi_s, ff_s)
+    ind = _f_ind(_cli, fi_s, ff_s)
+    just = _f_cruce(eco if eco is not None else vacio,
+                    inc if inc is not None else vacio,
+                    ind if ind is not None else vacio, desde, hasta)
+    return just, datetime.now().strftime("%H:%M")
+
+
 def _tarjeta_dia(f, ausentes, total, hoy):
     """Un día: cuántos faltan, cuántos quedan y quiénes son."""
     faltan = len(ausentes)
@@ -431,21 +450,42 @@ def _vista_dias(deps, gente, titular, es_admin):
         st.error(f"No se pudo usar el cruce de incidencias del checador: {e}")
         return
 
+    # Se lee SIEMPRE la misma ventana ancha (de esta semana al fin del mes
+    # siguiente) y los cuatro periodos se recortan en memoria. Si se leyera
+    # el rango elegido, cada cambio de periodo sería una llave de caché
+    # nueva y otras 9 llamadas a Google: cuatro clics del coordinador se
+    # comían media cuota del minuto, y esa cuota la comparte con los
+    # empleados que están capturando sus incidencias.
+    _lun = hoy - timedelta(days=hoy.weekday())
+    _fin = (date(hoy.year + (hoy.month == 12), (hoy.month % 12) + 1, 1)
+            - timedelta(days=1))
     try:
-        cli = deps["get_client"]()
-        fi_s, ff_s = desde.isoformat(), hasta.isoformat()
-        economicos = load_economicos_ch(cli, fi_s, ff_s)
-        incapacidades = load_incapacidades_ch(cli, fi_s, ff_s)
-        incidencias = load_incidencias_ch(cli, fi_s, ff_s)
-        vacio = pd.DataFrame()
-        just_rfc = build_justificantes_rfc(
-            economicos if economicos is not None else vacio,
-            incapacidades if incapacidades is not None else vacio,
-            incidencias if incidencias is not None else vacio,
-            desde, hasta)
+        just_rfc, leido = _cruce(deps["get_client"](), _lun, _fin,
+                                 load_economicos_ch, load_incapacidades_ch,
+                                 load_incidencias_ch, build_justificantes_rfc)
     except Exception as e:
         st.error(f"No se pudieron leer las incidencias: {e}")
         return
+
+    # Streamlit NO recarga solo: con la pantalla abierta y sin tocar nada, lo
+    # que se ve es de cuando se abrió. Y aunque se toque algo, la lectura se
+    # reusa hasta 5 minutos. Por eso se dice A QUÉ HORA se leyó y se deja un
+    # botón para releer: un tablero de disponibilidad que miente sobre su
+    # antigüedad es peor que no tenerlo.
+    cabecera, boton = st.columns([4, 1])
+    cabecera.caption(f"Datos leídos a las **{leido}**. "
+                     "Solo cuentan los pases ya AUTORIZADOS.")
+    if boton.button("🔄 Actualizar", key="aus_refrescar",
+                    use_container_width=True):
+        # Solo esta lectura. st.cache_data.clear() borraría la caché de
+        # TODA la app —padrón, empleados, solicitudes— y un coordinador
+        # tocando este botón obligaría a releerlo todo, justo cuando los
+        # empleados están capturando.
+        try:
+            _cruce.clear()
+        except Exception:
+            pass
+        st.rerun()
 
     dias = ausencias_por_dia(just_rfc, gente, desde, hasta)
     total = len(gente)
