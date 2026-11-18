@@ -721,7 +721,10 @@ def reservar_oficio(get_client, datos: dict) -> tuple[bool, str, str]:
             token,
             "", "",   # URL_ESCANEO, SHA256_ESCANEO
         ], value_input_option="USER_ENTERED")
-        st.cache_data.clear()
+        # Antes era st.cache_data.clear(), que borra las 18 cachés de la app
+        # —padrón, empleados, solicitudes, horarios— y obligaba a releerlo todo
+        # al siguiente que entrara. Aquí solo se invalida lo que de verdad cambió.
+        _cargar_oficios_cached.clear()
         _registrar_log(get_client, id_oficio, "RESERVADO", datos.get("asunto", ""))
         return True, id_oficio, token
     except Exception as e:
@@ -770,7 +773,10 @@ def registrar_oficio_historico(get_client, datos: dict, archivo=None) -> tuple[b
             "",                                       # TOKEN: los históricos no llevan
             url, huella,                              # URL_ESCANEO, SHA256_ESCANEO
         ], value_input_option="USER_ENTERED")
-        st.cache_data.clear()
+        # Antes era st.cache_data.clear(), que borra las 18 cachés de la app
+        # —padrón, empleados, solicitudes, horarios— y obligaba a releerlo todo
+        # al siguiente que entrara. Aquí solo se invalida lo que de verdad cambió.
+        _cargar_oficios_cached.clear()
         _registrar_log(get_client, id_oficio, "HISTORICO", datos.get("asunto", ""))
         return True, id_oficio
     except Exception as e:
@@ -869,7 +875,10 @@ def registrar_historicos_lote(get_client, registros: list[dict],
     except Exception:
         pass   # la bitácora nunca debe tumbar la operación principal
 
-    st.cache_data.clear()
+    # Antes era st.cache_data.clear(), que borra las 18 cachés de la app
+    # —padrón, empleados, solicitudes, horarios— y obligaba a releerlo todo
+    # al siguiente que entrara. Aquí solo se invalida lo que de verdad cambió.
+    _cargar_oficios_cached.clear()
     return len(filas), errores
 
 
@@ -1019,7 +1028,10 @@ def registrar_emitidos_lote(get_client, registros: list[dict],
     except Exception:
         pass
 
-    st.cache_data.clear()
+    # Antes era st.cache_data.clear(), que borra las 18 cachés de la app
+    # —padrón, empleados, solicitudes, horarios— y obligaba a releerlo todo
+    # al siguiente que entrara. Aquí solo se invalida lo que de verdad cambió.
+    _cargar_oficios_cached.clear()
     return aceptados, errores
 
 
@@ -1073,7 +1085,10 @@ def actualizar_filas_lote(get_client, cambios_por_id: dict) -> tuple[int, list[s
     except Exception as e:
         return 0, errores + [f"No se pudo escribir: {e}"]
 
-    st.cache_data.clear()
+    # Antes era st.cache_data.clear(), que borra las 18 cachés de la app
+    # —padrón, empleados, solicitudes, horarios— y obligaba a releerlo todo
+    # al siguiente que entrara. Aquí solo se invalida lo que de verdad cambió.
+    _cargar_oficios_cached.clear()
     return len(cambios_por_id) - len(errores), errores
 
 
@@ -1102,7 +1117,10 @@ def _actualizar_filas_lote(get_client, cambios_por_id: dict) -> set:
             escritos.add(id_fila)
     if celdas:
         ws.update_cells(celdas, value_input_option="USER_ENTERED")
-    st.cache_data.clear()
+    # Antes era st.cache_data.clear(), que borra las 18 cachés de la app
+    # —padrón, empleados, solicitudes, horarios— y obligaba a releerlo todo
+    # al siguiente que entrara. Aquí solo se invalida lo que de verdad cambió.
+    _cargar_oficios_cached.clear()
     return escritos
 
 
@@ -1139,7 +1157,10 @@ def _actualizar_fila(get_client, id_oficio: str, cambios: dict) -> bool:
                     celdas.append(Cell(i, headers.index(col) + 1, valor))
             if celdas:
                 ws.update_cells(celdas, value_input_option="USER_ENTERED")
-            st.cache_data.clear()
+            # Antes era st.cache_data.clear(), que borra las 18 cachés de la app
+            # —padrón, empleados, solicitudes, horarios— y obligaba a releerlo todo
+            # al siguiente que entrara. Aquí solo se invalida lo que de verdad cambió.
+            _cargar_oficios_cached.clear()
             return True
     return False
 
@@ -1241,7 +1262,10 @@ def registrar_acuse(get_client, datos: dict, archivo) -> tuple[bool, str]:
             sha256_bytes(contenido),
             datos.get("observaciones", ""),
         ], value_input_option="USER_ENTERED")
-        st.cache_data.clear()
+        # Antes era st.cache_data.clear(), que borra las 18 cachés de la app
+        # —padrón, empleados, solicitudes, horarios— y obligaba a releerlo todo
+        # al siguiente que entrara. Aquí solo se invalida lo que de verdad cambió.
+        _cargar_acuses_cached.clear()
         _registrar_log(get_client, id_acuse, "ACUSE_REGISTRADO",
                        datos.get("descripcion", ""))
         return True, id_acuse
@@ -1260,7 +1284,10 @@ def registrar_acuses_lote(get_client, anio: int, clave: str, filas: list) -> tup
     "contenido" + "nombre" (documentos recortados de un PDF más grande)."""
     # Consecutivo leído SIN caché justo antes de asignar: si alguien registró
     # un acuse en los últimos minutos, no se repite su número.
-    st.cache_data.clear()
+    # Antes era st.cache_data.clear(), que borra las 18 cachés de la app
+    # —padrón, empleados, solicitudes, horarios— y obligaba a releerlo todo
+    # al siguiente que entrara. Aquí solo se invalida lo que de verdad cambió.
+    _cargar_acuses_cached.clear()
     df_fresco = cargar_acuses(get_client)
     siguiente = {}  # un consecutivo independiente por tipo
     renglones, bitacora, registrados, errores, links = [], [], [], [], {}
@@ -1300,7 +1327,10 @@ def registrar_acuses_lote(get_client, anio: int, clave: str, filas: list) -> tup
         try:
             sh = _abrir_sheet(get_client)
             sh.worksheet(TAB_ACUSES).append_rows(renglones, value_input_option="USER_ENTERED")
-            st.cache_data.clear()
+            # Antes era st.cache_data.clear(), que borra las 18 cachés de la app
+            # —padrón, empleados, solicitudes, horarios— y obligaba a releerlo todo
+            # al siguiente que entrara. Aquí solo se invalida lo que de verdad cambió.
+            _cargar_acuses_cached.clear()
             _registrar_log_lote(get_client, bitacora)
         except Exception as e:
             # Los archivos YA están en Drive; se devuelven sus links para no perderlos.
@@ -2811,7 +2841,11 @@ def render_oficios(deps: dict):
                                        "guardar el lote. Links subidos:")
                             for id_of, url in sorted(links.items()):
                                 st.write(f"• {id_of} → [Drive]({url})")
-                    st.cache_data.clear()
+                    # Antes era st.cache_data.clear(), que borra las 18 cachés de la app
+                    # —padrón, empleados, solicitudes, horarios— y obligaba a releerlo todo
+                    # al siguiente que entrara. Aquí solo se invalida lo que de verdad cambió.
+                    _cargar_oficios_cached.clear()
+                    _cargar_acuses_cached.clear()
 
     # ── Consultar ────────────────────────────
     with tab_cons:

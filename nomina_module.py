@@ -18,6 +18,24 @@ import pandas as pd
 import urllib.parse
 import hashlib
 
+# Qué caché invalidar cuando este módulo escribe en Pendientes_Nomina.
+# La pone app_incidencias al llamar al render, porque la función que lee esa
+# tab vive allá y aquí no se puede importar (sería import circular).
+#
+# Antes estas escrituras llamaban a st.cache_data.clear(), que borra las 18
+# cachés de la app —padrón, empleados, solicitudes, horarios—, y este módulo
+# no tiene ninguna caché propia: tiraba la de todos los demás sin ganar nada.
+_INVALIDAR = []
+
+
+def _refrescar_pendientes():
+    """Invalida solo la lectura de Pendientes_Nomina."""
+    for fn in _INVALIDAR:
+        try:
+            fn()
+        except Exception:
+            pass
+
 
 def construir_cuerpo_nomina(nombre, pendientes_por_nomina, segundo_aviso=False):
     """pendientes_por_nomina: {nomina: [conceptos]}"""
@@ -276,7 +294,7 @@ def borrar_precarga(get_client, concepto: str) -> int:
     if borradas:
         ws.clear()
         ws.update(quedan, value_input_option="USER_ENTERED")
-        st.cache_data.clear()
+        _refrescar_pendientes()
     return borradas
 
 
@@ -347,7 +365,7 @@ def _panel_marcar_firmados(get_client):
                     celdas += [Cell(n, i_fecha + 1, ahora) for n in _resto]
                 try:
                     ws.update_cells(celdas, value_input_option="USER_ENTERED")
-                    st.cache_data.clear()
+                    _refrescar_pendientes()
                     st.success(f"Cerrados {len(_resto)}. Quedan pendientes los {len(marcadas)} que marcaste.")
                     st.rerun()
                 except Exception as e:
@@ -361,7 +379,7 @@ def _panel_marcar_firmados(get_client):
             celdas += [Cell(n, i_fecha + 1, ahora) for n in marcadas]
         try:
             ws.update_cells(celdas, value_input_option="USER_ENTERED")  # una sola escritura
-            st.cache_data.clear()
+            _refrescar_pendientes()
             st.success(f"Listo: {len(marcadas)} firma(s) marcadas. "
                        "Ya no le aparecen al coordinador.")
             st.rerun()
@@ -370,7 +388,9 @@ def _panel_marcar_firmados(get_client):
 
 
 def render_pendientes_nomina(cargar_directorio_nomina, get_client=None,
-                             quincena_actual=None):
+                             quincena_actual=None, invalidar=None):
+    if invalidar is not None and invalidar not in _INVALIDAR:
+        _INVALIDAR.append(invalidar)
     st.markdown("### 📋 Pendientes de Firma de Nómina")
     directorio = cargar_directorio_nomina()
     if get_client is not None and not directorio.empty:
