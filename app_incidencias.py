@@ -3811,10 +3811,19 @@ def _puede_pendientes_rh() -> bool:
     if st.session_state.get("rol") == "admin":
         return True
     rfc = str(st.session_state.get("rfc", "")).upper().strip()
-    if not rfc:
-        return False
+    return bool(rfc) and rfc in _rfcs_pendientes_rh()
+
+
+def _rfcs_pendientes_rh() -> list:
+    """Los RFC del área de RH: quiénes entran al módulo Y a quiénes se les
+    puede asignar un pendiente.
+
+    Es la MISMA lista para las dos cosas, a propósito: un pendiente se le
+    asigna a quien puede entrar a verlo. Separarlas permitiría asignarle
+    algo a alguien que nunca lo va a leer.
+    """
     propios = _rfcs_secret("rfcs_pendientes_rh")
-    return rfc in (propios if propios else _rfcs_secret("rfcs_oficios"))
+    return propios if propios else _rfcs_secret("rfcs_oficios")
 
 
 def _rfcs_secret(clave: str) -> list[str]:
@@ -4555,7 +4564,8 @@ def main():
             st.error("El módulo de Pendientes RH no está disponible: "
                      + globals().get("_ERROR_PENDIENTES_RH", ""))
         else:
-            render_pendientes_rh(get_client, cargar_padron)
+            render_pendientes_rh(get_client, cargar_padron,
+                                 _rfcs_pendientes_rh())
     elif vista == "mi_asistencia":
         vista_mi_asistencia()
     elif vista == "qr_pantalla":

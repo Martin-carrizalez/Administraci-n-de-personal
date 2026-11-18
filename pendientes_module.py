@@ -431,15 +431,21 @@ def _barra(hechos, total, etiqueta):
 </div>""", unsafe_allow_html=True)
 
 
-def _personas(cargar_padron):
-    """[(nombre, rfc)] del padrón, para el selector de responsable.
+def _personas(cargar_padron, rfcs_permitidos=None):
+    """[(nombre, rfc)] de quienes pueden ser responsables de un pendiente.
 
-    Sale del Sheet en cada carga. Si el padrón no llega, se devuelve vacío y
-    el selector queda en "sin responsable": es preferible un pendiente sin
-    dueño a uno asignado a alguien escrito a mano que luego nadie empareja.
+    NO es todo el padrón: son los RFC del área de RH, los mismos que pueden
+    entrar al módulo. Un desplegable con cientos de empleados no sirve para
+    repartir trabajo entre dos asistentes, y además permitiría asignarle un
+    pendiente a alguien que nunca va a poder abrirlo.
+
+    Los RFC llegan de los secrets; los nombres salen del Sheet al dibujar la
+    pantalla. Ninguno de los dos vive en este archivo.
     """
     if cargar_padron is None:
         return []
+    permitidos = {str(r).upper().strip() for r in (rfcs_permitidos or [])
+                  if str(r).strip()}
     try:
         df = cargar_padron()
     except Exception:
@@ -452,7 +458,9 @@ def _personas(cargar_padron):
     out = []
     for _, r in df.iterrows():
         rfc = str(r.get(col_rfc, "")).upper().strip()
-        if not rfc:
+        # Sin lista de permitidos no se devuelve a nadie: es preferible un
+        # selector vacío a uno con el padrón entero.
+        if not rfc or rfc not in permitidos:
             continue
         nombre = ""
         for c in ("NOMBRE_COMPLETO", "Nombre completo"):
@@ -468,7 +476,8 @@ def _personas(cargar_padron):
     return out
 
 
-def _apartado_pendientes(get_client, puede_pegar, deps_padron=None):
+def _apartado_pendientes(get_client, puede_pegar, deps_padron=None,
+                         rfcs_permitidos=None):
     st.markdown("### 📌 Pendientes RH DFC")
     try:
         ws, idx, filas = leer_pendientes(get_client)
@@ -519,7 +528,7 @@ def _apartado_pendientes(get_client, puede_pegar, deps_padron=None):
         # quien comparte apellido le salgan pendientes ajenos.
         # Los nombres salen del Sheet en tiempo de ejecución: ninguno queda
         # escrito en este archivo.
-        gente = _personas(deps_padron)
+        gente = _personas(deps_padron, rfcs_permitidos)
         etiquetas = ["— sin responsable —"] + [n for n, _r in gente]
         elegido = c2.selectbox("Responsable", etiquetas,
                                label_visibility="collapsed")
@@ -1016,7 +1025,8 @@ def _apartado_propuestas(get_client):
 
 
 # ── Vista ────────────────────────────────────────────────────────────────
-def render_pendientes_rh(get_client, cargar_padron=None):
+def render_pendientes_rh(get_client, cargar_padron=None,
+                         rfcs_permitidos=None):
     st.markdown("#### Recursos Humanos · Cierre de año")
     # Pegar la lista completa la reescribe entera: queda para quien
     # administra. Agregar y marcar lo puede hacer cualquiera, que es el punto
@@ -1024,6 +1034,7 @@ def render_pendientes_rh(get_client, cargar_padron=None):
     puede_pegar = st.session_state.get("rol") == "admin"
     t1, t2 = st.tabs(["📌 Pendientes", "📑 Propuestas"])
     with t1:
-        _apartado_pendientes(get_client, puede_pegar, cargar_padron)
+        _apartado_pendientes(get_client, puede_pegar, cargar_padron,
+                             rfcs_permitidos)
     with t2:
         _apartado_propuestas(get_client)
