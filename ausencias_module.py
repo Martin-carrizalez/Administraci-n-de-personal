@@ -80,6 +80,11 @@ def _solo_nombre(jefe_raw) -> str:
     return t.strip()
 
 
+# Marca de versión a la vista. Existe porque este módulo y la app se suben
+# por separado, y sin ella no hay forma de saber si lo que está corriendo es
+# el archivo nuevo o uno viejo en caché: se depura a ciegas.
+VERSION = "v4 · solo jefes y coordinadores"
+
 # Partículas que no identifican a nadie y que unos capturan y otros no.
 _PARTICULAS = {"de", "del", "la", "las", "los", "y", "san", "mc"}
 
@@ -225,6 +230,39 @@ def jefes_del_padron(padron):
         if n and _norm(n) not in vistos:
             vistos[_norm(n)] = n
     return sorted(vistos.values())
+
+
+def es_jefe(cargar_padron, nombre, rol="") -> bool:
+    """¿Esta persona tiene gente a cargo? Decide si ve el botón.
+
+    Jefe es quien aparece en la columna JEFE_INMEDIATO de alguien: no hay
+    lista que mantener, y cuando cambia un encargado el acceso cambia solo
+    al actualizar el padrón.
+
+    El resultado se guarda en la sesión porque el menú se dibuja en CADA
+    pantalla: sin eso, se consultaría el padrón una y otra vez por un dato
+    que no cambia mientras dure la sesión.
+    """
+    if str(rol).lower() == "admin":
+        return True
+    if not _palabras(nombre):
+        return False
+    clave = "_es_jefe_" + _norm(nombre)
+    if clave in st.session_state:
+        return st.session_state[clave]
+    resultado = False
+    try:
+        padron = cargar_padron()
+        if padron is not None and not padron.empty \
+                and "JEFE_INMEDIATO" in padron.columns:
+            resultado = bool(padron["JEFE_INMEDIATO"].map(
+                lambda v: mismo_nombre(v, nombre)).any())
+    except Exception:
+        # Si el padrón no se puede leer, NO se muestra el botón: es más
+        # prudente que enseñárselo a quien no le toca.
+        resultado = False
+    st.session_state[clave] = resultado
+    return resultado
 
 
 def ausencias_por_dia(just_rfc, gente, desde, hasta):
@@ -381,6 +419,7 @@ def _tarjeta_dia(f, ausentes, total, hoy):
 def render_ausencias(deps):
     """deps: cargar_padron, cargar_solicitudes_eco, get_client, rol, nombre."""
     st.markdown("### 👥 Quién no está")
+    st.caption(f"· {VERSION} ·")
     st.caption("Tu gente y los días en que falta o no está completa —incluye "
                "pases de entrada y de salida—, para que sepas con cuántos "
                "cuentas antes de comprometer una actividad.")

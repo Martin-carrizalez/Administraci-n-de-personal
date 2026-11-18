@@ -9,7 +9,7 @@ except Exception as _e_nomina:
     _ERROR_NOMINA = str(_e_nomina)
 # Mismo import protegido: si el módulo falta, solo se apaga su botón.
 try:
-    from ausencias_module import render_ausencias
+    from ausencias_module import render_ausencias, es_jefe
 except Exception as _e_aus:
     render_ausencias = None
     _ERROR_AUSENCIAS = str(_e_aus)
@@ -3016,7 +3016,11 @@ def vista_admin():
             st.error(f"El módulo de nómina no está disponible: {_ERROR_NOMINA}")
         else:
             render_pendientes_nomina(cargar_directorio_nomina, get_client,
-                                     quincena_actual=quincena_pago_actual)
+                                     quincena_actual=quincena_pago_actual,
+                                     # Qué invalidar cuando escriba: solo la
+                                     # lectura de Pendientes_Nomina, que vive
+                                     # aquí. Antes borraba la caché completa.
+                                     invalidar=cargar_pendientes_nomina_sheet.clear)
 
     with tab3:
         # ── Alerta días económicos por agotarse ──────
@@ -3814,6 +3818,14 @@ def _puede_pendientes_rh() -> bool:
     return bool(rfc) and rfc in _rfcs_pendientes_rh()
 
 
+def _puede_ausencias() -> bool:
+    """Quién ve "Quién no está": el admin y quien tenga gente a cargo."""
+    if render_ausencias is None:
+        return False
+    return es_jefe(cargar_padron, st.session_state.get("nombre", ""),
+                   st.session_state.get("rol", ""))
+
+
 def _rfcs_pendientes_rh() -> list:
     """Los RFC del área de RH: quiénes entran al módulo Y a quiénes se les
     puede asignar un pendiente.
@@ -4497,11 +4509,12 @@ def main():
                          use_container_width=True):
                 st.session_state["vista"] = "pendientes_rh"
                 st.rerun()
-        # Quién no está: lo ve quien tiene gente a cargo. No se restringe
-        # por secret: si nadie lo trae como jefe en el padrón, la vista se lo
-        # dice y no muestra a nadie — un empleado sin equipo no ve datos de
-        # terceros.
-        if render_ausencias is not None:
+        # Quién no está: SOLO jefes, coordinadores y admin. "Jefe" es quien
+        # aparece en la columna JEFE_INMEDIATO de alguien, así que no hay
+        # lista que mantener: al actualizar el padrón, el acceso se ajusta.
+        # Antes el botón salía para todos y quien no tenía gente veía un
+        # aviso; eso no es restringir, es avisar después de dejar pasar.
+        if render_ausencias is not None and _puede_ausencias():
             if st.button("👥 Quién no está", key="btn_ausencias_sidebar",
                          use_container_width=True):
                 st.session_state["vista"] = "ausencias"
@@ -4541,7 +4554,10 @@ def main():
     elif vista == "pendientes_cm":
         vista_pendientes_cm()
     elif vista == "ausencias":
-        if render_ausencias is None:
+        # Se revisa otra vez aquí: esconder un botón no es un permiso.
+        if not _puede_ausencias():
+            st.error("Esta sección es para quienes tienen personal a cargo.")
+        elif render_ausencias is None:
             st.error("El módulo no está disponible: "
                      + globals().get("_ERROR_AUSENCIAS", ""))
         else:
