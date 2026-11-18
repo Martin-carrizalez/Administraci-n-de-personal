@@ -13,13 +13,22 @@ from datetime import datetime
 
 _deps = {}
 
-def configurar(get_client, error_amable, columnas_horario, subir_archivo_drive, carpeta_asistencia_cm):
-    """Llamar UNA vez desde app_incidencias después de definir dependencias."""
+def configurar(get_client, error_amable, columnas_horario, subir_archivo_drive,
+               carpeta_asistencia_cm, saldo_economicos=None):
+    """Llamar UNA vez desde app_incidencias después de definir dependencias.
+
+    saldo_economicos: función saldo_economicos_rfc(rfc) -> (disponibles,
+    totales) o None. Llega inyectada, no importada, por lo mismo que el
+    resto: cm_module no importa app_incidencias para no crear un import
+    circular. Va con valor por omisión para que una app que todavía no la
+    pase siga arrancando — simplemente no verá esa pestaña.
+    """
     _deps["get_client"] = get_client
     _deps["error_amable"] = error_amable
     _deps["COLUMNAS_HORARIO"] = columnas_horario
     _deps["subir_archivo_drive"] = subir_archivo_drive
     _deps["carpeta_asistencia_cm"] = carpeta_asistencia_cm
+    _deps["saldo_economicos"] = saldo_economicos
 
 def get_client():
     return _deps["get_client"]()
@@ -206,6 +215,69 @@ def _tab_asistencia_mensual(centro: str, rfc_actual: str):
                        f"el {r['FECHA_SUBIDA']} · [Ver archivo]({r['URL_ARCHIVO']})")
 
 
+def _tab_dias_economicos(centro: str):
+    """Cuántos días económicos lleva cada asesor del centro y cuántos le
+    quedan, para decidir ANTES de autorizar.
+
+    El saldo NO se calcula aquí: se pide a saldo_economicos_rfc, que es la
+    misma función que ve el empleado en su pantalla. Si se recalculara en
+    este módulo, tarde o temprano el coordinador vería un número y el asesor
+    otro, y la discusión sería sobre cuál app tiene razón.
+    """
+    saldo = _deps.get("saldo_economicos")
+    if saldo is None:
+        st.info("Esta sección necesita que la app pase la función de saldos. "
+                "Avísale a RH.")
+        return
+
+    asesores = _cargar_asesores_centro(centro)
+    if asesores.empty:
+        st.warning(f"No hay asesores registrados para '{centro}' en la tab "
+                   f"{HORARIOS_ASESORES_TAB}.")
+        return
+
+    st.caption("Días económicos de tu equipo. Revisa aquí antes de autorizar: "
+               "son 9 al año, en 3 ocasiones de hasta 3 días separadas por al "
+               "menos un mes.")
+
+    filas, sin_dato = [], []
+    for _, a in asesores.iterrows():
+        rfc_a = str(a.get("RFC_ASESOR", "")).strip().upper()
+        nombre_a = str(a.get("NOMBRE", "")).strip()
+        r = saldo(rfc_a) if rfc_a else None
+        if r is None:
+            # Sin fila en la tab Empleados no hay saldo que mostrar. Se dice
+            # con nombre en vez de pintar un 0, que se leería como "ya no le
+            # quedan" y es justo lo contrario de lo que significa.
+            sin_dato.append(nombre_a or rfc_a)
+            continue
+        disp, tot = r
+        filas.append({"Asesor": nombre_a, "Tomados": max(0, tot - disp),
+                      "Le quedan": disp, "De": tot})
+
+    if filas:
+        # Ordenado por quien menos tiene: es a quien hay que mirar primero.
+        filas.sort(key=lambda f: f["Le quedan"])
+        st.dataframe(pd.DataFrame(filas), use_container_width=True,
+                     hide_index=True)
+        agotados = [f["Asesor"] for f in filas if f["Le quedan"] <= 0]
+        pocos = [f for f in filas if 0 < f["Le quedan"] <= 2]
+        if agotados:
+            st.error("Sin días disponibles: **" + "**, **".join(agotados)
+                     + "**. No autorices más sin consultarlo con RH.")
+        if pocos:
+            st.warning("Les queda poco: "
+                       + " · ".join(f"**{f['Asesor']}** {f['Le quedan']}"
+                                    for f in pocos))
+    if sin_dato:
+        st.caption("Sin saldo registrado en la tab Empleados: "
+                   + ", ".join(sin_dato)
+                   + ". No significa que no tengan días: significa que no "
+                     "están dados de alta ahí.")
+    st.caption("El número es el mismo que ve el asesor en su pantalla, y "
+               "cuenta solo las solicitudes aprobadas.")
+
+
 def vista_toma_lista_cm():
     rfc_actual = str(st.session_state.get("rfc", "")).upper().strip()
     centro = _centro_del_responsable(rfc_actual)
@@ -220,7 +292,9 @@ def vista_toma_lista_cm():
         centro = st.selectbox("Centro (vista admin)", centros_disp)
 
     st.markdown(f"## 📋 {centro}")
-    tab_diaria, tab_mensual = st.tabs(["📋 Toma de lista diaria", "📎 Asistencia mensual (PDF)"])
+    tab_diaria, tab_mensual, tab_eco = st.tabs(
+        ["📋 Toma de lista diaria", "📎 Asistencia mensual (PDF)",
+         "🟡 Días económicos"])
 
     with tab_diaria:
         hoy = datetime.now(pytz.timezone("America/Mexico_City")).date()
@@ -266,3 +340,6 @@ def vista_toma_lista_cm():
 
     with tab_mensual:
         _tab_asistencia_mensual(centro, rfc_actual)
+
+    with tab_eco:
+        _tab_dias_economicos(centro)

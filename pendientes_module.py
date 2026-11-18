@@ -31,7 +31,8 @@ from datetime import datetime, date, timedelta
 # ── Tabs y columnas ──────────────────────────────────────────────────────
 TAB_PEND = "Pendientes_RH"
 COLS_PEND = ["ID", "FECHA_ALTA", "PENDIENTE", "ESTADO",
-             "RESPONSABLE", "CREADO_POR", "FECHA_CIERRE", "FECHA_LIMITE"]
+             "RESPONSABLE", "RESPONSABLE_RFC", "CREADO_POR",
+             "FECHA_CIERRE", "FECHA_LIMITE"]
 
 MESES_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
             "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
@@ -270,8 +271,72 @@ def leer_pendientes(get_client):
         filas.append((nf, texto,
                       str(_celda(f, idx["ESTADO"])).strip().upper() or "PENDIENTE",
                       str(_celda(f, idx["RESPONSABLE"])).strip(),
-                      str(_celda(f, idx["FECHA_LIMITE"])).strip()))
+                      str(_celda(f, idx["FECHA_LIMITE"])).strip(),
+                      str(_celda(f, idx["RESPONSABLE_RFC"])).strip().upper()))
     return ws, idx, filas
+
+
+
+
+
+
+def mis_pendientes(get_client, nombre, rfc=""):
+    """(vencidos_o_de_hoy, todos_abiertos) de esa persona.
+
+    Empareja por RFC, que es exacto. El nombre solo se usa para los
+    renglones viejos que se capturaron antes de que existiera la columna
+    RESPONSABLE_RFC, y ahí la comparación es por nombre COMPLETO: nunca por
+    parecido. Comparar por pedazos haría que a dos personas con un apellido
+    en común les salieran los pendientes de la otra.
+    """
+    rfc_n = str(rfc or "").upper().strip()
+    nombre_n = _norm(nombre)
+    if not rfc_n and not nombre_n:
+        return [], []
+    try:
+        _ws, _idx, filas = leer_pendientes(get_client)
+    except Exception:
+        return [], []
+    hoy = date.today()
+    mios, urgentes = [], []
+    for _nf, texto, estado, resp, limite, resp_rfc in filas:
+        if estado == "HECHO":
+            continue
+        # Primero por RFC; el nombre es solo el respaldo de lo viejo.
+        if resp_rfc:
+            if resp_rfc != rfc_n:
+                continue
+        elif not nombre_n or _norm(resp) != nombre_n:
+            continue
+        mios.append((texto, limite))
+        try:
+            if limite and datetime.strptime(limite, "%Y-%m-%d").date() <= hoy:
+                urgentes.append((texto, limite))
+        except (ValueError, TypeError):
+            pass
+    return urgentes, mios
+
+
+def aviso_pendientes(get_client, nombre, rfc=""):
+    """Banda de aviso al entrar. No dibuja nada si la persona no debe nada.
+
+    Se calla cuando no hay pendientes a propósito: un aviso que aparece
+    siempre deja de leerse, y entonces tampoco sirve el día que sí importa.
+    """
+    urgentes, mios = mis_pendientes(get_client, nombre, rfc)
+    if not mios:
+        return
+    if urgentes:
+        st.error(f"⏰ Tienes **{len(urgentes)}** pendiente(s) para hoy o "
+                 f"atrasado(s), de {len(mios)} asignado(s):")
+        for texto, lim in urgentes[:5]:
+            dd = "/".join(reversed(lim.split("-"))) if lim else ""
+            st.markdown(f"- **{texto}**" + (f"  ·  vencía {dd}" if dd else ""))
+    else:
+        st.info(f"📌 Tienes **{len(mios)}** pendiente(s) asignado(s) en "
+                f"Pendientes RH DFC.")
+    if len(mios) > len(urgentes):
+        st.caption("Los ves completos en 📋 Pendientes RH DFC.")
 
 
 def parsear_lista(texto):
@@ -317,7 +382,7 @@ def sincronizar(get_client, texto):
         return 0, 0, 0
 
     ws, idx, filas = leer_pendientes(get_client)
-    por_texto = {_norm(t): (nf, est) for nf, t, est, _, _ in filas}
+    por_texto = {_norm(t): (nf, est) for nf, t, est, _, _, _ in filas}
 
     nuevas, cierres, iguales = [], [], 0
     for lista, marcado in ((pendientes, False), (hechos, True)):
@@ -366,7 +431,44 @@ def _barra(hechos, total, etiqueta):
 </div>""", unsafe_allow_html=True)
 
 
-def _apartado_pendientes(get_client, puede_pegar):
+def _personas(cargar_padron):
+    """[(nombre, rfc)] del padrón, para el selector de responsable.
+
+    Sale del Sheet en cada carga. Si el padrón no llega, se devuelve vacío y
+    el selector queda en "sin responsable": es preferible un pendiente sin
+    dueño a uno asignado a alguien escrito a mano que luego nadie empareja.
+    """
+    if cargar_padron is None:
+        return []
+    try:
+        df = cargar_padron()
+    except Exception:
+        return []
+    if df is None or df.empty:
+        return []
+    col_rfc = next((c for c in df.columns if c.upper().strip() == "RFC"), None)
+    if not col_rfc:
+        return []
+    out = []
+    for _, r in df.iterrows():
+        rfc = str(r.get(col_rfc, "")).upper().strip()
+        if not rfc:
+            continue
+        nombre = ""
+        for c in ("NOMBRE_COMPLETO", "Nombre completo"):
+            if c in df.columns and str(r.get(c, "")).strip():
+                nombre = str(r[c]).strip(); break
+        if not nombre:
+            nombre = " ".join(str(r.get(c, "")).strip() for c in
+                              ("NOMBRE", "PATERNO", "MATERNO")
+                              if c in df.columns and str(r.get(c, "")).strip())
+        if nombre:
+            out.append((nombre, rfc))
+    out.sort()
+    return out
+
+
+def _apartado_pendientes(get_client, puede_pegar, deps_padron=None):
     st.markdown("### 📌 Pendientes RH DFC")
     try:
         ws, idx, filas = leer_pendientes(get_client)
@@ -410,15 +512,28 @@ def _apartado_pendientes(get_client, puede_pegar):
         c1, c2, c3 = st.columns([5, 2, 1])
         nuevo = c1.text_input("Nuevo pendiente", label_visibility="collapsed",
                               placeholder="Escribe un pendiente y agrégalo")
-        resp = c2.text_input("Responsable", label_visibility="collapsed",
-                             placeholder="Responsable (opcional)")
+        # El responsable se ELIGE de una lista que sale del padrón, no se
+        # teclea. Así se guarda su RFC junto al nombre y el aviso de inicio
+        # puede ser exacto; escribiéndolo a mano había que adivinar a quién
+        # se refería un apodo, y adivinar por parecido de nombre hace que a
+        # quien comparte apellido le salgan pendientes ajenos.
+        # Los nombres salen del Sheet en tiempo de ejecución: ninguno queda
+        # escrito en este archivo.
+        gente = _personas(deps_padron)
+        etiquetas = ["— sin responsable —"] + [n for n, _r in gente]
+        elegido = c2.selectbox("Responsable", etiquetas,
+                               label_visibility="collapsed")
+        resp, resp_rfc = "", ""
+        if elegido != etiquetas[0]:
+            resp = elegido
+            resp_rfc = next((r for n, r in gente if n == elegido), "")
         if c3.form_submit_button("Agregar") and nuevo.strip():
             try:
                 if _norm(nuevo) in {_norm(f[1]) for f in filas}:
                     st.warning("Ese pendiente ya está en la lista.")
                 else:
                     ws.append_row([f"P{len(filas) + 1}", _hoy(), nuevo.strip(),
-                                   "PENDIENTE", resp.strip(), _quien(), "",
+                                   "PENDIENTE", resp, resp_rfc, _quien(), "",
                                    detectar_fecha(nuevo)],
                                   value_input_option="USER_ENTERED")
                     _refrescar()
@@ -438,8 +553,11 @@ def _apartado_pendientes(get_client, puede_pegar):
     # en vez de una por cada palomita.
     st.caption(f"{len(abiertos)} por hacer")
     marcar = []
-    for nf, texto, estado, resp, limite in abiertos:
-        etiqueta = f"{texto}" + (f"  ·  {resp}" if resp else "")
+    for nf, texto, estado, resp, limite, _rrfc in abiertos:
+        # El responsable va en negritas: es lo que una persona busca con la
+        # vista cuando abre la lista — "¿cuáles son los míos?" —, y entre
+        # veinte renglones de texto corrido un nombre sin resaltar se pierde.
+        etiqueta = f"{texto}" + (f"  ·  **{resp}**" if resp else "")
         liga = liga_calendar(texto, limite)
         # Con fecha, la casilla se encoge para dejarle lugar al botón de
         # agendar; sin fecha ocupa todo, para no dejar un hueco vacío.
@@ -470,7 +588,7 @@ def _apartado_pendientes(get_client, puede_pegar):
 
     if hechos:
         with st.expander(f"✅ Ya hechos ({len(hechos)})"):
-            for _, texto, _, _, _ in hechos:
+            for _, texto, _, _, _, _ in hechos:
                 st.markdown(f"<span style='color:{GRIS};text-decoration:line-through;'>"
                             f"{texto}</span>", unsafe_allow_html=True)
 
@@ -898,7 +1016,7 @@ def _apartado_propuestas(get_client):
 
 
 # ── Vista ────────────────────────────────────────────────────────────────
-def render_pendientes_rh(get_client):
+def render_pendientes_rh(get_client, cargar_padron=None):
     st.markdown("#### Recursos Humanos · Cierre de año")
     # Pegar la lista completa la reescribe entera: queda para quien
     # administra. Agregar y marcar lo puede hacer cualquiera, que es el punto
@@ -906,6 +1024,6 @@ def render_pendientes_rh(get_client):
     puede_pegar = st.session_state.get("rol") == "admin"
     t1, t2 = st.tabs(["📌 Pendientes", "📑 Propuestas"])
     with t1:
-        _apartado_pendientes(get_client, puede_pegar)
+        _apartado_pendientes(get_client, puede_pegar, cargar_padron)
     with t2:
         _apartado_propuestas(get_client)

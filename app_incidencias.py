@@ -9,7 +9,12 @@ except Exception as _e_nomina:
     _ERROR_NOMINA = str(_e_nomina)
 # Mismo import protegido: si el módulo falta, solo se apaga su botón.
 try:
-    from pendientes_module import render_pendientes_rh
+    from ausencias_module import render_ausencias
+except Exception as _e_aus:
+    render_ausencias = None
+    _ERROR_AUSENCIAS = str(_e_aus)
+try:
+    from pendientes_module import render_pendientes_rh, aviso_pendientes
 except Exception as _e_prh:
     render_pendientes_rh = None
     _ERROR_PENDIENTES_RH = str(_e_prh)
@@ -3449,8 +3454,8 @@ def vista_directorio():
         # Horario: SOLO admin lo ve aquí (las 10 áreas, no Centros de
         # Maestros). Las 5 secretarias de rfcs_directorio_cm siguen viendo
         # horario únicamente en la sección de Centros de Maestros.
-        # Horarios de las 10 áreas: admin + RFCs del secret rfcs_horarios_todos
-        # (Pichardo y Nadia). En secrets, nunca en el código.
+        # Horarios de las 10 áreas: admin + RFCs del secret
+        # rfcs_horarios_todos. En secrets, nunca en el código.
         if _ve_horarios_todos:
             _horario_partes = []
             for _dia, (_col_e, _col_s) in COLUMNAS_HORARIO.items():
@@ -4092,7 +4097,10 @@ if _cm_module is not None:
     _cm_module.configurar(get_client=get_client, error_amable=_error_amable,
                           columnas_horario=COLUMNAS_HORARIO,
                           subir_archivo_drive=subir_archivo_drive,
-                          carpeta_asistencia_cm=DRIVE_ASISTENCIA_CM_FOLDER)
+                          carpeta_asistencia_cm=DRIVE_ASISTENCIA_CM_FOLDER,
+                          # El coordinador ve el MISMO saldo que el asesor:
+                          # se le pasa la función, no se recalcula allá.
+                          saldo_economicos=saldo_economicos_rfc)
 
 # ── Asistencia por QR rotativo: asistencia_qr.py ──
 # Reemplaza la toma de lista manual (retirada del sidebar y del enrutador).
@@ -4115,7 +4123,6 @@ if _aqr_mod is not None:
                                                st.secrets.get("sheet_checador_id", "")),
             subir_archivo_drive=subir_archivo_drive,
             carpeta_asistencia_cm=DRIVE_ASISTENCIA_CM_FOLDER,
-            saldo_economicos=saldo_economicos_rfc,
         )
     except Exception as _e_cfg:
         _ERROR_AQR = f"no se pudo configurar: {_e_cfg}"
@@ -4468,6 +4475,15 @@ def main():
                          use_container_width=True):
                 st.session_state["vista"] = "pendientes_rh"
                 st.rerun()
+        # Quién no viene: lo ve quien tiene gente a cargo. No se restringe
+        # por secret: si nadie lo trae como jefe en el padrón, la vista se lo
+        # dice y no muestra a nadie — un empleado sin equipo no ve datos de
+        # terceros.
+        if render_ausencias is not None:
+            if st.button("👥 Quién no viene", key="btn_ausencias_sidebar",
+                         use_container_width=True):
+                st.session_state["vista"] = "ausencias"
+                st.rerun()
         if st.button("🏠 Inicio"):
             st.session_state["vista"] = "inicio"
             st.rerun()
@@ -4477,6 +4493,23 @@ def main():
             st.rerun()
 
     vista = st.session_state.get("vista", "inicio")
+
+    # Aviso de pendientes propios, en la pantalla de entrada y nada más: en
+    # las demás vistas la persona ya está haciendo otra cosa y un recordatorio
+    # ahí solo estorba. Se calla solo si no debe nada — un aviso que sale
+    # siempre deja de leerse, y entonces falla el día que sí importa.
+    # Mismo permiso que la vista: si alguien no puede abrir Pendientes RH,
+    # tampoco debe leer el texto de un pendiente en su pantalla de inicio.
+    if (vista == "inicio" and render_pendientes_rh is not None
+            and _puede_pendientes_rh()):
+        try:
+            aviso_pendientes(get_client, st.session_state.get("nombre", ""),
+                             st.session_state.get("rfc", ""))
+        except Exception:
+            # Un fallo leyendo el Sheet NO debe tumbar la pantalla de inicio:
+            # el aviso es un extra, no el contenido.
+            pass
+
     if vista == "ari":
         vista_ari()
     elif vista == "directorio":
@@ -4485,6 +4518,21 @@ def main():
         vista_contacto_emergencia()
     elif vista == "pendientes_cm":
         vista_pendientes_cm()
+    elif vista == "ausencias":
+        if render_ausencias is None:
+            st.error("El módulo no está disponible: "
+                     + globals().get("_ERROR_AUSENCIAS", ""))
+        else:
+            render_ausencias({
+                "cargar_padron": cargar_padron,
+                "cargar_solicitudes_eco": cargar_solicitudes_eco,
+                "get_client": get_client,
+                "rol": st.session_state.get("rol", ""),
+                "nombre": st.session_state.get("nombre", ""),
+                # El mismo saldo que ve el empleado: se pasa la función, no
+                # se recalcula en el módulo.
+                "saldo_economicos": saldo_economicos_rfc,
+            })
     elif vista == "pendientes_rh":
         # Se vuelve a revisar aquí, no solo al pintar el botón: esconder un
         # botón no es un permiso, y la vista queda guardada en la sesión.
@@ -4494,7 +4542,7 @@ def main():
             st.error("El módulo de Pendientes RH no está disponible: "
                      + globals().get("_ERROR_PENDIENTES_RH", ""))
         else:
-            render_pendientes_rh(get_client)
+            render_pendientes_rh(get_client, cargar_padron)
     elif vista == "mi_asistencia":
         vista_mi_asistencia()
     elif vista == "qr_pantalla":

@@ -20,6 +20,200 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 
 
+# A nivel de módulo para poder importarla. Recibe el cliente de gspread
+# en vez de tomarlo del ámbito de render_checador, que era lo único que
+# la ataba ahí dentro.
+@st.cache_data(ttl=300)
+def load_incapacidades_ch(_client, fi_str, ff_str):
+    try:
+        ws = _client.open_by_key(st.secrets["sheet_economicos_id"]).worksheet("Incapacidades")
+        data = ws.get_all_records(numericise_ignore=["all"])
+        df = pd.DataFrame(data).fillna("")
+        if df.empty: return pd.DataFrame()
+        df["Fecha Inicio"]  = pd.to_datetime(df["Fecha Inicio"],  errors="coerce", dayfirst=True)
+        df["Fecha Termino"] = pd.to_datetime(df["Fecha Termino"], errors="coerce", dayfirst=True)
+        fi = datetime.strptime(fi_str, "%Y-%m-%d")
+        ff = datetime.strptime(ff_str, "%Y-%m-%d")
+        mask = (df["Fecha Inicio"] <= ff) & (df["Fecha Termino"] >= fi)
+        return df[mask].copy()
+    except:
+        return pd.DataFrame()
+
+# A nivel de módulo para que otros módulos la reutilicen: es una función
+# pura (recibe DataFrames, devuelve un dict) y no usaba nada del ámbito
+# de render_checador. Anidada solo impedía importarla, y eso obligaba a
+# duplicar el cruce de incapacidades en cada módulo que lo necesitara.
+def build_justificantes_rfc(economicos, incapacidades, incidencias_df, fi, ff, eventos_inst=None):
+    """
+    Retorna dict: {RFC_upper -> {date -> tipo_justificante}}
+    Incluye: días económicos, incapacidades, comisiones, pases de entrada
+    """
+    resultado = {}
+
+    # Días económicos aprobados
+    if not economicos.empty:
+        col_rfc    = next((c for c in economicos.columns if "RFC" in c.upper()), None)
+        col_motivo = next((c for c in economicos.columns if "MOTIVO" in c.upper() or "Motivo" in c), None)
+        col_fi     = next((c for c in economicos.columns if "INICIO" in c.upper()), None)
+        col_ff     = next((c for c in economicos.columns if "FIN" in c.upper() and "INICIO" not in c.upper()), None)
+        if col_rfc:
+            for _, r in economicos.iterrows():
+                rfc = str(r.get(col_rfc,"")).strip().upper()
+                if not rfc: continue
+                fechas_just = []
+                # Intentar leer fechas exactas del motivo
+                motivo = str(r.get(col_motivo, "")) if col_motivo else ""
+                if "Fechas:" in motivo:
+                    try:
+                        parte = motivo.split("Fechas:")[1].strip()
+                        for f_str in parte.split(","):
+                            f_str = f_str.strip()
+                            for fmt in ["%d/%m/%Y", "%Y-%m-%d"]:
+                                try:
+                                    fechas_just.append(datetime.strptime(f_str, fmt).date())
+                                    break
+                                except: pass
+                    except: pass
+                # Si no hay fechas en motivo, usar rango
+                if not fechas_just and col_fi and col_ff:
+                    try:
+                        d = r[col_fi]
+                        f = r[col_ff]
+                        while d <= f:
+                            fechas_just.append(d.date())
+                            d += timedelta(days=1)
+                    except: pass
+                col_mot_eco = next((c for c in economicos.columns if "MOTIVO" in c.upper()), None)
+                for fecha_eco in fechas_just:
+                    if fi <= fecha_eco <= ff:
+                        mot_eco = str(r.get(col_mot_eco,"")).strip() if col_mot_eco else ""
+                        resultado.setdefault(rfc, {})[fecha_eco] = f"Día económico|motivo:{mot_eco}" if mot_eco else "Día económico"
+
+    # Incapacidades
+    if not incapacidades.empty:
+        col_rfc  = next((c for c in incapacidades.columns if "RFC" in c.upper()), None)
+        col_fi   = next((c for c in incapacidades.columns if "INICIO" in c.upper()), None)
+        col_ff   = next((c for c in incapacidades.columns if "TERMINO" in c.upper() or ("FIN" in c.upper() and "INICIO" not in c.upper())), None)
+        col_tipo = next((c for c in incapacidades.columns if "TIPO" in c.upper()), None)
+        if col_rfc and col_fi and col_ff:
+            for _, r in incapacidades.iterrows():
+                rfc = str(r.get(col_rfc,"")).strip().upper()
+                if not rfc: continue
+                tipo = str(r.get(col_tipo,"Incapacidad")).strip() if col_tipo else "Incapacidad"
+                try:
+                    d = r[col_fi]
+                    f = r[col_ff]
+                    while d <= f:
+                        if fi <= d.date() <= ff:
+                            resultado.setdefault(rfc, {})[d.date()] = tipo or "Incapacidad"
+                        d += timedelta(days=1)
+                except: pass
+
+    # Comisiones y pases autorizados desde Incidencias
+    if not incidencias_df.empty:
+        for _, r in incidencias_df.iterrows():
+            rfc  = str(r.get("RFC","")).strip().upper()
+            tipo = str(r.get("TIPO","")).strip()
+            if not rfc: continue
+            try:
+                d = r["FECHA_INICIO"]
+                f = r["FECHA_FIN"]
+                if pd.isna(d) or pd.isna(f): continue
+                # Fechas salteadas: si el MOTIVO trae "Fechas: dd/mm/aaaa, ...",
+                # solo esos días se justifican (mismo formato que ya se usa
+                # en días económicos). Sin esta lista, una comisión de lunes
+                # y jueves justificaba también martes y miércoles por rango.
+                _dias_exactos = set()
+                _mot_inc = str(r.get("MOTIVO", ""))
+                if "Fechas:" in _mot_inc:
+                    for _fs in _mot_inc.split("Fechas:")[1].split(","):
+                        for _fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+                            try:
+                                _dias_exactos.add(datetime.strptime(_fs.strip()[:10], _fmt).date())
+                                break
+                            except Exception:
+                                pass
+                while d <= f:
+                    if fi <= d.date() <= ff and (not _dias_exactos or d.date() in _dias_exactos):
+                        if tipo == "COM":
+                            resultado.setdefault(rfc, {})[d.date()] = "Comisión"
+                        elif tipo == "RGU":
+                            resultado.setdefault(rfc, {})[d.date()] = "Reposición de guardias"
+                        elif tipo == "PEN":
+                            # Pase de entrada aprobado SIEMPRE justifica el retardo.
+                            # El motivo del empleado (si lo hay) es informativo.
+                            motivo_real = extraer_motivo_usuario(r.get("MOTIVO",""))
+                            if motivo_real:
+                                resultado.setdefault(rfc, {}).setdefault(d.date(), f"Pase de entrada|motivo:{motivo_real}")
+                            else:
+                                resultado.setdefault(rfc, {}).setdefault(d.date(), "Pase de entrada")
+                        elif tipo == "PSE":
+                            motivo_pse = str(r.get("MOTIVO","")).lower()
+                            hora_ret   = str(r.get("HORA_RETORNO","")).strip()
+                            mot_real   = extraer_motivo_usuario(r.get("MOTIVO",""))
+                            suf = f"|motivo:{mot_real}" if mot_real else ""
+                            if "sin retorno" in motivo_pse:
+                                resultado.setdefault(rfc, {})[d.date()] = f"Pase de salida sin retorno{suf}"
+                            elif hora_ret:
+                                resultado.setdefault(rfc, {})[d.date()] = f"Pase de salida|retorno:{hora_ret}{suf}"
+                            else:
+                                resultado.setdefault(rfc, {}).setdefault(d.date(), f"Pase de salida{suf}")
+                    d += timedelta(days=1)
+            except: pass
+
+    # Eventos institucionales — aplican a TODOS los empleados
+    if eventos_inst:
+        from gspread import Client  # solo para verificar que tenemos clientes cargados
+        for ev in eventos_inst:
+            fecha_ev = ev["fecha"] if isinstance(ev["fecha"], type(fi)) else ev["fecha"]
+            if fi <= fecha_ev <= ff:
+                # Agregar a todos los empleados activos
+                for rfc_emp in set(list(resultado.keys()) + ["__GLOBAL__"]):
+                    resultado.setdefault("__GLOBAL__", {})[fecha_ev] = ev["motivo"]
+    return resultado
+
+
+# A nivel de módulo, igual que las otras dos: reciben el cliente en vez
+# de tomarlo del ámbito de render_checador. Son las dos fuentes del
+# cruce: 'Solicitudes' trae los días económicos e 'Incidencias' las
+# comisiones y los pases.
+@st.cache_data(ttl=300)
+def load_economicos_ch(_client, fi_str, ff_str):
+    try:
+        ws = _client.open_by_key(st.secrets["sheet_economicos_id"]).worksheet("Solicitudes")
+        data = ws.get_all_records(numericise_ignore=["all"])
+        df = pd.DataFrame(data).fillna("")
+        if df.empty: return pd.DataFrame()
+        df["Fecha Inicio"] = pd.to_datetime(df["Fecha Inicio"], errors="coerce", dayfirst=True)
+        df["Fecha Fin"]    = pd.to_datetime(df["Fecha Fin"],    errors="coerce", dayfirst=True)
+        fi = datetime.strptime(fi_str, "%Y-%m-%d")
+        ff = datetime.strptime(ff_str, "%Y-%m-%d")
+        mask = (df["Fecha Inicio"] <= ff) & (df["Fecha Fin"] >= fi)
+        # Solo aprobados
+        aprobados = df[mask & (df["Aprobado Por"].astype(str).str.strip() != "")]
+        return aprobados
+    except Exception as e:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=300)
+def load_incidencias_ch(_client, fi_str, ff_str):
+    """Carga pases y comisiones autorizados del Sheet del checador."""
+    try:
+        ws = _client.open_by_key(st.secrets["sheet_checador_id"]).worksheet("Incidencias")
+        data = ws.get_all_records(numericise_ignore=["all"])
+        df = pd.DataFrame(data).fillna("")
+        if df.empty: return pd.DataFrame()
+        df = df[df["ESTADO"] == "AUTORIZADO"]
+        df["FECHA_INICIO"] = pd.to_datetime(df["FECHA_INICIO"], errors="coerce")
+        df["FECHA_FIN"]    = pd.to_datetime(df["FECHA_FIN"],    errors="coerce")
+        fi = datetime.strptime(fi_str, "%Y-%m-%d")
+        ff = datetime.strptime(ff_str, "%Y-%m-%d")
+        mask = (df["FECHA_INICIO"] <= ff) & (df["FECHA_FIN"] >= fi)
+        return df[mask].copy()
+    except:
+        return pd.DataFrame()
+
+
 def render_checador(deps):
     # ── Dependencias inyectadas desde app_incidencias (sin import circular) ──
     cargar_festivos = deps["cargar_festivos"]
@@ -88,60 +282,8 @@ def render_checador(deps):
         except:
             return pd.DataFrame()
 
-    @st.cache_data(ttl=300)
-    def load_economicos_ch(fi_str, ff_str):
-        try:
-            client = get_client_ch()
-            ws = client.open_by_key(st.secrets["sheet_economicos_id"]).worksheet("Solicitudes")
-            data = ws.get_all_records(numericise_ignore=["all"])
-            df = pd.DataFrame(data).fillna("")
-            if df.empty: return pd.DataFrame()
-            df["Fecha Inicio"] = pd.to_datetime(df["Fecha Inicio"], errors="coerce", dayfirst=True)
-            df["Fecha Fin"]    = pd.to_datetime(df["Fecha Fin"],    errors="coerce", dayfirst=True)
-            fi = datetime.strptime(fi_str, "%Y-%m-%d")
-            ff = datetime.strptime(ff_str, "%Y-%m-%d")
-            mask = (df["Fecha Inicio"] <= ff) & (df["Fecha Fin"] >= fi)
-            # Solo aprobados
-            aprobados = df[mask & (df["Aprobado Por"].astype(str).str.strip() != "")]
-            return aprobados
-        except Exception as e:
-            return pd.DataFrame()
 
-    @st.cache_data(ttl=300)
-    def load_incapacidades_ch(fi_str, ff_str):
-        try:
-            client = get_client_ch()
-            ws = client.open_by_key(st.secrets["sheet_economicos_id"]).worksheet("Incapacidades")
-            data = ws.get_all_records(numericise_ignore=["all"])
-            df = pd.DataFrame(data).fillna("")
-            if df.empty: return pd.DataFrame()
-            df["Fecha Inicio"]  = pd.to_datetime(df["Fecha Inicio"],  errors="coerce", dayfirst=True)
-            df["Fecha Termino"] = pd.to_datetime(df["Fecha Termino"], errors="coerce", dayfirst=True)
-            fi = datetime.strptime(fi_str, "%Y-%m-%d")
-            ff = datetime.strptime(ff_str, "%Y-%m-%d")
-            mask = (df["Fecha Inicio"] <= ff) & (df["Fecha Termino"] >= fi)
-            return df[mask].copy()
-        except:
-            return pd.DataFrame()
 
-    @st.cache_data(ttl=300)
-    def load_incidencias_ch(fi_str, ff_str):
-        """Carga pases y comisiones autorizados del Sheet del checador."""
-        try:
-            client = get_client_ch()
-            ws = client.open_by_key(st.secrets["sheet_checador_id"]).worksheet("Incidencias")
-            data = ws.get_all_records(numericise_ignore=["all"])
-            df = pd.DataFrame(data).fillna("")
-            if df.empty: return pd.DataFrame()
-            df = df[df["ESTADO"] == "AUTORIZADO"]
-            df["FECHA_INICIO"] = pd.to_datetime(df["FECHA_INICIO"], errors="coerce")
-            df["FECHA_FIN"]    = pd.to_datetime(df["FECHA_FIN"],    errors="coerce")
-            fi = datetime.strptime(fi_str, "%Y-%m-%d")
-            ff = datetime.strptime(ff_str, "%Y-%m-%d")
-            mask = (df["FECHA_INICIO"] <= ff) & (df["FECHA_FIN"] >= fi)
-            return df[mask].copy()
-        except:
-            return pd.DataFrame()
 
     def extraer_motivo_usuario(motivo_raw: str) -> str:
         """Extrae el texto que escribió el empleado, quitando solo las etiquetas
@@ -171,134 +313,6 @@ def render_checador(deps):
         #  como si fuera un motivo escrito por el empleado.)
         return ""
 
-    def build_justificantes_rfc(economicos, incapacidades, incidencias_df, fi, ff, eventos_inst=None):
-        """
-        Retorna dict: {RFC_upper -> {date -> tipo_justificante}}
-        Incluye: días económicos, incapacidades, comisiones, pases de entrada
-        """
-        resultado = {}
-
-        # Días económicos aprobados
-        if not economicos.empty:
-            col_rfc    = next((c for c in economicos.columns if "RFC" in c.upper()), None)
-            col_motivo = next((c for c in economicos.columns if "MOTIVO" in c.upper() or "Motivo" in c), None)
-            col_fi     = next((c for c in economicos.columns if "INICIO" in c.upper()), None)
-            col_ff     = next((c for c in economicos.columns if "FIN" in c.upper() and "INICIO" not in c.upper()), None)
-            if col_rfc:
-                for _, r in economicos.iterrows():
-                    rfc = str(r.get(col_rfc,"")).strip().upper()
-                    if not rfc: continue
-                    fechas_just = []
-                    # Intentar leer fechas exactas del motivo
-                    motivo = str(r.get(col_motivo, "")) if col_motivo else ""
-                    if "Fechas:" in motivo:
-                        try:
-                            parte = motivo.split("Fechas:")[1].strip()
-                            for f_str in parte.split(","):
-                                f_str = f_str.strip()
-                                for fmt in ["%d/%m/%Y", "%Y-%m-%d"]:
-                                    try:
-                                        fechas_just.append(datetime.strptime(f_str, fmt).date())
-                                        break
-                                    except: pass
-                        except: pass
-                    # Si no hay fechas en motivo, usar rango
-                    if not fechas_just and col_fi and col_ff:
-                        try:
-                            d = r[col_fi]
-                            f = r[col_ff]
-                            while d <= f:
-                                fechas_just.append(d.date())
-                                d += timedelta(days=1)
-                        except: pass
-                    col_mot_eco = next((c for c in economicos.columns if "MOTIVO" in c.upper()), None)
-                    for fecha_eco in fechas_just:
-                        if fi <= fecha_eco <= ff:
-                            mot_eco = str(r.get(col_mot_eco,"")).strip() if col_mot_eco else ""
-                            resultado.setdefault(rfc, {})[fecha_eco] = f"Día económico|motivo:{mot_eco}" if mot_eco else "Día económico"
-
-        # Incapacidades
-        if not incapacidades.empty:
-            col_rfc  = next((c for c in incapacidades.columns if "RFC" in c.upper()), None)
-            col_fi   = next((c for c in incapacidades.columns if "INICIO" in c.upper()), None)
-            col_ff   = next((c for c in incapacidades.columns if "TERMINO" in c.upper() or ("FIN" in c.upper() and "INICIO" not in c.upper())), None)
-            col_tipo = next((c for c in incapacidades.columns if "TIPO" in c.upper()), None)
-            if col_rfc and col_fi and col_ff:
-                for _, r in incapacidades.iterrows():
-                    rfc = str(r.get(col_rfc,"")).strip().upper()
-                    if not rfc: continue
-                    tipo = str(r.get(col_tipo,"Incapacidad")).strip() if col_tipo else "Incapacidad"
-                    try:
-                        d = r[col_fi]
-                        f = r[col_ff]
-                        while d <= f:
-                            if fi <= d.date() <= ff:
-                                resultado.setdefault(rfc, {})[d.date()] = tipo or "Incapacidad"
-                            d += timedelta(days=1)
-                    except: pass
-
-        # Comisiones y pases autorizados desde Incidencias
-        if not incidencias_df.empty:
-            for _, r in incidencias_df.iterrows():
-                rfc  = str(r.get("RFC","")).strip().upper()
-                tipo = str(r.get("TIPO","")).strip()
-                if not rfc: continue
-                try:
-                    d = r["FECHA_INICIO"]
-                    f = r["FECHA_FIN"]
-                    if pd.isna(d) or pd.isna(f): continue
-                    # Fechas salteadas: si el MOTIVO trae "Fechas: dd/mm/aaaa, ...",
-                    # solo esos días se justifican (mismo formato que ya se usa
-                    # en días económicos). Sin esta lista, una comisión de lunes
-                    # y jueves justificaba también martes y miércoles por rango.
-                    _dias_exactos = set()
-                    _mot_inc = str(r.get("MOTIVO", ""))
-                    if "Fechas:" in _mot_inc:
-                        for _fs in _mot_inc.split("Fechas:")[1].split(","):
-                            for _fmt in ("%d/%m/%Y", "%Y-%m-%d"):
-                                try:
-                                    _dias_exactos.add(datetime.strptime(_fs.strip()[:10], _fmt).date())
-                                    break
-                                except Exception:
-                                    pass
-                    while d <= f:
-                        if fi <= d.date() <= ff and (not _dias_exactos or d.date() in _dias_exactos):
-                            if tipo == "COM":
-                                resultado.setdefault(rfc, {})[d.date()] = "Comisión"
-                            elif tipo == "RGU":
-                                resultado.setdefault(rfc, {})[d.date()] = "Reposición de guardias"
-                            elif tipo == "PEN":
-                                # Pase de entrada aprobado SIEMPRE justifica el retardo.
-                                # El motivo del empleado (si lo hay) es informativo.
-                                motivo_real = extraer_motivo_usuario(r.get("MOTIVO",""))
-                                if motivo_real:
-                                    resultado.setdefault(rfc, {}).setdefault(d.date(), f"Pase de entrada|motivo:{motivo_real}")
-                                else:
-                                    resultado.setdefault(rfc, {}).setdefault(d.date(), "Pase de entrada")
-                            elif tipo == "PSE":
-                                motivo_pse = str(r.get("MOTIVO","")).lower()
-                                hora_ret   = str(r.get("HORA_RETORNO","")).strip()
-                                mot_real   = extraer_motivo_usuario(r.get("MOTIVO",""))
-                                suf = f"|motivo:{mot_real}" if mot_real else ""
-                                if "sin retorno" in motivo_pse:
-                                    resultado.setdefault(rfc, {})[d.date()] = f"Pase de salida sin retorno{suf}"
-                                elif hora_ret:
-                                    resultado.setdefault(rfc, {})[d.date()] = f"Pase de salida|retorno:{hora_ret}{suf}"
-                                else:
-                                    resultado.setdefault(rfc, {}).setdefault(d.date(), f"Pase de salida{suf}")
-                        d += timedelta(days=1)
-                except: pass
-
-        # Eventos institucionales — aplican a TODOS los empleados
-        if eventos_inst:
-            from gspread import Client  # solo para verificar que tenemos clientes cargados
-            for ev in eventos_inst:
-                fecha_ev = ev["fecha"] if isinstance(ev["fecha"], type(fi)) else ev["fecha"]
-                if fi <= fecha_ev <= ff:
-                    # Agregar a todos los empleados activos
-                    for rfc_emp in set(list(resultado.keys()) + ["__GLOBAL__"]):
-                        resultado.setdefault("__GLOBAL__", {})[fecha_ev] = ev["motivo"]
-        return resultado
 
     def get_horario_fecha(emp_row, fecha, historial_df):
         rfc = str(emp_row.get("RFC","")).upper().strip()
@@ -639,7 +653,7 @@ def render_checador(deps):
                     })
 
                 # ── SALIDA ANTICIPADA: salió antes de su hora programada ──
-                # (caso César: horario 7:00-13:00, checando 7:00-12:00 sin que
+                # (caso real: horario 7:00-13:00, checando 7:00-12:00 sin que
                 # nada lo detectara — el sistema solo vigilaba la entrada).
                 # No aplica si tiene pase de salida o justificante de día completo.
                 _jts_up = _jts.strip().upper()
@@ -1205,9 +1219,9 @@ def render_checador(deps):
             empleados_ch  = load_emp_ch()
             festivos_ch   = load_fest_ch()
             historial_df  = load_hist_ch()
-            economicos    = load_economicos_ch(_fi_str, _ff_str)
-            incapacidades = load_incapacidades_ch(_fi_str, _ff_str)
-            incidencias_p = load_incidencias_ch(_fi_str, _ff_str)
+            economicos    = load_economicos_ch(get_client_ch(), _fi_str, _ff_str)
+            incapacidades = load_incapacidades_ch(get_client_ch(), _fi_str, _ff_str)
+            incidencias_p = load_incidencias_ch(get_client_ch(), _fi_str, _ff_str)
 
             fi = datetime.strptime(_fi_str, "%Y-%m-%d").date()
             ff = datetime.strptime(_ff_str, "%Y-%m-%d").date()
