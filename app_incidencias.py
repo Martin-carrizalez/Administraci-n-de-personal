@@ -4094,13 +4094,26 @@ except Exception as _e_cm:
     _ERROR_CM = str(_e_cm)
 
 if _cm_module is not None:
-    _cm_module.configurar(get_client=get_client, error_amable=_error_amable,
-                          columnas_horario=COLUMNAS_HORARIO,
-                          subir_archivo_drive=subir_archivo_drive,
-                          carpeta_asistencia_cm=DRIVE_ASISTENCIA_CM_FOLDER,
-                          # El coordinador ve el MISMO saldo que el asesor:
-                          # se le pasa la función, no se recalcula allá.
-                          saldo_economicos=saldo_economicos_rfc)
+    # Los argumentos se arman según lo que la versión instalada de cm_module
+    # sepa recibir. Sin esto, subir app_incidencias sin subir cm_module (o al
+    # revés) reventaba la app ENTERA aquí, antes de pintar nada: el módulo de
+    # Centros de Maestros es opcional, y un desfase entre archivos debe
+    # apagar esa sección, no el portal.
+    _cfg_cm = dict(get_client=get_client, error_amable=_error_amable,
+                   columnas_horario=COLUMNAS_HORARIO,
+                   subir_archivo_drive=subir_archivo_drive,
+                   carpeta_asistencia_cm=DRIVE_ASISTENCIA_CM_FOLDER)
+    try:
+        import inspect as _inspect
+        if "saldo_economicos" in _inspect.signature(
+                _cm_module.configurar).parameters:
+            # El coordinador ve el MISMO saldo que el asesor: se le pasa la
+            # función, no se recalcula allá.
+            _cfg_cm["saldo_economicos"] = saldo_economicos_rfc
+        _cm_module.configurar(**_cfg_cm)
+    except Exception as _e_cfg_cm:
+        _cm_module = None
+        _ERROR_CM = f"no se pudo configurar: {_e_cfg_cm}"
 
 # ── Asistencia por QR rotativo: asistencia_qr.py ──
 # Reemplaza la toma de lista manual (retirada del sidebar y del enrutador).
