@@ -4497,12 +4497,12 @@ def main():
                          use_container_width=True):
                 st.session_state["vista"] = "pendientes_rh"
                 st.rerun()
-        # Quién no viene: lo ve quien tiene gente a cargo. No se restringe
+        # Quién no está: lo ve quien tiene gente a cargo. No se restringe
         # por secret: si nadie lo trae como jefe en el padrón, la vista se lo
         # dice y no muestra a nadie — un empleado sin equipo no ve datos de
         # terceros.
         if render_ausencias is not None:
-            if st.button("👥 Quién no viene", key="btn_ausencias_sidebar",
+            if st.button("👥 Quién no está", key="btn_ausencias_sidebar",
                          use_container_width=True):
                 st.session_state["vista"] = "ausencias"
                 st.rerun()

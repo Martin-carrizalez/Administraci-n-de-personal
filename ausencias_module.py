@@ -1,9 +1,14 @@
 """
-MÓDULO: Quién no viene — DFC/SEJ
-=================================
+MÓDULO: Quién no está — DFC/SEJ
+================================
 Para que cada coordinador y cada responsable vea, antes de que pase, quién de
-su gente no va a estar y por qué: día económico, incapacidad, comisión, pase
-de salida o de entrada, cambio de horario o guardia.
+su gente no va a estar —o no va a estar COMPLETO— y por qué: día económico,
+incapacidad, comisión, pase de salida o de entrada, cambio de horario o
+guardia.
+
+Se llama "quién no está" y no "quién no viene" porque no es lo mismo: con un
+pase de entrada o de salida la persona sí viene, solo que llega tarde o se va
+antes, y para saber con cuánta gente se cuenta eso pesa igual.
 
 El objetivo no es vigilar al personal: es que quien coordina sepa con cuánta
 gente va a contar el martes, y pueda mover una actividad a tiempo en vez de
@@ -75,15 +80,94 @@ def _solo_nombre(jefe_raw) -> str:
     return t.strip()
 
 
-def _etiqueta(clave):
-    """(emoji, texto) de una causa. Lo que no se reconoce se muestra tal cual
-    en vez de esconderse: es preferible un nombre feo a una ausencia muda."""
-    k = _norm(clave).upper().replace(" ", "_")
-    for posible in (k, k.split("_")[0]):
-        if posible in ETIQUETA:
-            return ETIQUETA[posible]
-    return ("⚫", str(clave).replace("_", " ").capitalize())
+# Partículas que no identifican a nadie y que unos capturan y otros no.
+_PARTICULAS = {"de", "del", "la", "las", "los", "y", "san", "mc"}
 
+
+def _palabras(nombre) -> set:
+    """El nombre vuelto conjunto de palabras, sin acentos ni partículas."""
+    return {p for p in re.findall(r"[a-z0-9ñ]+", _norm(_solo_nombre(nombre)))
+            if p not in _PARTICULAS and len(p) > 1}
+
+
+def mismo_nombre(a, b) -> bool:
+    """¿Dos formas de escribir a la misma persona?
+
+    Compara CONJUNTOS de palabras, no cadenas: la sesión trae el nombre con
+    los apellidos primero ("RAMOS RICO HECTOR MANUEL") y en el padrón los
+    jefes están escritos empezando por el nombre ("Héctor Manuel Ramos
+    Rico"). Son la misma persona y una comparación por orden las daba por
+    distintas, que es como un coordinador se quedaba sin ver a su equipo.
+
+    También vale que uno sea parte del otro —el padrón suele omitir el
+    primer nombre—, pero exigiendo al menos dos palabras en común: con una
+    sola, cualquier tocayo entraría al equipo equivocado.
+    """
+    pa, pb = _palabras(a), _palabras(b)
+    if not pa or not pb:
+        return False
+    if pa == pb:
+        return True
+    chico, grande = (pa, pb) if len(pa) <= len(pb) else (pb, pa)
+    return len(chico) >= 2 and chico <= grande
+
+
+
+
+def _etiqueta(clave):
+    """(emoji, texto) a partir de lo que devuelve build_justificantes_rfc.
+
+    Esa función NO devuelve siglas: devuelve frases en español con datos
+    pegados detrás de barras verticales, p. ej.
+
+        "Pase de salida|retorno:14:00|motivo:trámite"
+
+    Mapear siglas, como estaba antes, hacía que los pases cayeran al caso
+    por omisión: salían con el emoji equivocado y con el "|motivo:" crudo a
+    la vista. Aquí se parte la cadena y cada dato se escribe donde toca.
+
+    Lo que no se reconoce viene de la columna TIPO de Incapacidades, que
+    trae el diagnóstico. Se muestra como "Incapacidad" a secas: quien
+    coordina necesita saber que la persona no está, no de qué está enferma.
+    """
+    bruto = str(clave or "").strip()
+    if not bruto:
+        return ("", "")
+    partes = bruto.split("|")
+    base = partes[0].strip()
+    extras = {}
+    for p in partes[1:]:
+        if ":" in p:
+            k, v = p.split(":", 1)
+            extras[k.strip().lower()] = v.strip()
+
+    b = _norm(base)
+    if b.startswith("pase de entrada"):
+        emoji, texto = "🟠", "Pase de entrada"
+    elif b.startswith("pase de salida sin retorno"):
+        emoji, texto = "🟠", "Pase de salida sin retorno"
+    elif b.startswith("pase de salida"):
+        emoji, texto = "🟠", "Pase de salida"
+    elif b.startswith("dia economico"):
+        emoji, texto = "🟡", "Día económico"
+    elif b.startswith("comision"):
+        emoji, texto = "🔵", "Comisión"
+    elif b.startswith("reposicion"):
+        emoji, texto = "🟢", "Reposición de guardias"
+    elif "cumple" in b:
+        emoji, texto = "🎂", "Día de cumpleaños"
+    elif "evento" in b or "institucional" in b:
+        emoji, texto = "⚪", base
+    else:
+        emoji, texto = "🔴", "Incapacidad"
+
+    if extras.get("retorno"):
+        texto += f", regresa {extras['retorno']}"
+    # El motivo solo se muestra de lo que el propio empleado escribió al
+    # pedir su pase o su día; de una incapacidad no se muestra nada.
+    if extras.get("motivo") and emoji != "🔴":
+        texto += f" — {extras['motivo']}"
+    return emoji, texto
 
 def _fecha_corta(f):
     return f"{DIAS_ES[f.weekday()][:3]} {f.day}"
@@ -116,8 +200,8 @@ def _rango(opcion, hoy=None):
 def mi_gente(padron, nombre_jefe, es_admin=False):
     """DataFrame con el personal que reporta a esa persona.
 
-    Se compara solo el nombre y normalizado (sin acentos ni mayúsculas),
-    porque en el Sheet el mismo jefe aparece escrito de varias formas.
+    La comparación es por palabras y sin importar el orden (ver
+    mismo_nombre): la sesión trae los apellidos primero y el padrón no.
     """
     if padron is None or padron.empty:
         return pd.DataFrame()
@@ -125,11 +209,10 @@ def mi_gente(padron, nombre_jefe, es_admin=False):
         return pd.DataFrame()
     if es_admin:
         return padron.copy()
-    objetivo = _norm(_solo_nombre(nombre_jefe))
-    if not objetivo:
+    if not _palabras(nombre_jefe):
         return pd.DataFrame()
-    jefes = padron["JEFE_INMEDIATO"].map(lambda v: _norm(_solo_nombre(v)))
-    return padron[jefes == objetivo].copy()
+    toca = padron["JEFE_INMEDIATO"].map(lambda v: mismo_nombre(v, nombre_jefe))
+    return padron[toca].copy()
 
 
 def jefes_del_padron(padron):
@@ -163,12 +246,17 @@ def ausencias_por_dia(just_rfc, gente, desde, hasta):
         if rfc:
             nombres[rfc] = _nombre_de(r)
 
+    # Los eventos institucionales viajan bajo __GLOBAL__ y aplican a TODOS.
+    # Sin esto, un día en que nadie labora se vería como día completo y el
+    # tablero diría que hay personal cuando no hay ninguno.
+    globales = just_rfc.get("__GLOBAL__") or {}
+
     salida = []
     f = desde
     while f <= hasta:
         dia = []
         for rfc, nombre in nombres.items():
-            causa = (just_rfc.get(rfc) or {}).get(f)
+            causa = (just_rfc.get(rfc) or {}).get(f) or globales.get(f)
             if causa:
                 emoji, texto = _etiqueta(causa)
                 dia.append((nombre, emoji, texto))
@@ -273,9 +361,10 @@ def _tarjeta_dia(f, ausentes, total, hoy):
 
 def render_ausencias(deps):
     """deps: cargar_padron, cargar_solicitudes_eco, get_client, rol, nombre."""
-    st.markdown("### 👥 Quién no viene")
-    st.caption("Tu gente y los días en que no va a estar, para que sepas con "
-               "cuántos cuentas antes de comprometer una actividad.")
+    st.markdown("### 👥 Quién no está")
+    st.caption("Tu gente y los días en que falta o no está completa —incluye "
+               "pases de entrada y de salida—, para que sepas con cuántos "
+               "cuentas antes de comprometer una actividad.")
 
     es_admin = str(deps.get("rol", "")).lower() == "admin"
     try:
@@ -311,7 +400,7 @@ def render_ausencias(deps):
                 "escrito el nombre en la columna JEFE_INMEDIATO.")
         return
 
-    t_dias, t_saldo = st.tabs(["📅 Quién no viene", "🟡 Días económicos"])
+    t_dias, t_saldo = st.tabs(["📅 Quién no está", "🟡 Días económicos"])
     with t_saldo:
         _apartado_saldos(gente, deps.get("saldo_economicos"))
 
@@ -365,7 +454,7 @@ def _vista_dias(deps, gente, titular, es_admin):
     # día del periodo, no el promedio.
     con_faltas = [(f, a) for f, a in dias if a]
     if not con_faltas:
-        st.success(f"✅ Nadie de tu equipo tiene ausencias registradas "
+        st.success(f"✅ Nadie de tu equipo tiene ausencias ni pases registrados "
                    f"{titulo}. Cuentas con los {total}.")
     else:
         peor = max(con_faltas, key=lambda x: len(x[1]))
