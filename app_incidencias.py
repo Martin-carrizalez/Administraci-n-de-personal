@@ -3844,7 +3844,10 @@ def _aviso_vacaciones():
     enseña a la gente a ignorar los avisos.
     """
     v = VACACIONES
-    hoy = today_mx()
+    # La hora de México, igual que el resto del archivo: con date.today() el
+    # servidor de Streamlit (UTC) adelanta el cambio de día y el aviso
+    # desaparecería seis horas antes de tiempo.
+    hoy = datetime.now(pytz.timezone("America/Mexico_City")).date()
     if hoy > v["regreso"] or (v["inicio"] - hoy).days > 45:
         return
     fmt = lambda f: f"{f.day} de {_MESES_ES[f.month - 1]} de {f.year}"
