@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v26 · super-vl 0.8s · 20-nov"
+ARI_VERSION = "agente v28 · semáforo del motor · 20-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -394,6 +394,63 @@ def _resta(fin):
     return max(0.0, fin - time.monotonic()) if fin else 999.0
 
 
+def _anotar_motor(proveedor, modelo, con_tools, segundos=None):
+    """Guarda QUIÉN contestó el último turno, para el semáforo del sidebar.
+
+    Se anota en el punto donde la llamada tuvo éxito, no donde se eligió el
+    modelo: la lista es una cadena de respaldos y lo único que importa es
+    cuál respondió de verdad.
+    """
+    st.session_state["_ari_motor"] = {
+        "proveedor": proveedor, "modelo": modelo,
+        "tools": bool(con_tools), "seg": segundos,
+        "hora": datetime.now(pytz.timezone("America/Mexico_City")).strftime("%H:%M"),
+    }
+
+
+def semaforo_motor(contenedor=None):
+    """Semáforo del motor que atendió el ÚLTIMO turno de ARI.
+
+    Se dibuja en el sidebar por defecto. Para tenerlo en todas las páginas y
+    no solo cuando se renderiza ARI, llamarlo desde el sidebar de la app:
+        import ari_module; ari_module.semaforo_motor()
+
+    Los colores dicen qué se puede hacer AHORA, no qué modelo hay puesto:
+      🟢 agente activo  — el pase se arma conversando, con herramientas.
+      🟢 chat activo    — contestó el cerebro de dudas; sano.
+      🟡 respaldo        — contestó Gemini, que NO tiene herramientas: las
+                           dudas se resuelven, pero un pase caería al
+                           formulario.
+      🔴 modo manual     — el agente no está disponible en esta sesión.
+      ⚪ sin usar        — nadie ha contestado todavía.
+
+    El nombre del modelo solo se le muestra al admin: al empleado le dice
+    algo que no puede accionar.
+    """
+    caja = st.sidebar if contenedor is None else contenedor
+    m = st.session_state.get("_ari_motor") or {}
+    admin = (st.session_state.get("rol") == "admin"
+             or st.secrets.get("ari_debug"))
+
+    if st.session_state.get("_ari_sin_tools"):
+        luz, etq = "🔴", "ARI · modo manual"
+    elif not m:
+        luz, etq = "⚪", "ARI · sin usar"
+    elif m.get("proveedor") == "gemini":
+        luz, etq = "🟡", "ARI · respaldo"
+    elif m.get("tools"):
+        luz, etq = "🟢", "ARI · agente activo"
+    else:
+        luz, etq = "🟢", "ARI · chat activo"
+
+    caja.markdown(f"{luz} **{etq}**")
+    if admin and m:
+        _seg = f" · {m['seg']}s" if m.get("seg") is not None else ""
+        caja.caption(f"{m.get('modelo', '?')}{_seg} · {m.get('hora', '')}")
+    elif admin:
+        caja.caption("todavía no se ha llamado a ningún modelo")
+
+
 def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
                       herramientas=None, fin=None, forzar=None):
     """Llama al catálogo de NVIDIA. `mensajes` va en formato OpenAI.
@@ -414,6 +471,7 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
             break
         for intento in range(REINTENTOS_503):
             try:
+                _t_ini = time.monotonic()
                 cuerpo = {"model": modelo, "messages": mensajes,
                           "temperature": temperatura, "top_p": 0.9,
                           "max_tokens": 1024, "stream": False,
@@ -446,11 +504,15 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
                         # agente necesita tool_calls, no solo el texto.
                         msg["content"] = _limpiar_razonamiento(msg.get("content") or "")
                         if msg.get("tool_calls") or msg["content"]:
+                            _anotar_motor("nvidia", modelo, True,
+                                          round(time.monotonic() - _t_ini, 1))
                             return msg
                         errores.append(f"{modelo} → respuesta vacía")
                         break
                     txt = _limpiar_razonamiento(msg.get("content") or "")
                     if txt:
+                        _anotar_motor("nvidia", modelo, False,
+                                      round(time.monotonic() - _t_ini, 1))
                         return txt
                     # Si llega aquí con content vacío es que el modelo razonó
                     # pese a enable_thinking=False. NO se usa su
@@ -508,6 +570,29 @@ def prompt_agente(nombre=""):
         "existe cuando el empleado aprieta el botón.")
 
 
+_AFIRMACIONES = {
+    "si", "sí", "confirmo", "sí confirmo", "si confirmo", "confirmado",
+    "claro", "ok", "okay", "okey", "va", "dale", "adelante", "correcto",
+    "exacto", "asi es", "así es", "esta bien", "está bien", "de acuerdo",
+    "registralo", "regístralo", "registra", "registrar", "afirmativo",
+    "sip", "simon", "simón", "perfecto", "listo", "hazlo", "ya", "yes",
+    "si por favor", "sí por favor", "si adelante", "sí adelante",
+}
+
+
+def _es_confirmacion(texto) -> bool:
+    """¿El mensaje es un "sí" y nada más?
+
+    Se exige que TODO el mensaje sea la afirmación. "si" confirma; "si pero a
+    las 2" no, porque ahí el empleado está corrigiendo y eso le toca al
+    modelo. Sin esa exigencia, un "si" dentro de una frase registraría un
+    pase que el empleado estaba cambiando.
+    """
+    t = _txt(texto).lower().strip()
+    t = " ".join(re.sub(r"[¡!¿?.,;:]+", " ", t).split())
+    return t in _AFIRMACIONES
+
+
 def _agente(mensajes, deps, nombre=""):
     """Bucle del agente: el modelo decide, las herramientas ejecutan.
 
@@ -522,6 +607,24 @@ def _agente(mensajes, deps, nombre=""):
     hist = [{"role": "system", "content": "detailed thinking off"},
             {"role": "system", "content": prompt_agente(nombre)}] + list(mensajes)
     pasos = []
+
+    # CONFIRMACION: la decide el código, no el modelo.
+    # El agente recibe solo los ultimos mensajes de TEXTO; el historial de
+    # tool_calls no sobrevive al turno. Asi que cuando el empleado contesta
+    # "confirmo", el modelo no tiene registro de haber preparado nada y
+    # vuelve a llamar a preparar_pase: el empleado ve el MISMO resumen y la
+    # MISMA pregunta otra vez, y tiene que confirmar dos veces. Pasó con el
+    # folio PEN-2026-0075. El código sí sabe que el pase está completo en
+    # ari_pase, asi que aqui no se le pregunta al modelo: se saca el botón.
+    # De paso, se ahorra una llamada por pase.
+    _ultimo = next((m.get("content") for m in reversed(list(mensajes))
+                    if isinstance(m, dict) and m.get("role") == "user"), "")
+    _ya = st.session_state.get("ari_pase") or {}
+    if _ya and not _falta_del_pase(_ya) and _es_confirmacion(_ultimo):
+        st.session_state["_ari_mostrar_boton"] = True
+        return ("Listo. Tu pase ya está armado: aprieta el botón de "
+                "registrar para que quede."), pasos
+
     fin = time.monotonic() + PRESUPUESTO_TURNO
     for _ in range(MAX_PASOS_AGENTE):
         if _resta(fin) < 3:
@@ -550,16 +653,19 @@ def _agente(mensajes, deps, nombre=""):
                 return (msg.get("content") or "").strip(), pasos
         hist.append(msg)
         for lc in llamadas:
-            nombre = lc["function"]["name"]
+            # OJO: no reutilizar `nombre`, que es el parámetro del agente
+            # (el del empleado, el que va en el prompt). Pisarlo aquí era una
+            # trampa esperando a que alguien usara `nombre` después del bucle.
+            herr = lc["function"]["name"]
             try:
                 args = json.loads(lc["function"].get("arguments") or "{}")
             except Exception:
                 args = {}
-            resultado = _ejecutar_herramienta(nombre, args, deps)
-            pasos.append({"herramienta": nombre, "args": args,
+            resultado = _ejecutar_herramienta(herr, args, deps)
+            pasos.append({"herramienta": herr, "args": args,
                           "resultado": resultado})
             hist.append({"role": "tool", "tool_call_id": lc.get("id", ""),
-                         "name": nombre,
+                         "name": herr,
                          "content": json.dumps(resultado, ensure_ascii=False)})
     # Se acabaron los pasos sin una respuesta final: no se deja al empleado
     # con la pantalla muda.
@@ -582,6 +688,7 @@ def _responder_gemini(sistema, mensajes, temperatura=0.2, json_mode=False):
                              generation_config=cfg).text or "").strip()
     if not txt:
         raise RuntimeError("Gemini devolvió una respuesta vacía")
+    _anotar_motor("gemini", GEMINI_MODEL, False)
     return _limpiar_razonamiento(txt)
 
 
@@ -2014,6 +2121,16 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
     # nuevo o uno viejo en caché, y se depuró a ciegas. Si esta línea no dice
     # ARI_VERSION, lo que está desplegado NO es este archivo.
     st.caption(f"· {ARI_VERSION} ·")
+    # En el sidebar, para que se vea sin abrir el panel de diagnóstico.
+    # Si algún día se quiere en TODAS las páginas, se llama desde el sidebar
+    # de app_incidencias; aquí no hace falta tocar esa app.
+    try:
+        semaforo_motor()
+    except Exception:
+        # Es un indicador, no una función. Si el sidebar no está disponible
+        # o cambia en una versión de Streamlit, ARI tiene que seguir
+        # funcionando: un adorno no tumba la captura de pases.
+        pass
 
     if "ari_messages" not in st.session_state:
         st.session_state.ari_messages = []
