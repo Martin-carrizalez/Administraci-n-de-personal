@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v25 · thinking apagado de verdad · 20-nov"
+ARI_VERSION = "agente v26 · super-vl 0.8s · 20-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -157,17 +157,19 @@ NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # todos cayeron al formulario de emergencia, y el mensaje decia "saturado".
 # De ahi la regla: nunca un solo modelo en esta lista. Los nombres se mueren
 # con fecha y el 410 no avisa antes.
-# Probado el 20-nov con el panel de motores:
-#   lightning-30b-a3b  → 200, razono sobre llamar a preparar_pase. OK.
-#   super-vl-120b-a12b → 200, lo mismo pero mas grande (va segundo).
-#   bolt-e4b           → 200 pero contesto EN TEXTO pidiendo la fecha: no
-#                        usa herramientas. Fuera de esta lista.
-#   kimi-k3.1-pro      → ReadTimeout a los 45 s. Inservible con 32 s de
-#                        presupuesto por turno. Fuera.
+# Medido el 20-nov con el panel de motores, ya con enable_thinking=False:
+#   super-vl-120b-a12b → llamó a preparar_pase en 0.8 s.  ← el bueno
+#   minimax-m3.1-flash → llamó a preparar_pase en 2.5 s.  ← respaldo
+#   lightning-30b-a3b  → contestó TEXTO en inglés, no usó herramientas.
+#                        Sirve para chat, no para el agente. Fuera de aquí.
+#   bolt-e4b           → igual, texto. Fuera de aquí.
+#   kimi-k3.1-pro      → ReadTimeout a los 45 s. Fuera.
+# Para comparar: el llama que murió el 16-nov tardaba 6.0 s. Son 7 veces más
+# rápido. Nunca dejar esta lista con un solo modelo (ver el 410 de llama).
 NVIDIA_MODELS_TOOLS = [
-    "nvidia/nemotron-3.5-lightning-30b-a3b",
-    "nvidia/nemotron-3.5-super-vl-120b-a12b",
-    "minimaxai/minimax-m3.1-flash",            # tercer respaldo, por probar
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",   # 0.8 s · tool_calls OK
+    "minimaxai/minimax-m3.1-flash",             # 2.5 s · tool_calls OK
+    "mistralai/mistral-large-4-1t-a52b",        # tercer respaldo, por probar
 ]
 
 # CHAT — dudas de RH, sin herramientas. Aquí sí manda la velocidad.
