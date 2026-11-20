@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v24 · sin llama (EOL 16-nov) · 20-nov"
+ARI_VERSION = "agente v25 · thinking apagado de verdad · 20-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -157,11 +157,17 @@ NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # todos cayeron al formulario de emergencia, y el mensaje decia "saturado".
 # De ahi la regla: nunca un solo modelo en esta lista. Los nombres se mueren
 # con fecha y el 410 no avisa antes.
+# Probado el 20-nov con el panel de motores:
+#   lightning-30b-a3b  → 200, razono sobre llamar a preparar_pase. OK.
+#   super-vl-120b-a12b → 200, lo mismo pero mas grande (va segundo).
+#   bolt-e4b           → 200 pero contesto EN TEXTO pidiendo la fecha: no
+#                        usa herramientas. Fuera de esta lista.
+#   kimi-k3.1-pro      → ReadTimeout a los 45 s. Inservible con 32 s de
+#                        presupuesto por turno. Fuera.
 NVIDIA_MODELS_TOOLS = [
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
     "nvidia/nemotron-3.5-super-vl-120b-a12b",
-    "nvidia/nemotron-3.5-lightning-30b-a3b",   # 3.4 s probado en chat
-    "nvidia/nemotron-3.5-bolt-e4b",
-    "moonshotai/kimi-k3.1-pro",
+    "minimaxai/minimax-m3.1-flash",            # tercer respaldo, por probar
 ]
 
 # CHAT — dudas de RH, sin herramientas. Aquí sí manda la velocidad.
@@ -169,7 +175,7 @@ NVIDIA_MODELS_TOOLS = [
 # primero; si devuelve vacío, el código ya salta solo al siguiente.
 NVIDIA_MODELS_CHAT = [
     "nvidia/nemotron-3.5-lightning-30b-a3b",   # 3.4 s
-    "nvidia/nemotron-3.5-bolt-e4b",
+    "nvidia/nemotron-3.5-bolt-e4b",            # contesta texto, sirve aqui
     "nvidia/nemotron-3.5-super-vl-120b-a12b",
 ]
 
@@ -409,7 +415,15 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
                 cuerpo = {"model": modelo, "messages": mensajes,
                           "temperature": temperatura, "top_p": 0.9,
                           "max_tokens": 1024, "stream": False,
-                          "chat_template_kwargs": {"thinking": False}}
+                          # DOS claves a propósito. nemotron-3.5 usa
+                          # "enable_thinking" (es la que trae el snippet
+                          # oficial de NVIDIA); mandábamos solo "thinking",
+                          # que esos modelos ignoran. Resultado: razonaban
+                          # siempre, devolvían content=null, el código los
+                          # daba por vacíos, recorría la lista entera y
+                          # acababa en Gemini. De ahí los minutos de espera.
+                          "chat_template_kwargs": {"thinking": False,
+                                                   "enable_thinking": False}}
                 if herramientas:
                     cuerpo["tools"] = herramientas
                     cuerpo["tool_choice"] = (
@@ -436,6 +450,15 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
                     txt = _limpiar_razonamiento(msg.get("content") or "")
                     if txt:
                         return txt
+                    # Si llega aquí con content vacío es que el modelo razonó
+                    # pese a enable_thinking=False. NO se usa su
+                    # reasoning_content como respuesta: es su monólogo
+                    # interno, viene en inglés y el empleado no tiene por qué
+                    # leerlo en una herramienta de RH. Se pasa al siguiente.
+                    if (msg.get("reasoning_content") or "").strip():
+                        errores.append(f"{modelo} → razonó e ignoró "
+                                       f"enable_thinking (content vacío)")
+                        break
                     errores.append(f"{modelo} → respuesta vacía")
                     break
                 if r.status_code in (429, 503) and intento < REINTENTOS_503 - 1:
@@ -2149,39 +2172,65 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                         f"GEMINI_API_KEY: {'ausente' if not _gk else 'presente'}"
                         f"  (largo {len(str(_gk)) if _gk else 0})", language=None)
 
-                st.write("**NVIDIA — modelo por modelo**")
-                for _m in dict.fromkeys(NVIDIA_MODELS_TOOLS + NVIDIA_MODELS_CHAT):
-                    try:
-                        _r = requests.post(
-                            NVIDIA_URL,
-                            headers={"Authorization": f"Bearer {_nvidia_key()}",
-                                     "Accept": "application/json",
-                                     "Content-Type": "application/json"},
-                            json={"model": _m, "max_tokens": 5, "stream": False,
-                                  "messages": [{"role": "user", "content": "di ok"}]},
-                            timeout=45)
-                        st.code(f"{_m} → HTTP {_r.status_code} {_r.text[:160]}", language=None)
-                    except Exception as _e:
-                        st.code(f"{_m} → {type(_e).__name__}: {str(_e)[:160]}", language=None)
+                # La prueba manda EXACTAMENTE el mismo cuerpo que el agente
+                # en producción, chat_template_kwargs incluido. Antes no lo
+                # mandaba, así que el panel medía otra cosa: los modelos
+                # razonaban en la prueba y tardaban minutos, y lo que decía
+                # el panel no era lo que iba a pasar en el chat.
+                _CTK = {"thinking": False, "enable_thinking": False}
+                _hdr_d = {"Authorization": f"Bearer {_nvidia_key()}",
+                          "Accept": "application/json",
+                          "Content-Type": "application/json"}
 
-                st.write("**NVIDIA — ¿acepta herramientas?**")
-                for _mt in NVIDIA_MODELS_TOOLS:
-                    st.caption(_mt)
+                def _probar(modelo, con_tools):
+                    """Devuelve una línea legible: veredicto, segundos y causa."""
+                    cuerpo = {"model": modelo, "stream": False,
+                              "max_tokens": 250 if con_tools else 16,
+                              "chat_template_kwargs": _CTK,
+                              "messages": [{"role": "user", "content": (
+                                  "necesito salir hoy a las 12 y ya no regreso"
+                                  if con_tools else "responde solo: ok")}]}
+                    if con_tools:
+                        cuerpo["tools"] = HERRAMIENTAS_PASE
+                        cuerpo["tool_choice"] = "auto"
+                    _t0 = time.time()
                     try:
-                        _r = requests.post(
-                            NVIDIA_URL,
-                            headers={"Authorization": f"Bearer {_nvidia_key()}",
-                                     "Accept": "application/json",
-                                     "Content-Type": "application/json"},
-                            json={"model": _mt, "max_tokens": 60,
-                                  "stream": False, "tools": HERRAMIENTAS_PASE,
-                                  "tool_choice": "auto",
-                                  "messages": [{"role": "user",
-                                                "content": "necesito salir hoy a las 12 y ya no regreso"}]},
-                            timeout=60)
-                        st.code(f"HTTP {_r.status_code} {_r.text[:300]}", language=None)
+                        # 20 s, no 45: el turno real son 32 s para TODO. Un
+                        # modelo que tarda más aquí no sirve allá, y el panel
+                        # no tiene por qué tardar minutos en decirlo.
+                        _r = requests.post(NVIDIA_URL, headers=_hdr_d,
+                                           json=cuerpo, timeout=20)
                     except Exception as _e:
-                        st.code(f"{type(_e).__name__}: {str(_e)[:200]}", language=None)
+                        return (f"❌ {modelo} — {type(_e).__name__} "
+                                f"({time.time() - _t0:.1f} s)")
+                    _s = f"{time.time() - _t0:.1f} s"
+                    if _r.status_code != 200:
+                        return f"❌ {modelo} — HTTP {_r.status_code} · {_r.text[:120]} ({_s})"
+                    try:
+                        _msg = _r.json()["choices"][0]["message"]
+                    except Exception:
+                        return f"❌ {modelo} — respuesta ilegible ({_s})"
+                    _tc = _msg.get("tool_calls") or []
+                    _cont = (_msg.get("content") or "").strip()
+                    _razono = bool((_msg.get("reasoning_content") or "").strip())
+                    _nota = " · RAZONÓ (lento)" if _razono else ""
+                    if con_tools:
+                        if _tc:
+                            _n = _tc[0].get("function", {}).get("name", "?")
+                            return f"✅ {modelo} — llamó a {_n} ({_s}){_nota}"
+                        return (f"⚠️ {modelo} — contestó TEXTO, no usó "
+                                f"herramientas ({_s}){_nota}: {_cont[:90]}")
+                    if _cont or _razono:
+                        return f"✅ {modelo} — contesta ({_s}){_nota}"
+                    return f"⚠️ {modelo} — respuesta vacía ({_s}){_nota}"
+
+                st.write("**NVIDIA — ¿acepta herramientas?** (esta es la que importa)")
+                for _mt in NVIDIA_MODELS_TOOLS:
+                    st.code(_probar(_mt, True), language=None)
+
+                st.write("**NVIDIA — modelos de chat (sin herramientas)**")
+                for _m in NVIDIA_MODELS_CHAT:
+                    st.code(_probar(_m, False), language=None)
 
                 st.write("**NVIDIA — modelos que SÍ puede usar esta cuenta**")
                 # Esto es lo que cierra el diagnóstico: la lista NVIDIA_MODELS se
@@ -2206,7 +2255,7 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                 st.write("**Gemini**")
                 try:
                     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-                    _t = genai.GenerativeModel(GEMINI_MODEL).generate_content("di ok")
+                    _t = genai.GenerativeModel(GEMINI_MODEL).generate_content("Responde en español, solo la palabra: ok")
                     st.code(f"{GEMINI_MODEL} → OK: {str(_t.text)[:120]}", language=None)
                 except Exception as _e:
                     st.code(f"{GEMINI_MODEL} → {type(_e).__name__}: {str(_e)[:300]}", language=None)
