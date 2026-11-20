@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v28 · semáforo del motor · 20-nov"
+ARI_VERSION = "agente v29 · ruteo por tema · 20-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -578,6 +578,55 @@ _AFIRMACIONES = {
     "sip", "simon", "simón", "perfecto", "listo", "hazlo", "ya", "yes",
     "si por favor", "sí por favor", "si adelante", "sí adelante",
 }
+
+
+# Temas de RH que tienen su propia normativa en el prompt largo. Si el
+# mensaje toca uno de estos, va al cerebro de dudas AUNQUE haya un pase
+# abierto. Pasó justo esto: con un pase a medias, "¿cuándo son las próximas
+# vacaciones?" se fue al agente, cuyo prompt son 181 tokens sobre pases y no
+# trae una sola línea de vacaciones. El modelo contestó de su cosecha y le
+# atinó de casualidad. En una herramienta de RH eso es inaceptable: la
+# respuesta tiene que salir de la normativa cargada, no de la memoria del
+# modelo.
+_TEMAS_RH = (
+    "vacacion", "quincena", "aguinaldo", "prima", "estimulo", "estímulo",
+    "licencia", "incapacidad", "nomina", "nómina", "sueldo", "pago", "paga",
+    "economico", "económico", "sepifape", "tabulador", "prestacion",
+    "prestación", "jubilacion", "jubilación", "issste", "fonacot", "beca",
+    "constancia", "percepcion", "percepción", "deduccion", "deducción",
+    "finiquito", "escalafon", "escalafón", "carrera magisterial", "basificacion",
+    "basificación", "interinato", "promocion", "promoción",
+)
+
+
+def _es_tema_rh(texto) -> bool:
+    t = _txt(texto).lower()
+    return any(w in t for w in _TEMAS_RH)
+
+
+def _es_continuacion_pase(texto) -> bool:
+    """¿Este mensaje contesta a lo que ARI acaba de preguntar del pase?
+
+    Mientras un pase está a medias, el empleado manda cosas como "a las 2",
+    "el jueves", "cita médica" o "sí": eso pertenece al pase aunque suelto no
+    parezca un pase. Pero una pregunta de otro tema NO, y antes se iba al
+    agente solo por tener el pase abierto.
+    """
+    t = _txt(texto).lower().strip()
+    if not t:
+        return False
+    if _es_confirmacion(t):
+        return True
+    if _es_tema_rh(t):          # manda el tema, no el pase abierto
+        return False
+    if _codigo_tipo(t) or _horas_del_texto(t):
+        return True
+    # Una fecha suelta ("el jueves 26", "mañana") también es continuación.
+    if re.search(r"\bhoy\b|\bmañana\b|\bmanana\b|\d{1,2}[/-]\d{1,2}"
+                 r"|\d{1,2}\s*de\s+[a-záéíóúñ]+", t):
+        return True
+    # Un motivo escueto: pocas palabras y sin signo de pregunta.
+    return len(t.split()) <= 4 and "?" not in t and "¿" not in t
 
 
 def _es_confirmacion(texto) -> bool:
@@ -1387,7 +1436,12 @@ def _formulario_pase(datos):
     if not _falta_del_pase(nuevo):
         _h = " · ".join(f"{_ETIQUETA_HORA[c].lower()} {nuevo[c]}"
                         for c in horas_pedidas if nuevo.get(c))
-        marco.markdown(f"**{TIPOS_PASE[nuevo['tipo']]}** — "
+        # Lleva título propio porque el panel se redibuja SIEMPRE al final
+        # del hilo: si entre medias preguntas otra cosa, queda debajo de esa
+        # respuesta y parecía contestarla. Con el título se lee como lo que
+        # es, un pendiente.
+        marco.markdown(f"📄 **Pase pendiente de registrar**\n\n"
+                       f"**{TIPOS_PASE[nuevo['tipo']]}** — "
                        f"{_fecha_larga(fecha)} · {_h} · {nuevo['motivo']}")
     return nuevo
 
@@ -2203,8 +2257,15 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
             # Un pase ya abierto sigue en el agente aunque el mensaje suelto
             # ("a las 2", "sí") no parezca un pase: es la respuesta a lo que
             # ARI acaba de preguntar.
+            # El PASE ABIERTO ya no basta para mandar todo al agente: el
+            # mensaje tiene que parecer un pase, o ser la respuesta a lo que
+            # ARI acaba de preguntar del pase. Una duda de otro tema se va al
+            # cerebro de dudas, que es el que tiene la normativa, y el pase
+            # SE QUEDA ABIERTO esperando el botón.
             _es_pase = bool(deps_pase) and not st.session_state.get("_ari_pase_cerrado") and (
-                _parece_pase(pregunta) or st.session_state.get("ari_pase"))
+                _parece_pase(pregunta)
+                or (bool(st.session_state.get("ari_pase"))
+                    and _es_continuacion_pase(pregunta)))
             _traza("0_ruta", "agente (pase)" if _es_pase else "chat (duda de RH)")
             try:
                 if _es_pase:
