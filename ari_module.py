@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v21 · modelos verificados 9-nov"
+ARI_VERSION = "agente v24 · sin llama (EOL 16-nov) · 20-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -148,16 +148,29 @@ NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # TOOLS — el agente de pases. Aquí no vale "contesta rápido": si el modelo no
 # emite tool_calls, el pase NO se prepara y el fallo es mudo. Solo entra lo
 # comprobado. Un modelo de más en esta lista no es un respaldo, es una trampa.
+# El primero es el probado. Los otros dos son RESPALDO: un solo modelo con
+# herramientas es punto unico de falla, y es lo que tumbo el pase del 20 de
+# noviembre. Si uno no acepta tools, el codigo salta solo al siguiente.
+# El panel de motores (admin) prueba los tres y dice cual sirve y en cuanto.
+# llama-3.2-90b SE MURIO el 16-nov-2026 (HTTP 410, end of life) y era el unico
+# modelo con herramientas: desde ese dia NINGUN pase se armo con el agente,
+# todos cayeron al formulario de emergencia, y el mensaje decia "saturado".
+# De ahi la regla: nunca un solo modelo en esta lista. Los nombres se mueren
+# con fecha y el 410 no avisa antes.
 NVIDIA_MODELS_TOOLS = [
-    "meta/llama-3.2-90b-vision-instruct",   # 6.0 s · tool_calls OK
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",   # 3.4 s probado en chat
+    "nvidia/nemotron-3.5-bolt-e4b",
+    "moonshotai/kimi-k3.1-pro",
 ]
 
 # CHAT — dudas de RH, sin herramientas. Aquí sí manda la velocidad.
 # nemotron-lightning contestó en 3.4 s (el más rápido que responde) y va
 # primero; si devuelve vacío, el código ya salta solo al siguiente.
 NVIDIA_MODELS_CHAT = [
-    "nvidia/nemotron-3.5-lightning-30b-a3b",  # 3.4 s
-    "meta/llama-3.2-90b-vision-instruct",     # 6.0 s
+    "nvidia/nemotron-3.5-lightning-30b-a3b",   # 3.4 s
+    "nvidia/nemotron-3.5-bolt-e4b",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
 ]
 
 # Compatibilidad: el código viejo que no distingue las dos rutas usa esta.
@@ -813,8 +826,15 @@ def _codigo_tipo(valor) -> str:
     tl = t.lower()
     if not tl:
         return ""
-    # entrada / llegar tarde
-    if any(w in tl for w in ("entrada", "pen", "llegar", "llego", "tarde")):
+    # entrada / llegar tarde.
+    # "tarde" a secas NO puede estar en esta lista: "salgo a las 2 DE LA TARDE"
+    # contiene "tarde", y como esta comprobación va primero, un pase de salida
+    # se convertía en pase de ENTRADA. El empleado pedía salir y el documento
+    # decía que llegó tarde. "llegar"/"llego" ya cubren el caso de verdad; se
+    # añaden las formas que no los usan.
+    if any(w in tl for w in ("entrada", "pen", "llegar", "llego", "llegue",
+                             "llegaré", "llegare", "retardo",
+                             "se me hizo tarde", "hizo tarde", "voy tarde")):
         return "PEN"
     # salida SIN retorno (va antes: la frase también dice "salida")
     if any(w in tl for w in ("sin retorno", "no regres", "no vuelv", "no retorn")):
@@ -841,6 +861,92 @@ def _normalizar_pase(d):
         if c not in usados:
             d.pop(c, None)
     return d
+
+
+_CUES_HORA = (
+    re.compile(r"\ba\s+las?\s+(\d{1,2}(?::\d{2})?\s*(?:a\.?\s?m\.?|p\.?\s?m\.?)?)", re.I),
+    re.compile(r"\b(\d{1,2}:\d{2})\b"),
+    re.compile(r"\b(\d{1,2}\s*(?:a\.?\s?m\.?|p\.?\s?m\.?))", re.I),
+)
+
+
+def _horas_del_texto(texto):
+    """Las horas que el empleado escribió, en orden de aparición y sin repetir.
+
+    Un número solo cuenta como hora si trae pista de hora ("a las 12",
+    "12:30", "2 pm"). Sin esa exigencia, el 24 de "24 de noviembre" entraba
+    como las 24:00.
+    """
+    cand = []
+    for rx in _CUES_HORA:
+        for m in rx.finditer(texto or ""):
+            cand.append((m.start(), _normalizar_hora(m.group(1))))
+    cand.sort()
+    vistas = []
+    for _, h in cand:
+        if hora_valida(h) and h not in vistas:
+            vistas.append(h)
+    return vistas
+
+
+def _rescatar_del_texto(mensajes, datos):
+    """Rellena el pase con lo que el empleado YA escribió, sin modelo.
+
+    Corre solo en el modo de emergencia, cuando el agente se cayó y por tanto
+    nadie llamó a preparar_pase. Sin esto el formulario salía EN BLANCO y
+    volvía a preguntar la fecha y la hora que el empleado había dado dos
+    mensajes antes. Eso fue exactamente lo del 20 de noviembre.
+
+    Dos reglas, y las dos importan: no inventa y no pisa. Escribe únicamente
+    un campo vacío, y únicamente cuando el dato se lee sin ambigüedad en las
+    palabras del propio empleado. Si hay dos fechas o las horas no cuadran
+    con el tipo de pase, no reparte nada: las enseña y que elija él.
+
+    El motivo no se rescata a propósito: es texto libre y acaba impreso en un
+    documento oficial. Una frase adivinada ahí es peor que un campo vacío.
+    """
+    texto = " ".join(_txt(m.get("content")) for m in (mensajes or [])
+                     if isinstance(m, dict) and m.get("role") == "user")
+    d = dict(datos or {})
+    avisos = []
+
+    if not _codigo_tipo(d.get("tipo")):
+        t = _codigo_tipo(texto)
+        if t:
+            d["tipo"] = t
+
+    # _normalizar_fecha devuelve ISO solo cuando de verdad pudo leer la fecha;
+    # si no, regresa el texto crudo, y aquí se descarta por el regex.
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", _txt(d.get("fecha"))):
+        fechas = []
+        for frag in re.findall(
+                r"hoy|mañana|manana|\d{1,2}[/-]\d{1,2}[/-]\d{4}"
+                r"|\d{1,2}\s*de\s+[a-záéíóúñ]+", texto.lower()):
+            f = _normalizar_fecha(frag)
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", f) and f not in fechas:
+                fechas.append(f)
+        if len(fechas) == 1:
+            d["fecha"] = fechas[0]
+        elif fechas:
+            avisos.append(
+                "En tus mensajes hay varias fechas (" + ", ".join(
+                    datetime.strptime(x, "%Y-%m-%d").strftime("%d/%m/%Y")
+                    for x in fechas) + "). Elige abajo la del pase.")
+
+    horas = _horas_del_texto(texto)
+    campos = CAMPOS_POR_TIPO.get(_codigo_tipo(d.get("tipo")), ())
+    vacios = [c for c in campos if not hora_valida(d.get(c))]
+    if horas and len(horas) == len(vacios):
+        # Se reparten solo cuando cuadran exactamente: un PSR con dos horas
+        # en el mensaje es "salgo a las 12 y regreso a las 2", en ese orden.
+        for c, h in zip(vacios, horas):
+            d[c] = h
+    elif horas and (vacios or not campos):
+        # También cuando el tipo todavía no se sabe (campos vacío): la hora
+        # está en el mensaje pero no hay dónde ponerla hasta que elija tipo.
+        avisos.append("Horas que escribiste: " + ", ".join(horas) +
+                      ". Ponlas en el campo que corresponda.")
+    return _normalizar_pase(d), avisos
 
 
 def _falta_del_pase(d):
@@ -947,6 +1053,12 @@ def _mensaje_de_fallo(e) -> str:
                             "unauthenticated", "invalid argument: key")):
         return ("🔑 ARI no pudo autenticarse con el servicio. Esto no se "
                 "arregla esperando: avisa al área de RH de la DFC.")
+    if any(w in t for w in ("410", "end of life", "gone")):
+        # El 410 de NVIDIA es un modelo retirado con fecha. No se arregla
+        # esperando ni reintentando: hay que cambiar el nombre en la lista.
+        return ("⚙️ El modelo de IA que usaba ARI fue retirado por el "
+                "proveedor. Hay que cambiarlo en la configuración: avisa al "
+                "área de RH de la DFC.")
     if any(w in t for w in ("not found", "404", "is not supported", "model")):
         return ("⚙️ El modelo configurado no está disponible. Avisa al área de "
                 "RH de la DFC; esperando no se corrige.")
@@ -1100,17 +1212,22 @@ def _formulario_pase(datos):
             format_func=lambda c: TIPOS_PASE.get(c, "— elige el tipo —"),
             key="ari_f_tipo")
 
-    # La fecha nunca se queda vacía: si el modelo no la sacó, se propone HOY,
-    # que es el caso real en la enorme mayoría de los pases, y queda visible
-    # para cambiarla. Un campo vacío solo sirve para volver a bloquear el flujo.
+    # La fecha NO se propone. Ver el comentario del except: proponer hoy es
+    # lo que mandó un pase del martes 24 al viernes 20.
     try:
         _f0 = datetime.strptime(_txt(datos.get("fecha")), "%Y-%m-%d").date()
     except Exception:
-        _f0 = today_mx()
-    with _donde("fecha" in _faltantes):
+        # Vacía, NO hoy. Rellenarla con hoy hacía que un pase pedido para el
+        # martes 24 se ofreciera listo para registrar el viernes 20, con el
+        # aviso "Vas a registrar... el 20/11" que nadie lee dos veces. Una
+        # fecha inventada es peor que una vacía: la vacía se nota.
+        _f0 = None
+    with _donde(True):      # la fecha SIEMPRE a la vista, nunca plegada
         _prellenar("ari_f_fecha", _f0)
-        fecha = st.date_input("Fecha del pase", key="ari_f_fecha",
-                              format="DD/MM/YYYY")
+        fecha = st.date_input("Fecha del pase", value=None,
+                              key="ari_f_fecha", format="DD/MM/YYYY")
+        if not fecha:
+            st.caption("⚠️ Elige la fecha del pase.")
 
     # Solo se piden las horas que ese tipo usa de verdad. Sin tipo todavía no
     # se sabe cuáles son, así que no se pinta ninguna.
@@ -1195,6 +1312,20 @@ def _panel_pase(deps):
     _manual = bool(st.session_state.get("_ari_sin_tools"))
     if not ya_registrado:
         if _manual:
+            # El aviso TIENE que persistir. Antes se escribía con st.caption
+            # dentro del turno que falló, así que al primer rerun —basta con
+            # tocar un campo— desaparecía, y el empleado se quedaba con un
+            # formulario que contradecía lo que ARI acababa de decirle en el
+            # chat, sin una sola palabra de explicación en pantalla.
+            st.warning(
+                "El asistente automático no está disponible en este momento, "
+                "así que **tu pase no se armó solo**. Lo que ARI escribió "
+                "arriba **no quedó capturado**: revisa estos campos y "
+                "regístralo tú.")
+            datos, _avisos = _rescatar_del_texto(
+                st.session_state.get("ari_messages"), datos)
+            for _a in _avisos:
+                st.caption("⚠️ " + _a)
             datos = _formulario_pase(datos)
             st.session_state["ari_pase"] = datos
         elif not st.session_state.get("_ari_mostrar_boton"):
@@ -1998,86 +2129,87 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
     # Esto existe porque la captura falla en silencio: el chat se ve normal
     # y el panel simplemente no aparece, sin decir por qué. Aquí queda a la
     # vista en qué punto exacto se detuvo.
-    # Visible para el admin, o para cualquiera si se pone ari_debug = true en
-    # secrets: probar con una cuenta de empleado es justo cuando más falta
-    # hace ver esto.
-    # El autodiagnóstico NO va detrás de ari_debug: es justo lo que hace falta
-    # cuando nada funciona, y esconderlo detrás de una bandera que hay que
-    # poner a mano fue parte del problema durante días.
-    with st.expander("🔧 Probar los motores de IA"):
-        st.caption("Llama a cada motor una vez y muestra qué contesta. "
-                   "Nombres de modelo y códigos HTTP; no muestra llaves.")
-        if st.button("▶️ Probar ahora", key="ari_probar_motores"):
-            st.write("**Llaves detectadas**")
-            _nk = st.secrets.get("NVIDIA_API_KEY")
-            _gk = st.secrets.get("GEMINI_API_KEY")
-            # Se dice si la llave ESTÁ y si tiene el prefijo correcto, nunca
-            # su valor: lo que hace falta saber es si llegó al proceso.
-            st.code(f"NVIDIA_API_KEY: "
-                    f"{'ausente' if not _nk else ('prefijo ok' if str(_nk).startswith('nvapi-') else 'presente, prefijo RARO')}"
-                    f"  (largo {len(str(_nk)) if _nk else 0})\n"
-                    f"GEMINI_API_KEY: {'ausente' if not _gk else 'presente'}"
-                    f"  (largo {len(str(_gk)) if _gk else 0})", language=None)
+    # Solo para el admin, o para cualquiera con ari_debug = true en secrets.
+    # Lo dejé abierto a todo el mundo mientras depurábamos los modelos, y en
+    # producción eso le puso al empleado un menú de diagnóstico que no le
+    # sirve de nada y que no tiene por qué ver.
+    if st.session_state.get("rol") == "admin" or st.secrets.get("ari_debug"):
+        with st.expander("🔧 Probar los motores de IA"):
+            st.caption("Llama a cada motor una vez y muestra qué contesta. "
+                       "Nombres de modelo y códigos HTTP; no muestra llaves.")
+            if st.button("▶️ Probar ahora", key="ari_probar_motores"):
+                st.write("**Llaves detectadas**")
+                _nk = st.secrets.get("NVIDIA_API_KEY")
+                _gk = st.secrets.get("GEMINI_API_KEY")
+                # Se dice si la llave ESTÁ y si tiene el prefijo correcto, nunca
+                # su valor: lo que hace falta saber es si llegó al proceso.
+                st.code(f"NVIDIA_API_KEY: "
+                        f"{'ausente' if not _nk else ('prefijo ok' if str(_nk).startswith('nvapi-') else 'presente, prefijo RARO')}"
+                        f"  (largo {len(str(_nk)) if _nk else 0})\n"
+                        f"GEMINI_API_KEY: {'ausente' if not _gk else 'presente'}"
+                        f"  (largo {len(str(_gk)) if _gk else 0})", language=None)
 
-            st.write("**NVIDIA — modelo por modelo**")
-            for _m in NVIDIA_MODELS:
+                st.write("**NVIDIA — modelo por modelo**")
+                for _m in dict.fromkeys(NVIDIA_MODELS_TOOLS + NVIDIA_MODELS_CHAT):
+                    try:
+                        _r = requests.post(
+                            NVIDIA_URL,
+                            headers={"Authorization": f"Bearer {_nvidia_key()}",
+                                     "Accept": "application/json",
+                                     "Content-Type": "application/json"},
+                            json={"model": _m, "max_tokens": 5, "stream": False,
+                                  "messages": [{"role": "user", "content": "di ok"}]},
+                            timeout=45)
+                        st.code(f"{_m} → HTTP {_r.status_code} {_r.text[:160]}", language=None)
+                    except Exception as _e:
+                        st.code(f"{_m} → {type(_e).__name__}: {str(_e)[:160]}", language=None)
+
+                st.write("**NVIDIA — ¿acepta herramientas?**")
+                for _mt in NVIDIA_MODELS_TOOLS:
+                    st.caption(_mt)
+                    try:
+                        _r = requests.post(
+                            NVIDIA_URL,
+                            headers={"Authorization": f"Bearer {_nvidia_key()}",
+                                     "Accept": "application/json",
+                                     "Content-Type": "application/json"},
+                            json={"model": _mt, "max_tokens": 60,
+                                  "stream": False, "tools": HERRAMIENTAS_PASE,
+                                  "tool_choice": "auto",
+                                  "messages": [{"role": "user",
+                                                "content": "necesito salir hoy a las 12 y ya no regreso"}]},
+                            timeout=60)
+                        st.code(f"HTTP {_r.status_code} {_r.text[:300]}", language=None)
+                    except Exception as _e:
+                        st.code(f"{type(_e).__name__}: {str(_e)[:200]}", language=None)
+
+                st.write("**NVIDIA — modelos que SÍ puede usar esta cuenta**")
+                # Esto es lo que cierra el diagnóstico: la lista NVIDIA_MODELS se
+                # escribió a mano y los modelos se mueren con fecha (410) o no
+                # están habilitados para la cuenta (404). Preguntarle al endpoint
+                # qué hay disponible es la única fuente que no envejece.
                 try:
-                    _r = requests.post(
-                        NVIDIA_URL,
+                    _r = requests.get(
+                        "https://integrate.api.nvidia.com/v1/models",
                         headers={"Authorization": f"Bearer {_nvidia_key()}",
-                                 "Accept": "application/json",
-                                 "Content-Type": "application/json"},
-                        json={"model": _m, "max_tokens": 5, "stream": False,
-                              "messages": [{"role": "user", "content": "di ok"}]},
+                                 "Accept": "application/json"},
                         timeout=45)
-                    st.code(f"{_m} → HTTP {_r.status_code} {_r.text[:160]}", language=None)
+                    if _r.status_code == 200:
+                        _ids = sorted(d.get("id", "") for d in _r.json().get("data", []))
+                        st.caption(f"{len(_ids)} modelos disponibles:")
+                        st.code("\n".join(_ids), language=None)
+                    else:
+                        st.code(f"HTTP {_r.status_code} {_r.text[:200]}", language=None)
                 except Exception as _e:
-                    st.code(f"{_m} → {type(_e).__name__}: {str(_e)[:160]}", language=None)
+                    st.code(f"{type(_e).__name__}: {str(_e)[:200]}", language=None)
 
-            st.write("**NVIDIA — ¿acepta herramientas?**")
-            try:
-                _r = requests.post(
-                    NVIDIA_URL,
-                    headers={"Authorization": f"Bearer {_nvidia_key()}",
-                             "Accept": "application/json",
-                             "Content-Type": "application/json"},
-                    json={"model": NVIDIA_MODELS[0], "max_tokens": 60,
-                          "stream": False, "tools": HERRAMIENTAS_PASE,
-                          "tool_choice": "auto",
-                          "messages": [{"role": "user",
-                                        "content": "necesito salir hoy a las 12 y ya no regreso"}]},
-                    timeout=60)
-                st.code(f"HTTP {_r.status_code} {_r.text[:300]}", language=None)
-            except Exception as _e:
-                st.code(f"{type(_e).__name__}: {str(_e)[:200]}", language=None)
-
-            st.write("**NVIDIA — modelos que SÍ puede usar esta cuenta**")
-            # Esto es lo que cierra el diagnóstico: la lista NVIDIA_MODELS se
-            # escribió a mano y los modelos se mueren con fecha (410) o no
-            # están habilitados para la cuenta (404). Preguntarle al endpoint
-            # qué hay disponible es la única fuente que no envejece.
-            try:
-                _r = requests.get(
-                    "https://integrate.api.nvidia.com/v1/models",
-                    headers={"Authorization": f"Bearer {_nvidia_key()}",
-                             "Accept": "application/json"},
-                    timeout=45)
-                if _r.status_code == 200:
-                    _ids = sorted(d.get("id", "") for d in _r.json().get("data", []))
-                    st.caption(f"{len(_ids)} modelos disponibles:")
-                    st.code("\n".join(_ids), language=None)
-                else:
-                    st.code(f"HTTP {_r.status_code} {_r.text[:200]}", language=None)
-            except Exception as _e:
-                st.code(f"{type(_e).__name__}: {str(_e)[:200]}", language=None)
-
-            st.write("**Gemini**")
-            try:
-                genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-                _t = genai.GenerativeModel(GEMINI_MODEL).generate_content("di ok")
-                st.code(f"{GEMINI_MODEL} → OK: {str(_t.text)[:120]}", language=None)
-            except Exception as _e:
-                st.code(f"{GEMINI_MODEL} → {type(_e).__name__}: {str(_e)[:300]}", language=None)
+                st.write("**Gemini**")
+                try:
+                    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                    _t = genai.GenerativeModel(GEMINI_MODEL).generate_content("di ok")
+                    st.code(f"{GEMINI_MODEL} → OK: {str(_t.text)[:120]}", language=None)
+                except Exception as _e:
+                    st.code(f"{GEMINI_MODEL} → {type(_e).__name__}: {str(_e)[:300]}", language=None)
 
     if st.session_state.get("rol") == "admin" or st.secrets.get("ari_debug"):
         with st.expander("🔧 Diagnóstico de la captura de pases"):
