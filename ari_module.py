@@ -1677,16 +1677,15 @@ Para cada entrega se debe requisitar el archivo Excel "Reporte mensual de incapa
 INCUMPLIMIENTO: Toda incapacidad que no cumpla requisitos será devuelta para corrección, sin excepción.
 
 ═══════════════════════════════════════════════════════
-VACACIONES DE PRIMAVERA 2026
-(Circular Administrativa 05/6/2026)
+PERIODO VACACIONAL DE INVIERNO
+(Circular Administrativa 26/6/2026, del 12 de noviembre de 2026)
 ═══════════════════════════════════════════════════════
 
-- Periodo vacacional: lunes 30 de marzo al viernes 10 de abril de 2026.
-- Regreso a labores: lunes 13 de abril de 2026.
-- Personal con menos de 6 meses consecutivos de servicio NO puede disfrutar el periodo vacacional.
-- Guardias: el personal de guardia cumple horario habitual con registro de entrada y salida.
-- Durante guardias NO se otorgan días económicos ni descanso por ningún concepto.
-- Relación de guardias se envía a más tardar el martes 24 de marzo de 2026 a: paolapatricia.lopez@jalisco.gob.mx y sergio.camilo@jalisco.gob.mx
+- Periodo vacacional: del lunes 21 de diciembre de 2026 al miércoles 06 de enero de 2027.
+- Regreso a labores: jueves 07 de enero de 2027.
+- Personal de nuevo ingreso o reingreso que NO tenga más de 6 meses consecutivos de servicio NO puede disfrutar el periodo vacacional. Sus únicas excepciones son el 25 de diciembre de 2026 y el 1 de enero de 2027, que sí descansa.
+- Fundamento: artículo 40 de la Ley para los Servidores Públicos del Estado de Jalisco y sus Municipios.
+- Si preguntan por guardias, NO des fechas ni criterios: diles que en la DFC eso lo define la Dirección y que lo consulten con el área de RH de la DFC.
 
 ═══════════════════════════════════════════════════════
 CÁLCULO DE SUELDO QUINCENAL — PAGO 07 (HSM)

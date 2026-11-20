@@ -3818,6 +3818,56 @@ def _puede_pendientes_rh() -> bool:
     return bool(rfc) and rfc in _rfcs_pendientes_rh()
 
 
+_MESES_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+             "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+
+# Periodo vacacional vigente. Al cambiar el año solo se tocan estas cuatro
+# fechas y el número de circular; el aviso se apaga solo al reanudar labores.
+# Guardias NO se mencionan: en la DFC las define la Dirección.
+VACACIONES = {
+    "nombre": "invierno",
+    "inicio": date(2026, 12, 21),
+    "fin": date(2027, 1, 6),
+    "regreso": date(2027, 1, 7),
+    "circular": "26/6/2026",
+}
+
+
+def _aviso_vacaciones():
+    """Banda con el periodo vacacional en la pantalla de inicio.
+
+    Está aquí y no solo en ARI porque es la pregunta de cada diciembre y la
+    pantalla de inicio es la que todos ven; esperar a que alguien le
+    pregunte al asistente deja fuera a quien nunca lo abre.
+
+    Se apaga sola al reanudar labores: un aviso de vacaciones en febrero
+    enseña a la gente a ignorar los avisos.
+    """
+    v = VACACIONES
+    hoy = today_mx()
+    if hoy > v["regreso"] or (v["inicio"] - hoy).days > 45:
+        return
+    fmt = lambda f: f"{f.day} de {_MESES_ES[f.month - 1]} de {f.year}"
+    if hoy < v["inicio"]:
+        faltan = (v["inicio"] - hoy).days
+        encabezado = (f"🏖️ **Periodo vacacional de {v['nombre']}** — "
+                      f"en {faltan} día{'s' if faltan != 1 else ''}")
+    elif hoy <= v["fin"]:
+        encabezado = f"🏖️ **Periodo vacacional de {v['nombre']}** — en curso"
+    else:
+        encabezado = "🏖️ **Hoy se reanudan labores**"
+    st.info(
+        f"{encabezado}\n\n"
+        f"Del **{fmt(v['inicio'])}** al **{fmt(v['fin'])}**. "
+        f"Se reanudan labores el **{fmt(v['regreso'])}**.\n\n"
+        f"El personal de nuevo ingreso o reingreso con menos de 6 meses "
+        f"consecutivos de servicio no disfruta el periodo, salvo el "
+        f"{fmt(date(2026, 12, 25))} y el {fmt(date(2027, 1, 1))}.\n\n"
+        f"_Circular Administrativa {v['circular']} · Subsecretaría de "
+        f"Administración. Información de apoyo: cualquier caso particular se "
+        f"consulta con el área de RH de la DFC._")
+
+
 def _puede_ausencias() -> bool:
     """Quién ve "Quién no está": el admin y quien tenga gente a cargo."""
     if render_ausencias is None:
@@ -4535,6 +4585,9 @@ def main():
     # siempre deja de leerse, y entonces falla el día que sí importa.
     # Mismo permiso que la vista: si alguien no puede abrir Pendientes RH,
     # tampoco debe leer el texto de un pendiente en su pantalla de inicio.
+    if vista == "inicio":
+        _aviso_vacaciones()
+
     if (vista == "inicio" and render_pendientes_rh is not None
             and _puede_pendientes_rh()):
         try:
