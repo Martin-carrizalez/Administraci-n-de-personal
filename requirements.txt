@@ -13,3 +13,4 @@ google-generativeai
 PyMuPDF
 zxing-cpp
 pytesseract
+python-docx
