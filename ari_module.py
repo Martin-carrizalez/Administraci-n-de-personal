@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v34 · códigos no son cantidades · 21-nov"
+ARI_VERSION = "agente v35 · ruta de documentos tolera typos · 21-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -472,6 +472,8 @@ def semaforo_motor(contenedor=None):
         caja.caption(f"{m.get('modelo', '?')}{_seg} · {m.get('hora', '')}")
     elif admin:
         caja.caption("todavía no se ha llamado a ningún modelo")
+    if admin and _DOC is None:
+        caja.caption(f"⚠️ documentos: NO cargado — {_DOC_ERROR[:90]}")
 
 
 def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
@@ -618,12 +620,28 @@ def prompt_agente(nombre=""):
 # puede tumbar la captura de pases, que es lo que usa todo el mundo.
 try:
     import documentos_module as _DOC
-except Exception:
+    _DOC_ERROR = ""
+except Exception as _e_doc:
+    # Se guarda el POR QUÉ. Degradar en silencio dejó al admin viendo
+    # "chat activo" sin forma de saber si fue un typo, un permiso o que
+    # falta python-docx. El motivo se muestra en el semáforo.
     _DOC = None
+    _DOC_ERROR = f"{type(_e_doc).__name__}: {_e_doc}"
 
-_PALABRAS_DOC = ("constancia", "comision", "comisiones", "oficio de comision",
-                 "oficios de comision", "encargados cm", "encargados de cm",
-                 "encargados de centro de maestros")
+# UNA sola lista de raíces para TODAS las rutas. Antes había dos —una aquí
+# con palabras exactas y otra en _respuesta_fija con raíces— y el 21 de
+# noviembre "comsion" y "contancais" no entraron por aquí: el admin pidió
+# comisiones y ARI contestó como chat, porque la única lista que toleraba
+# typos era la del empleado. Si aparece un typo nuevo, se agrega AQUÍ y
+# queda arreglado en los dos lados.
+_RAICES_DOC = (
+    "constanc", "contanc", "ontanc", "constac", "onstac", "cosntanc",
+    "contancai", "costanc",
+    "comision", "comisio", "comsio", "comisi", "comsion", "comision",
+    "omision", "comiso",
+)
+_PALABRAS_DOC = _RAICES_DOC + ("encargados cm", "encargados de cm",
+                               "encargados de centro de maestros")
 
 
 def _sin_acentos(t):
@@ -706,10 +724,33 @@ def _respuesta_fija(texto):
     # pregunta caía al cerebro de dudas, que contestó con un desglose de
     # pagos de la quincena 23 que nadie había pedido.
     tl = _sin_acentos(" ".join(t.lower().split()))
+    if st.session_state.get("rol") == "admin" and any(
+            w in tl for w in _RAICES_DOC):
+        # "muéstrame la ÚLTIMA comisión de X porque la perdió" NO es generar
+        # una nueva. Sin esto el agente llamaría a preparar_comisiones y
+        # armaría un oficio duplicado con un folio nuevo, que es peor que no
+        # contestar. La búsqueda en el minutario todavía no está conectada.
+        _busca = any(w in tl for w in (
+            "mostrar", "muestra", "mostra", "buscar", "busca", "encuentra",
+            "perdio", "perdi", "copia", "reenvia", "reenviame", "ultima",
+            "ultimo", "anterior", "pasada", "historial", "ya generada",
+            "ya generado", "que le di", "que le hice"))
+        _genera = any(w in tl for w in (
+            "genera", "generar", "genarar", "gener", "haz", "hacer", "haces",
+            "elabora", "elaborar", "nueva", "nuevo", "nuevas", "nuevos"))
+        if _busca and not _genera:
+            return ("Todavía no puedo **buscar** documentos ya generados: solo "
+                    "sé generarlos nuevos.\n\n"
+                    "Para eso hay que conectar el minutario de oficios (subir "
+                    "cada comisión a Drive y registrar su folio al generarla), "
+                    "y eso está pendiente de que lo autorices.\n\n"
+                    "Mientras, la comisión está en el Word que se descargó "
+                    "cuando se generó. Si quieres **generarla otra vez**, "
+                    "dímelo así y con qué folio, para no duplicar "
+                    "consecutivos del minutario.")
+
     if st.session_state.get("rol") != "admin" and any(
-            w in tl for w in ("constanc", "contanc", "ontanc", "constac",
-                              "onstac", "cosntanc", "comision", "comisio",
-                              "comsio", "comisi", "comsion")):
+            w in tl for w in _RAICES_DOC):
         # Sin exigir verbo. Antes pedía "hacer|genera|quiero|…" además del
         # sustantivo, y "me HACES las comsiones" se colaba porque "haces" no
         # está en esa lista. Pedir dos aciertos sobre un texto con typos
