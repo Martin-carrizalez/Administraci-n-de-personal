@@ -27,7 +27,7 @@ los dos lados: en el panel y en el ejecutor de las herramientas, para que una
 herramienta no se pueda disparar desde el chat de un empleado.
 """
 
-VERSION = "documentos v17 · escribe el minutario como la app · 22-nov"
+VERSION = "documentos v18 · reparto de QR por página real · 22-nov"
 
 import os
 import re
@@ -709,14 +709,36 @@ def registrar_en_minutario(pend, ruta_docx):
     # El QR se estampa por PÁGINA, así que hay que saber qué página es cada
     # oficio. Si las cuentas no cuadran NO se adivina: un QR en la página
     # equivocada manda a validar el oficio de otra persona.
+    # El PDF lo acaba de generar ESTE código, con un salto de página por
+    # oficio: si el número de páginas coincide con el de oficios, el reparto
+    # es 1 a 1 y no hay nada que detectar.
+    #
+    # paginas_con_contenido() solo entra como respaldo. Está hecha para otra
+    # cosa —descartar hojas en blanco de un ESCANEO— y mira únicamente la
+    # franja central: con una plantilla cuyo texto va arriba devuelve CERO
+    # páginas y abortaba el registro entero. Usarla aquí como primera opción
+    # era resolver con adivinanza algo que el código ya sabe.
+    paginas = []
     try:
-        paginas = _OF.paginas_con_contenido(crudo)
-    except Exception as e:
-        return 0, [f"No se pudieron contar las páginas del PDF: {e}"], "", []
+        _pm = _OF.pymupdf.open(stream=crudo, filetype="pdf")
+        try:
+            _total = _pm.page_count
+        finally:
+            _pm.close()
+        if _total == len(pend["personas"]):
+            paginas = list(range(_total))
+    except Exception:
+        _total = 0
+    if not paginas:
+        try:
+            paginas = _OF.paginas_con_contenido(crudo)
+        except Exception as e:
+            return 0, [f"No se pudieron contar las páginas del PDF: {e}"], "", []
     if len(paginas) != len(pend["personas"]):
-        return 0, [f"El PDF trae {len(paginas)} páginas con contenido y son "
-                   f"{len(pend['personas'])} oficios. No reparto los QR a "
-                   f"ciegas: revisa si alguna comisión ocupa dos páginas."], "", []
+        return 0, [f"El PDF trae {_total} páginas ({len(paginas)} con "
+                   f"contenido detectable) y son {len(pend['personas'])} "
+                   f"oficios. No reparto los QR a ciegas: revisa si alguna "
+                   f"comisión ocupa más de una página."], "", []
 
     anio = pend["fecha_doc"][:4]
 
