@@ -326,16 +326,34 @@ def aviso_pendientes(get_client, nombre, rfc=""):
     urgentes, mios = mis_pendientes(get_client, nombre, rfc)
     if not mios:
         return
+
+    # Singular y plural de verdad. "1 pendiente(s) asignado(s)" se lee como
+    # un formulario mal hecho y le quita autoridad justo al aviso que quieres
+    # que la gente obedezca.
+    def _pl(n, uno, varios):
+        return uno if n == 1 else varios
+
+    n_mios, n_urg = len(mios), len(urgentes)
+    # Naranja (warning), no azul: el aviso del periodo vacacional es st.info
+    # y si los dos fueran azules este se perdería al lado del otro. Rojo se
+    # reserva para lo atrasado, que es más grave.
+    accion = ("Entra a **📋 Pendientes RH DFC** y atiende lo que te asignó "
+              "tu jefe o el área de RH de la DFC.")
     if urgentes:
-        st.error(f"⏰ Tienes **{len(urgentes)}** pendiente(s) para hoy o "
-                 f"atrasado(s), de {len(mios)} asignado(s):")
+        st.error(
+            f"⏰ Tienes **{n_urg}** "
+            f"{_pl(n_urg, 'pendiente', 'pendientes')} para hoy o "
+            f"{_pl(n_urg, 'atrasado', 'atrasados')}, de {n_mios} "
+            f"{_pl(n_mios, 'asignado', 'asignados')}. {accion}")
         for texto, lim in urgentes[:5]:
             dd = "/".join(reversed(lim.split("-"))) if lim else ""
             st.markdown(f"- **{texto}**" + (f"  ·  vencía {dd}" if dd else ""))
     else:
-        st.info(f"📌 Tienes **{len(mios)}** pendiente(s) asignado(s) en "
-                f"Pendientes RH DFC.")
-    if len(mios) > len(urgentes):
+        st.warning(
+            f"📌 Tienes **{n_mios}** "
+            f"{_pl(n_mios, 'pendiente asignado', 'pendientes asignados')}. "
+            f"{accion}")
+    if n_mios > n_urg and urgentes:
         st.caption("Los ves completos en 📋 Pendientes RH DFC.")
 
 

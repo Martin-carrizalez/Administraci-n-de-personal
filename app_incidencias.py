@@ -4333,6 +4333,10 @@ def vista_ari():
             "rfc":                _rfc_ari,
             "nombre":             _nom_ari,
             "jefe_inmediato":     st.session_state.get("jefe_inmediato", ""),
+            # Para documentos_module (constancias y comisiones del admin).
+            # Va aquí y no en otra inyección para que este dict siga siendo
+            # la única puerta por la que ARI recibe lo de la app.
+            "get_client":         get_client,
         })
     else:
         ari_module.render_ari(contexto)

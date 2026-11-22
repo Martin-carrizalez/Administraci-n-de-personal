@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v29 · ruteo por tema · 20-nov"
+ARI_VERSION = "agente v32 · el motivo no sale de la app · 21-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -238,8 +238,15 @@ HERRAMIENTAS_PASE = [
             "hora_salida": {"type": "string", "description": "HH:MM 24h, solo PSE y PSR"},
             "hora_retorno": {"type": "string", "description": "HH:MM 24h, solo PSR"},
             "hora_entrada": {"type": "string", "description": "HH:MM 24h, solo PEN"},
-            "motivo": {"type": "string", "description": "Para qué necesita el pase"}},
-            "required": ["tipo", "fecha", "motivo"]}}},
+            },
+            # El MOTIVO ya no es parámetro, a propósito. Los motivos reales
+            # son "cita médica", "consulta con el especialista", "llevar a mi
+            # hija al doctor": dato personal sensible de un servidor público.
+            # Mandarlo a un modelo externo como argumento de herramienta era
+            # la fuga más delicada del sistema. Ahora lo saca
+            # _motivo_del_texto() aquí mismo, sin modelo, y queda prellenado
+            # y editable en el panel.
+            "required": ["tipo", "fecha"]}}},
     {"type": "function", "function": {
         "name": "mostrar_boton_registrar",
         "description": ("Muestra al empleado el botón para registrar el pase ya "
@@ -330,7 +337,13 @@ def _ejecutar_herramienta(nombre, args, deps):
 
     if nombre == "preparar_pase":
         d = {k: _txt(args.get(k)) for k in
-             ("tipo", "fecha", "hora_salida", "hora_retorno", "hora_entrada", "motivo")}
+             ("tipo", "fecha", "hora_salida", "hora_retorno", "hora_entrada")}
+        # El motivo NO llega del modelo (no es parámetro de la herramienta):
+        # se extrae aquí de lo que escribió el empleado. Si no se puede
+        # extraer queda vacío y el panel lo pide, que es el único camino por
+        # el que un motivo puede entrar sin pasar por un servicio externo.
+        d["motivo"] = (_motivo_del_texto(st.session_state.get("ari_messages"))
+                       or _txt(st.session_state.get("ari_pase", {}).get("motivo")))
         d["tipo"] = _codigo_tipo(d["tipo"])
         # Se normaliza ANTES de validar: el modelo puede mandar "6 de
         # noviembre" y "12" en vez de ISO y HH:MM, y ambas cosas son
@@ -340,6 +353,16 @@ def _ejecutar_herramienta(nombre, args, deps):
             d[_h] = _normalizar_hora(d[_h])
         _normalizar_pase(d)
         faltan = _falta_del_pase(d)
+        if faltan == ["motivo"]:
+            # El motivo es el único que NO se pregunta por chat: el panel ya
+            # lo tiene a la vista. Decirle al modelo "pregunta lo que falta"
+            # aquí lo haría pedir justo lo que acabamos de sacar del chat.
+            st.session_state["ari_pase"] = d
+            st.session_state["_ari_mostrar_boton"] = True
+            return {"listo": False, "falta": [],
+                    "nota": ("Ya tienes tipo, fecha y hora. Dile que escriba "
+                             "el motivo en el panel de abajo y registre. NO "
+                             "le preguntes el motivo por aquí.")}
         if faltan:
             return {"listo": False, "falta": faltan,
                     "nota": "Pregúntale al empleado SOLO lo que falta, de uno en uno."}
@@ -539,6 +562,17 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
 MAX_PASOS_AGENTE = 2
 
 
+def _pila(nombre):
+    """Primer nombre, para no mandar el nombre completo al modelo.
+
+    En el padrón los nombres van "APELLIDO APELLIDO NOMBRE(S)", pero el de
+    los jefes empieza por el nombre. No hay forma fiable de adivinar cuál es
+    cuál, así que se manda UNA sola palabra: la primera. Es un saludo, no un
+    dato que el modelo deba procesar.
+    """
+    return (_txt(nombre).split() or [""])[0].title()
+
+
 def prompt_agente(nombre=""):
     """El prompt CORTO del agente. ~200 tokens contra los ~7,000 del chat.
 
@@ -553,14 +587,22 @@ def prompt_agente(nombre=""):
     qué día es hoy, qué significan las tres siglas, y cuándo llamar a qué.
     """
     hoy = today_mx()
-    quien = f" Hablas con {nombre}." if nombre else ""
+    # SOLO el nombre de pila. El prompt viaja a un servicio externo y el
+    # modelo no necesita el nombre completo de nadie para armar un pase ni un
+    # oficio: con el de pila saluda igual. Los nombres completos se quedan en
+    # la app y en el Sheet.
+    quien = f" Hablas con {_pila(nombre)}." if nombre else ""
     return (
         f"Eres ARI, asistente de RH de la DFC. Ayudas a levantar pases.{quien}\n"
         f"Hoy es {_fecha_larga(hoy)} ({hoy.isoformat()}).\n"
         "Tipos: PSE = sale y ya no regresa ese día. PSR = sale y regresa el "
         "mismo día. PEN = llega tarde.\n"
         "Pregunta SOLO lo que falte, de uno en uno, con tus palabras.\n"
-        "Cuando tengas tipo, fecha, hora y motivo, llama a preparar_pase.\n"
+        # El motivo no se le pide al modelo: lo extrae el código del texto
+        # del empleado y, si no pudo, el panel lo pregunta. Pedírselo al
+        # modelo era mandarle "cita médica" a un servicio externo.
+        "Cuando tengas tipo, fecha y hora, llama a preparar_pase. NO preguntes "
+        "el motivo: eso se escribe en el panel.\n"
         "NO calcules las horas de ausencia y NO inventes su horario: "
         "preparar_pase lo consulta y lo calcula.\n"
         "Si preparar_pase responde listo=true, di en UNA frase el tipo, la "
@@ -568,6 +610,103 @@ def prompt_agente(nombre=""):
         "Si confirma, llama a mostrar_boton_registrar.\n"
         "NUNCA digas que tú registraste el pase ni que ya quedó: el pase solo "
         "existe cuando el empleado aprieta el botón.")
+
+
+# documentos_module es OPCIONAL a propósito. Si no está desplegado —o si
+# falla al importar porque falta python-docx— ARI funciona exactamente igual
+# y simplemente no ofrece constancias ni comisiones. Una función nueva no
+# puede tumbar la captura de pases, que es lo que usa todo el mundo.
+try:
+    import documentos_module as _DOC
+except Exception:
+    _DOC = None
+
+_PALABRAS_DOC = ("constancia", "comision", "comisiones", "oficio de comision",
+                 "oficios de comision", "encargados cm", "encargados de cm",
+                 "encargados de centro de maestros")
+
+
+def _sin_acentos(t):
+    for a, b in (("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"),
+                 ("ñ", "n"), ("ü", "u")):
+        t = t.replace(a, b)
+    return t
+
+
+def _es_continuacion_doc(texto) -> bool:
+    """¿Contesta a lo que ARI preguntó del documento?
+
+    Las conversaciones de documentos son del admin y son cortas: "quincena 24
+    de 2026", "oficio 118", "del 1 de enero al 28 de febrero", "todos". Un
+    tema de RH gana igual que en los pases, para que una duda de nómina a
+    media preparación no se vaya al agente de documentos.
+    """
+    t = _txt(texto).lower().strip()
+    if not t:
+        return False
+    if _es_confirmacion(t):
+        return True
+    if _es_tema_rh(t):
+        return False
+    return len(t.split()) <= 8
+
+
+def _ejecutar_doc(nombre, args):
+    """Puente a documentos_module. Normaliza las fechas ANTES de entrar.
+
+    El modelo manda "1 de enero" o "01/01/2027" según el día.
+    documentos_module exige AAAA-MM-DD a propósito: así no hay dos
+    normalizadores de fecha que puedan discrepar. El que manda es el de los
+    pases, que ya está probado contra lo que contestan estos modelos.
+    """
+    if _DOC is None:
+        return {"error": "El módulo de documentos no está desplegado."}
+    a = dict(args or {})
+    for k in ("fecha_inicio", "fecha_fin"):
+        if a.get(k):
+            a[k] = _normalizar_fecha(a[k])
+    return _DOC.ejecutar(nombre, a, st.session_state.get("rol"))
+
+
+def _parece_documento(texto) -> bool:
+    """¿Pide constancias o comisiones? SOLO para el admin.
+
+    El gate va aquí y otra vez dentro de documentos_module.ejecutar: un
+    empleado no debe poder disparar la generación ni por accidente ni
+    pidiéndoselo a ARI con otras palabras.
+    """
+    if _DOC is None or st.session_state.get("rol") != "admin":
+        return False
+    t = _sin_acentos(" ".join(_txt(texto).lower().split()))
+    return any(p in t for p in _PALABRAS_DOC)
+
+
+def prompt_agente_doc(nombre=""):
+    """Prompt corto del agente de documentos. Mismo criterio que el de pases:
+    nada de normativa, solo qué herramienta llamar y cuándo."""
+    hoy = today_mx()
+    # SOLO el nombre de pila. El prompt viaja a un servicio externo y el
+    # modelo no necesita el nombre completo de nadie para armar un pase ni un
+    # oficio: con el de pila saluda igual. Los nombres completos se quedan en
+    # la app y en el Sheet.
+    quien = f" Hablas con {_pila(nombre)}." if nombre else ""
+    return (
+        f"Eres ARI, asistente de RH de la DFC. Ayudas al administrador a "
+        f"generar documentos.{quien}\n"
+        f"Hoy es {_fecha_larga(hoy)} ({hoy.isoformat()}).\n"
+        "Constancias: necesitas quincena, año y a quiénes. Si no dice a "
+        "quiénes, usa 'todos'.\n"
+        "Comisiones: necesitas tipo (encargados de CM o generales), número de "
+        "oficio inicial, fecha de inicio y fecha de fin, y a quiénes.\n"
+        "Las fechas van en AAAA-MM-DD.\n"
+        "Pregunta SOLO lo que falte, de uno en uno.\n"
+        "Cuando tengas todo, llama a preparar_constancias o a "
+        "preparar_comisiones.\n"
+        "Si responde listo=true, di en UNA frase qué se va a generar y "
+        "cuántos son, y pide que confirme.\n"
+        "Si confirma, llama a mostrar_boton_generar.\n"
+        "NUNCA digas que ya generaste los documentos: solo existen cuando el "
+        "admin aprieta el botón.")
 
 
 _AFIRMACIONES = {
@@ -642,7 +781,8 @@ def _es_confirmacion(texto) -> bool:
     return t in _AFIRMACIONES
 
 
-def _agente(mensajes, deps, nombre=""):
+def _agente(mensajes, deps, nombre="", herramientas=None, sistema=None,
+            ejecutor=None, forzar="preparar_pase", clase="pase"):
     """Bucle del agente: el modelo decide, las herramientas ejecutan.
 
     Devuelve (texto_final, pasos) donde pasos es la lista de herramientas que
@@ -653,8 +793,14 @@ def _agente(mensajes, deps, nombre=""):
 
     Ya no recibe el prompt del chat: usa el suyo, corto. Ver prompt_agente.
     """
+    # Los parámetros nuevos traen por defecto exactamente lo que había, para
+    # que la ruta de pases se comporte igual que antes de existir la de
+    # documentos.
+    herramientas = herramientas or HERRAMIENTAS_PASE
+    sistema = sistema or prompt_agente(nombre)
+    ejecutor = ejecutor or (lambda n, a: _ejecutar_herramienta(n, a, deps))
     hist = [{"role": "system", "content": "detailed thinking off"},
-            {"role": "system", "content": prompt_agente(nombre)}] + list(mensajes)
+            {"role": "system", "content": sistema}] + list(mensajes)
     pasos = []
 
     # CONFIRMACION: la decide el código, no el modelo.
@@ -668,35 +814,44 @@ def _agente(mensajes, deps, nombre=""):
     # De paso, se ahorra una llamada por pase.
     _ultimo = next((m.get("content") for m in reversed(list(mensajes))
                     if isinstance(m, dict) and m.get("role") == "user"), "")
-    _ya = st.session_state.get("ari_pase") or {}
-    if _ya and not _falta_del_pase(_ya) and _es_confirmacion(_ultimo):
-        st.session_state["_ari_mostrar_boton"] = True
-        return ("Listo. Tu pase ya está armado: aprieta el botón de "
-                "registrar para que quede."), pasos
+    if clase == "pase":
+        _ya = st.session_state.get("ari_pase") or {}
+        if _ya and not _falta_del_pase(_ya) and _es_confirmacion(_ultimo):
+            st.session_state["_ari_mostrar_boton"] = True
+            return ("Listo. Tu pase ya está armado: aprieta el botón de "
+                    "registrar para que quede."), pasos
+    elif st.session_state.get("doc_pend") and _es_confirmacion(_ultimo):
+        # Mismo razonamiento que en los pases: el historial de tool_calls no
+        # sobrevive al turno, así que si esto lo decidiera el modelo volvería
+        # a preparar el documento y pediría confirmación otra vez.
+        st.session_state["_doc_mostrar_boton"] = True
+        return ("Listo. Aprieta el botón para generar los documentos."), pasos
 
     fin = time.monotonic() + PRESUPUESTO_TURNO
     for _ in range(MAX_PASOS_AGENTE):
         if _resta(fin) < 3:
             # Se agoto el presupuesto a media conversacion. Si ya hay un pase
             # preparado, no se tira: se saca el boton y el empleado termina.
-            if st.session_state.get("ari_pase") and not _falta_del_pase(
-                    st.session_state["ari_pase"]):
+            if clase == "pase" and st.session_state.get("ari_pase") and (
+                    not _falta_del_pase(st.session_state["ari_pase"])):
                 st.session_state["_ari_mostrar_boton"] = True
                 return ("Ya tengo tu pase listo. Confirmalo con el boton de "
                         "registrar."), pasos
             raise RuntimeError("se acabo el presupuesto de tiempo del turno")
         msg = _responder_nvidia(hist, temperatura=0.2,
-                                herramientas=HERRAMIENTAS_PASE, fin=fin)
+                                herramientas=herramientas, fin=fin)
         llamadas = msg.get("tool_calls") or []
         if not llamadas:
             # Primer paso sin tool_call en un mensaje que el router ya marco
             # como pase: se fuerza la herramienta una vez. Varios modelos
             # soportan tools pero prefieren texto si no se les insiste, y sin
             # esto el pase nunca se prepara y nadie sabe por que.
-            if not pasos and not st.session_state.get("ari_pase") and _resta(fin) > 5:
+            _abierto = (st.session_state.get("ari_pase") if clase == "pase"
+                        else st.session_state.get("doc_pend"))
+            if not pasos and not _abierto and _resta(fin) > 5 and forzar:
                 msg = _responder_nvidia(
-                    hist, temperatura=0.2, herramientas=HERRAMIENTAS_PASE, fin=fin,
-                    forzar="preparar_pase")
+                    hist, temperatura=0.2, herramientas=herramientas, fin=fin,
+                    forzar=forzar)
                 llamadas = msg.get("tool_calls") or []
             if not llamadas:
                 return (msg.get("content") or "").strip(), pasos
@@ -710,7 +865,7 @@ def _agente(mensajes, deps, nombre=""):
                 args = json.loads(lc["function"].get("arguments") or "{}")
             except Exception:
                 args = {}
-            resultado = _ejecutar_herramienta(herr, args, deps)
+            resultado = ejecutor(herr, args)
             pasos.append({"herramienta": herr, "args": args,
                           "resultado": resultado})
             hist.append({"role": "tool", "tool_call_id": lc.get("id", ""),
@@ -1070,6 +1225,87 @@ def _horas_del_texto(texto):
     return vistas
 
 
+# Arranques con los que la gente explica para qué necesita el pase. El orden
+# importa: se prueba de más específico a más general.
+_MARCAS_MOTIVO = (
+    "porque", "por motivo de", "debido a", "tengo que", "tengo", "voy a",
+    "voy al", "voy", "para", "me toca", "llevar a", "llevo a", "asistir",
+    "acudir", "cita",
+)
+
+# Frases de trámite que NO son el motivo. Se quitan antes de buscarlo, porque
+# si no el motivo acaba siendo "necesito un pase de salida".
+_RUIDO_MOTIVO = (
+    "necesito un pase de salida sin retorno", "necesito un pase de salida",
+    "necesito un pase de entrada", "necesito un pase", "quiero un pase",
+    "un pase de salida sin retorno", "un pase de salida con retorno",
+    "un pase de entrada", "un pase", "pase de salida sin retorno",
+    "pase de salida con retorno", "pase de entrada", "pase de salida",
+    "y ya no regreso", "ya no regreso", "no regreso ese dia",
+    "necesito salir", "quiero salir", "voy a salir", "necesito llegar",
+    "voy a llegar tarde", "llegar tarde", "me retiro", "salgo",
+)
+
+
+def _cap(t):
+    """Primera letra en mayúscula: el motivo se imprime en un documento."""
+    t = (t or "").strip()
+    return t[:1].upper() + t[1:] if t else ""
+
+
+def _motivo_del_texto(mensajes):
+    """Saca el motivo de lo que escribió el empleado. SIN modelo.
+
+    Esto existe para que sacar el motivo de la herramienta no deje al agente
+    pareciendo inútil: si el empleado escribió "voy al médico" y el panel se
+    lo vuelve a preguntar, el agente no sirvió de nada. Eso fue exactamente
+    la queja del 20 de noviembre.
+
+    El resultado va PRELLENADO y EDITABLE en el panel, y el empleado lo lee
+    antes de registrar. Por eso aquí sí se puede arriesgar una heurística,
+    al contrario que con la fecha: una fecha mal puesta pasa desapercibida
+    porque se ve plausible, un motivo mal puesto se ve raro y se corrige.
+    """
+    texto = " ".join(_txt(m.get("content")) for m in (mensajes or [])
+                     if isinstance(m, dict) and m.get("role") == "user")
+    t = " ".join(texto.lower().split())
+    if not t:
+        return ""
+    for r in _RUIDO_MOTIVO:
+        t = t.replace(r, " | ")
+    # Fuera fechas y horas: ya están capturadas en sus propios campos.
+    t = re.sub(r"\b(hoy|mañana|manana|lunes|martes|miercoles|miércoles|jueves"
+               r"|viernes|sabado|sábado|domingo)\b", " ", t)
+    t = re.sub(r"\b\d{1,2}\s*de\s+[a-záéíóúñ]+(\s+de\s+\d{4})?", " ", t)
+    t = re.sub(r"\b(a\s+las?\s+)?\d{1,2}(:\d{2})?\s*"
+               r"(a\.?\s?m\.?|p\.?\s?m\.?|de la (mañana|tarde|noche)|hrs?)?",
+               " ", t)
+    # Las palabras de relleno se quitan SOLO al principio de cada pieza. Si
+    # se quitan en todo el texto, "tengo que ir a observar el curso de
+    # metafísica" queda en "tengo ir a observar curso metafisica", y esa
+    # frase se imprime en un documento oficial.
+    piezas = []
+    for p in t.split("|"):
+        p = " ".join(p.split())
+        p = re.sub(r"^(oye|hola|buenas|buenos dias|porfa|por favor|gracias"
+                   r"|y|que|pero|es|este|eh)\b[\s,]*", "", p).strip(" ,.;:")
+        p = re.sub(r"^(oye|hola|y|que|pero)\b[\s,]*", "", p).strip(" ,.;:")
+        if len(p.split()) >= 2:
+            piezas.append(p)
+    if not piezas:
+        return ""
+    # Primero una pieza que empiece con una marca de motivo.
+    for p in piezas:
+        for m in _MARCAS_MOTIVO:
+            if p.startswith(m) or f" {m} " in f" {p} ":
+                corte = p.find(m)
+                frase = p[corte:].strip(" ,.;:")
+                if len(frase.split()) >= 2:
+                    return _cap(frase[:120])
+    # Si no hay marca, la pieza más larga: suele ser la explicación.
+    return _cap(max(piezas, key=lambda x: len(x.split())).strip(" ,.;:")[:120])
+
+
 def _rescatar_del_texto(mensajes, datos):
     """Rellena el pase con lo que el empleado YA escribió, sin modelo.
 
@@ -1083,8 +1319,9 @@ def _rescatar_del_texto(mensajes, datos):
     palabras del propio empleado. Si hay dos fechas o las horas no cuadran
     con el tipo de pase, no reparte nada: las enseña y que elija él.
 
-    El motivo no se rescata a propósito: es texto libre y acaba impreso en un
-    documento oficial. Una frase adivinada ahí es peor que un campo vacío.
+    El motivo SÍ se rescata, con _motivo_del_texto(): ya no viaja al modelo,
+    así que extraerlo aquí no expone nada, y el empleado lo ve prellenado y
+    editable antes de registrar.
     """
     texto = " ".join(_txt(m.get("content")) for m in (mensajes or [])
                      if isinstance(m, dict) and m.get("role") == "user")
@@ -1095,6 +1332,8 @@ def _rescatar_del_texto(mensajes, datos):
         t = _codigo_tipo(texto)
         if t:
             d["tipo"] = t
+    if not _txt(d.get("motivo")):
+        d["motivo"] = _motivo_del_texto(mensajes)
 
     # _normalizar_fecha devuelve ISO solo cuando de verdad pudo leer la fecha;
     # si no, regresa el texto crudo, y aquí se descarta por el regex.
@@ -2262,13 +2501,37 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
             # ARI acaba de preguntar del pase. Una duda de otro tema se va al
             # cerebro de dudas, que es el que tiene la normativa, y el pase
             # SE QUEDA ABIERTO esperando el botón.
-            _es_pase = bool(deps_pase) and not st.session_state.get("_ari_pase_cerrado") and (
+            # Documentos va PRIMERO: solo lo alcanza el admin, y "necesito
+            # las comisiones" no debe confundirse con un pase.
+            # documentos_module necesita get_client. Viene en deps_pase para
+            # que app_incidencias solo tenga que agregar UNA clave a ese dict
+            # y no haya que inyectar nada más. Si falta, la herramienta lo
+            # dice con todas sus letras en vez de reventar.
+            if _DOC is not None and (deps_pase or {}).get("get_client"):
+                _DOC.configurar(get_client=deps_pase["get_client"])
+            _es_doc = _DOC is not None and st.session_state.get("rol") == "admin" and (
+                _parece_documento(pregunta)
+                or (bool(st.session_state.get("doc_pend"))
+                    and _es_continuacion_doc(pregunta)))
+            _es_pase = (not _es_doc) and bool(deps_pase) and not st.session_state.get("_ari_pase_cerrado") and (
                 _parece_pase(pregunta)
                 or (bool(st.session_state.get("ari_pase"))
                     and _es_continuacion_pase(pregunta)))
-            _traza("0_ruta", "agente (pase)" if _es_pase else "chat (duda de RH)")
+            _traza("0_ruta", "agente (documentos)" if _es_doc
+                   else ("agente (pase)" if _es_pase else "chat (duda de RH)"))
             try:
-                if _es_pase:
+                if _es_doc:
+                    _nom = (deps_pase or {}).get("nombre", "")
+                    with st.spinner("ARI esta preparando los documentos..."):
+                        # forzar=None: hay DOS herramientas de preparar y
+                        # obligar a una elegiría mal la mitad de las veces.
+                        texto, _pasos = _agente(
+                            _hist[-4:], {}, _nom,
+                            herramientas=_DOC.HERRAMIENTAS_DOC,
+                            sistema=prompt_agente_doc(_nom),
+                            ejecutor=_ejecutar_doc, forzar=None, clase="doc")
+                    _traza("agente_pasos", _pasos)
+                elif _es_pase:
                     # El agente tampoco necesita doce turnos de contexto: le
                     # bastan los últimos del propio pase, y cada turno extra
                     # son tokens que vuelven a viajar en cada paso.
@@ -2303,6 +2566,14 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                         st.session_state.setdefault(
                             "ari_pase", {"tipo": "", "fecha": "", "motivo": ""})
                         st.caption("Modo de respaldo: captura tu pase en los campos de abajo.")
+                    elif _es_doc:
+                        # Para documentos no hay formulario de emergencia, y
+                        # Gemini acaba de contestar SIN herramientas: no
+                        # preparó nada. Decirlo, no dejar que parezca hecho.
+                        st.warning("No pude preparar los documentos: el "
+                                   "agente no está disponible. **No se "
+                                   "preparó nada.** Usa la app de días "
+                                   "económicos mientras.")
                 except Exception as e2:
                     texto = _mensaje_de_fallo(e2)
                     st.session_state["_ari_chat_error"] = f"{type(e).__name__}: {e} || {type(e2).__name__}: {e2}"
@@ -2327,6 +2598,11 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
     # una sola, no dos asistentes separados.
     if deps_pase:
         _panel_pase_en_chat(deps_pase)
+    if _DOC is not None and st.session_state.get("rol") == "admin":
+        try:
+            _DOC.panel_documento_en_chat()
+        except Exception as _ed:
+            st.warning(f"El panel de documentos falló: {_ed}")
 
     # ── Diagnóstico (solo admin) ──────────────────────────────────────
     # Esto existe porque la captura falla en silencio: el chat se ve normal
