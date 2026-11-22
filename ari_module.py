@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v40 · busca en el minutario · 21-nov"
+ARI_VERSION = "agente v42 · ante la duda, busca · 21-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -823,8 +823,13 @@ def prompt_agente_doc(nombre=""):
         "Pregunta SOLO lo que falte, de uno en uno.\n"
         "Cuando tengas todo, llama a preparar_constancias o a "
         "preparar_comisiones.\n"
-        "Si pide VER, MOSTRAR o RECUPERAR una comisión ya hecha (no generar "
-        "una nueva), llama a buscar_oficio con el centro o la persona.\n"
+        "Si pide VER, MOSTRAR, MANDAR o RECUPERAR una comisión ya hecha, el "
+        "ACUSE, el oficio firmado o una copia para reimprimir, llama a "
+        "buscar_oficio con el centro o la persona.\n"
+        "REGLA IMPORTANTE: generar una comisión quema un número de oficio del "
+        "minutario y eso no se deshace. Si NO te dio número de oficio inicial "
+        "ni fechas de la comisión, NO llames a preparar_comisiones: o llama a "
+        "buscar_oficio, o llama a faltan_datos. Ante la duda, buscar.\n"
         "SIEMPRE tienes que llamar a una herramienta. Si pide constancias o "
         "comisiones pero falta un dato, llama a faltan_datos. Si el mensaje "
         "NO es sobre generar constancias ni comisiones —dudas de nómina, "
@@ -2699,8 +2704,15 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
             # ARI acaba de preguntar del pase. Una duda de otro tema se va al
             # cerebro de dudas, que es el que tiene la normativa, y el pase
             # SE QUEDA ABIERTO esperando el botón.
-            # ANTES de cualquier ruteo: si el CÓDIGO tiene la respuesta exacta,
-            # el modelo no participa. Cero llamadas y cero invención.
+            # documentos_module se configura AQUÍ, antes de todo. Estaba
+            # más abajo y por eso, en el PRIMER mensaje de la sesión,
+            # hay_minutario() todavía decía False: ARI contestaba "no puedo
+            # buscar" y al segundo intento ya funcionaba. Un bug que solo
+            # aparece en el primer mensaje es de los que no se reproducen.
+            if _DOC is not None and (deps_pase or {}).get("get_client"):
+                _DOC.configurar(get_client=deps_pase["get_client"])
+
+            # Si el CÓDIGO tiene la respuesta exacta, el modelo no participa.
             _fija = _respuesta_fija(pregunta)
             _es_doc = _es_pase = False
             if _fija:
@@ -2709,12 +2721,6 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
             else:
                 # Documentos va PRIMERO: solo lo alcanza el admin, y "necesito
                 # las comisiones" no debe confundirse con un pase.
-                # documentos_module necesita get_client. Viene en deps_pase para
-                # que app_incidencias solo tenga que agregar UNA clave a ese dict
-                # y no haya que inyectar nada más. Si falta, la herramienta lo
-                # dice con todas sus letras en vez de reventar.
-                if _DOC is not None and (deps_pase or {}).get("get_client"):
-                    _DOC.configurar(get_client=deps_pase["get_client"])
                 # EL RUTEO DEL ADMIN LO DECIDE EL AGENTE, no mis listas.
                 # Se le dan las herramientas de documentos y se le OBLIGA a
                 # llamar una (forzar="*"). Si llama a no_es_de_documentos,

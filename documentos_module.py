@@ -27,7 +27,7 @@ los dos lados: en el panel y en el ejecutor de las herramientas, para que una
 herramienta no se pueda disparar desde el chat de un empleado.
 """
 
-VERSION = "documentos v9 · QR 2.3 cm inferior derecha · 21-nov"
+VERSION = "documentos v14 · un PDF y un SHA por oficio · 21-nov"
 
 import os
 import re
@@ -237,14 +237,36 @@ HERRAMIENTAS_DOC = [
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
         "name": "buscar_oficio",
-        "description": ("Busca comisiones YA generadas en el minutario. "
-                        "Úsala cuando pida ver, mostrar o recuperar una "
-                        "comisión anterior, no cuando pida generar una."),
+        "description": ("Busca oficios YA registrados en el minutario (de "
+                        "cualquier tipo: comisiones, estímulos, "
+                        "reincorporaciones) y "
+                        "devuelve sus ligas. Úsala cuando pida ver, mostrar, "
+                        "mandar, pasar o recuperar una comisión anterior, el "
+                        "ACUSE de un oficio, el oficio firmado, o una copia "
+                        "para REIMPRIMIR. Úsala también si pide 'la comisión "
+                        "de' alguien SIN darte número de oficio ni fechas: "
+                        "eso casi siempre es buscar una existente, no "
+                        "generar una nueva."),
         "parameters": {"type": "object", "properties": {
             "centro": {"type": "string",
                        "description": "Centro de maestros, número o nombre"},
             "persona": {"type": "string",
-                        "description": "Nombre de la persona, si lo dice"},
+                        "description": ("Nombre de la persona, si lo dice. "
+                                        "Puede ser el destinatario o el "
+                                        "comisionado.")},
+            "folio": {"type": "string",
+                      "description": "Número de oficio, si lo dice: 1739, 118"},
+            "asunto": {"type": "string",
+                       "description": ("Tema del oficio cuando NO es una "
+                                       "comisión: 'Reincorporación', "
+                                       "'estímulo', 'remisión de "
+                                       "expedientes'. Vacío = cualquiera.")},
+            "tipo_comision": {
+                "type": "string",
+                "description": ("Para comisiones, cuál de los dos tipos: "
+                                "'coordinador' (coordinador o encargado de "
+                                "Centro de Maestros) o 'normal' (la de "
+                                "asesor). Vacío = las dos.")},
         }, "required": []}}},
     {"type": "function", "function": {
         "name": "mostrar_boton_generar",
@@ -382,10 +404,24 @@ def ejecutar(nombre, args, rol=None):
 
 
 def _t_buscar(args):
-    """Busca comisiones ya registradas. Devuelve folio, fecha y liga.
+    """Busca en el minutario REAL y devuelve las dos ligas de cada oficio.
 
-    NO devuelve nombres: la liga y el folio bastan para que el admin abra el
-    documento, y los nombres no tienen por qué viajar al modelo.
+    Escrito contra la estructura de verdad del Sheet, no contra la que yo
+    suponía. Lo que el minutario resultó ser:
+
+      · No es una tabla de comisiones: hay estímulos, reincorporaciones,
+        remisión de expedientes. Por eso NO se filtra por asunto salvo que
+        lo pidan: antes exigía que ASUNTO dijera "comisi" y todo lo demás
+        era invisible.
+      · ESTADO vale ACUSE o HISTORICO, no EMITIDO/ESCANEADO.
+      · En las filas HISTORICO, URL_EMITIDO viene VACÍO y el documento está
+        solo en URL_ESCANEO. Así que la disponibilidad se decide mirando
+        cada liga, nunca el ESTADO.
+      · DIRIGIDO_A unas veces es el destinatario del oficio (la jefa de un
+        departamento) y otras la persona comisionada. Se busca por
+        coincidencia de palabras, que acierta en los dos casos.
+
+    No devuelve nombres al modelo: folio, fecha, asunto y ligas.
     """
     if not hay_minutario():
         return {"error": ("El minutario no está disponible, así que no puedo "
@@ -400,34 +436,79 @@ def _t_buscar(args):
     col = {c.upper(): c for c in df.columns}
     def _c(n):
         return col.get(n, n)
-    dfx = df[df[_c("ASUNTO")].astype(str).str.contains(
-        "comisi", case=False, na=False)]
-    if dfx.empty:
-        return {"encontrados": 0,
-                "nota": ("No hay comisiones registradas en el minutario. "
-                         "Solo aparecen las generadas desde que se conectó.")}
+
+    dfx = df
+    folio = re.sub(r"\D", "", str(args.get("folio") or ""))
+    if folio:
+        dfx = dfx[dfx[_c("ID_OFICIO")].astype(str).str.contains(
+            folio, na=False) | dfx[_c("FOLIO")].astype(str).str.strip()
+            .str.lstrip("0").eq(folio.lstrip("0"))]
+    # Los dos tipos de comisión NO se separan con una búsqueda de texto:
+    # "asigna comision" está dentro de "asigna Comisión/Coordinador", así
+    # que pedir la normal devolvía las dos. Es un concepto del dominio y
+    # lleva su propio filtro: la palabra "coordinador" en el asunto es lo
+    # que las distingue.
+    tipo = _norm(args.get("tipo_comision"))
+    if tipo:
+        _es_coord = dfx[_c("ASUNTO")].astype(str).map(
+            lambda v: "coordinador" in _norm(v))
+        _es_com = dfx[_c("ASUNTO")].astype(str).map(
+            lambda v: "comision" in _norm(v))
+        dfx = dfx[_es_coord] if "coord" in tipo or "encarg" in tipo \
+            else dfx[_es_com & ~_es_coord]
+
+    asunto = str(args.get("asunto") or "").strip()
+    if asunto:
+        # Sin acentos en los DOS lados: en el Sheet dice "ESTÍMULO DEL
+        # SERVIDOR PÚBLICO" y nadie lo escribe con acentos al preguntar.
+        _a = _norm(asunto)
+        dfx = dfx[dfx[_c("ASUNTO")].astype(str).map(
+            lambda v: _a in _norm(v))]
     centro = str(args.get("centro") or "").strip()
     if centro:
-        dfx = dfx[dfx[_c("OBSERVACIONES")].astype(str).map(
-            lambda v: _casa_centro(centro, v))]
+        _obs = dfx[_c("OBSERVACIONES")].astype(str)
+        _asu = dfx[_c("ASUNTO")].astype(str)
+        dfx = dfx[_obs.map(lambda v: _casa_centro(centro, v))
+                  | _asu.map(lambda v: _casa_centro(centro, v))]
     persona = str(args.get("persona") or "").strip()
     if persona:
         dfx = dfx[dfx[_c("DIRIGIDO_A")].astype(str).map(
             lambda v: _casa_nombre(persona, v))]
+
     if dfx.empty:
         return {"encontrados": 0,
-                "nota": "No hay comisiones registradas que cuadren con eso."}
+                "nota": ("No hay nada en el minutario que cuadre con eso. "
+                         "Ofrece buscar por el nombre de la persona, por el "
+                         "número de folio o por el asunto.")}
 
     dfx = dfx.sort_values(_c("FECHA_OFICIO"), ascending=False)
     salida = []
-    for _, r in dfx.head(3).iterrows():
-        salida.append({"folio": str(r.get(_c("ID_OFICIO"), "")),
-                       "fecha": str(r.get(_c("FECHA_OFICIO"), "")),
-                       "liga": str(r.get(_c("URL_EMITIDO"), "")) or "(sin liga)"})
-    # Se guardan para pintarlos en el panel con nombre y todo.
+    for _, r in dfx.head(4).iterrows():
+        # URL_EMITIDO = el oficio generado, SIN firma (sirve para
+        # reimprimir). URL_ESCANEO = el mismo ya FIRMADO y con acuse de
+        # recibo. Van con el nombre entero y en null cuando no están: un
+        # campo presente y vacío no se puede rellenar inventando, uno
+        # ausente sí —y eso fue lo que hizo dar tres veces la misma liga.
+        _emi = str(r.get(_c("URL_EMITIDO"), "") or "").strip()
+        _esc = str(r.get(_c("URL_ESCANEO"), "") or "").strip()
+        salida.append({
+            "folio": str(r.get(_c("ID_OFICIO"), "")),
+            "fecha": str(r.get(_c("FECHA_OFICIO"), "")),
+            "asunto": str(r.get(_c("ASUNTO"), ""))[:60],
+            "estado": str(r.get(_c("ESTADO"), "")),
+            "liga_oficio_sin_firma": _emi or None,
+            "liga_oficio_firmado_con_acuse": _esc or None,
+            "fecha_del_acuse": str(r.get(_c("FECHA_ESCANEO"), "") or "") or None,
+        })
     st.session_state["doc_hallados"] = salida
-    return {"encontrados": len(dfx), "ultimos": salida,
-            "nota": ("Dale la liga del más reciente. NO enumeres nombres.")}
+    return {"encontrados": int(len(dfx)), "ultimos": salida,
+            "nota": ("Son DOS documentos del MISMO oficio: "
+                     "liga_oficio_sin_firma es el generado sin firma, para "
+                     "reimprimir; liga_oficio_firmado_con_acuse es el "
+                     "escaneado ya firmado y con acuse. Da la que pidan, y "
+                     "las dos si solo piden 'el oficio'. Si una viene en "
+                     "null, di que ESA no está en el minutario y NUNCA des "
+                     "la otra en su lugar. NO enumeres nombres.")}
 
 
 def _t_constancias(args):
@@ -657,29 +738,25 @@ def registrar_en_minutario(pend, ruta_docx):
         avisos.append(f"Quedó registrado pero sin QR: {e}")
         sellado = crudo
 
-    pymupdf = getattr(_OF, "pymupdf", None)
+    # Se usan las funciones de oficios_module, no un partidor propio:
+    # extraer_paginas saca la hoja de cada quien y sha256_bytes deja la
+    # huella del archivo. Yo había escrito mi propio corte con pymupdf y
+    # NO guardaba el SHA — que es justo lo que permite comprobar después
+    # si alguien sustituyó el PDF en Drive. Duplicar la lógica es cómo se
+    # pierden esas cosas.
     cambios = {}
     for r in aceptados:
         try:
-            if pymupdf is not None:
-                doc = pymupdf.open(stream=sellado, filetype="pdf")
-                try:
-                    una = pymupdf.open()
-                    una.insert_pdf(doc, from_page=r["pagina"],
-                                   to_page=r["pagina"])
-                    trozo = una.tobytes()
-                    una.close()
-                finally:
-                    doc.close()
-            else:
-                trozo = sellado
+            hoja = _OF.extraer_paginas(sellado, [r["pagina"]])
             url = _OF.subir_bytes_drive(
-                trozo, f"{r['id_oficio'].replace('/', '-')}.pdf",
-                "application/pdf")
+                hoja, f"{r['id_oficio']}_SINFIRMA.pdf", "application/pdf")
             if str(url).startswith("ERROR"):
                 avisos.append(f"{r['id_oficio']}: no se pudo subir — {url}")
             else:
-                cambios[r["id_oficio"]] = {"URL_EMITIDO": url}
+                cambios[r["id_oficio"]] = {
+                    "URL_EMITIDO": url,
+                    "SHA256_EMITIDO": _OF.sha256_bytes(hoja),
+                }
         except Exception as e:
             avisos.append(f"{r['id_oficio']}: {type(e).__name__}: {e}")
 
@@ -741,7 +818,7 @@ def _generar(pend):
 
 def limpiar():
     for k in ("doc_pend", "doc_generado", "_doc_mostrar_boton",
-              "doc_ambiguos"):
+              "doc_ambiguos", "doc_hallados"):
         st.session_state.pop(k, None)
 
 
@@ -783,6 +860,31 @@ def panel_documento():
     """Resumen, generación y descargas. Solo admin."""
     if not puede_documentos():
         return
+    hall = st.session_state.get("doc_hallados")
+    if hall:
+        st.markdown("📘 **Encontrado en el minutario**")
+        for h in hall:
+            st.markdown(f"**{h['folio']}** · {h['fecha']} · {h.get('estado','')}")
+            c1, c2 = st.columns(2)
+            with c1:
+                if h.get("liga_oficio_sin_firma"):
+                    st.link_button("📄 Oficio para reimprimir",
+                                   h["liga_oficio_sin_firma"],
+                                   use_container_width=True)
+                else:
+                    st.caption("Sin oficio registrado")
+            with c2:
+                if h.get("liga_oficio_firmado_con_acuse"):
+                    st.link_button("✍️ Firmado con acuse",
+                                   h["liga_oficio_firmado_con_acuse"],
+                                   use_container_width=True)
+                else:
+                    st.caption("Acuse todavía no escaneado")
+        if st.button("Cerrar", key="doc_cerrar_hallados"):
+            st.session_state.pop("doc_hallados", None)
+            st.rerun()
+        st.divider()
+
     amb = st.session_state.get("doc_ambiguos")
     if amb:
         _resolver_ambiguos(amb)
@@ -990,7 +1092,8 @@ def panel_documento_en_chat():
     if not puede_documentos():
         return
     if not (st.session_state.get("doc_pend")
-            or st.session_state.get("doc_ambiguos")):
+            or st.session_state.get("doc_ambiguos")
+            or st.session_state.get("doc_hallados")):
         # Nada en curso: se ofrece el formulario, que no depende del chat.
         formulario_directo()
         return
