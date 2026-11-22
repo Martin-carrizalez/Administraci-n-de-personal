@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v38 · el agente decide la ruta · 21-nov"
+ARI_VERSION = "agente v40 · busca en el minutario · 21-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -750,7 +750,15 @@ def _respuesta_fija(texto):
         _genera = any(w in tl for w in (
             "genera", "generar", "genarar", "gener", "haz", "hacer", "haces",
             "elabora", "elaborar", "nueva", "nuevo", "nuevas", "nuevos"))
-        if _busca and not _genera:
+        _hay_min = False
+        try:
+            _hay_min = bool(_DOC and _DOC.hay_minutario())
+        except Exception:
+            _hay_min = False
+        if _busca and not _genera and not _hay_min:
+            # Con el minutario conectado esto NO se intercepta: el agente
+            # llama a buscar_oficio y devuelve la liga. El mensaje fijo
+            # queda solo para cuando de verdad no hay dónde buscar.
             return ("Todavía no puedo **buscar** documentos ya generados: solo "
                     "sé generarlos nuevos.\n\n"
                     "Para eso hay que conectar el minutario de oficios (subir "
@@ -815,6 +823,8 @@ def prompt_agente_doc(nombre=""):
         "Pregunta SOLO lo que falte, de uno en uno.\n"
         "Cuando tengas todo, llama a preparar_constancias o a "
         "preparar_comisiones.\n"
+        "Si pide VER, MOSTRAR o RECUPERAR una comisión ya hecha (no generar "
+        "una nueva), llama a buscar_oficio con el centro o la persona.\n"
         "SIEMPRE tienes que llamar a una herramienta. Si pide constancias o "
         "comisiones pero falta un dato, llama a faltan_datos. Si el mensaje "
         "NO es sobre generar constancias ni comisiones —dudas de nómina, "
@@ -888,6 +898,27 @@ def _es_continuacion_pase(texto) -> bool:
     return len(t.split()) <= 4 and "?" not in t and "¿" not in t
 
 
+def _quiere_generar(texto) -> bool:
+    """Con un documento YA preparado, ¿está diciendo que lo haga?
+
+    Generoso a propósito, al contrario que _es_confirmacion. Esto solo SACA
+    EL BOTÓN: generar sigue requiriendo que lo aprietes. Un falso positivo no
+    cuesta nada; un falso negativo te hace confirmar tres veces, que es lo
+    que pasó el 21-nov con "correcto generalas" y "esta bein hazlas".
+    """
+    t = _sin_acentos(" ".join(_txt(texto).lower().split()))
+    t = re.sub(r"[¡!¿?.,;:]+", " ", t)
+    pal = set(t.split())
+    if pal & {"si", "ok", "okey", "dale", "listo", "correcto", "exacto",
+              "adelante", "procede", "va", "confirmo", "confirmado",
+              "perfecto", "hazlas", "hazlos", "hazla", "hazlo", "generalas",
+              "generalos", "generala", "generalo", "yes"}:
+        return True
+    return any(w in t for w in ("genera", "gener", "haz ", "hacer",
+                                "esta bien", "esta bein", "asi esta",
+                                "de acuerdo", "procedo"))
+
+
 def _es_confirmacion(texto) -> bool:
     """¿El mensaje es un "sí" y nada más?
 
@@ -940,7 +971,7 @@ def _agente(mensajes, deps, nombre="", herramientas=None, sistema=None,
             st.session_state["_ari_mostrar_boton"] = True
             return ("Listo. Tu pase ya está armado: aprieta el botón de "
                     "registrar para que quede."), pasos
-    elif st.session_state.get("doc_pend") and _es_confirmacion(_ultimo):
+    elif st.session_state.get("doc_pend") and _quiere_generar(_ultimo):
         # Mismo razonamiento que en los pases: el historial de tool_calls no
         # sobrevive al turno, así que si esto lo decidiera el modelo volvería
         # a preparar el documento y pediría confirmación otra vez.
@@ -1000,6 +1031,19 @@ def _agente(mensajes, deps, nombre="", herramientas=None, sistema=None,
                          "content": json.dumps(resultado, ensure_ascii=False)})
     # Se acabaron los pasos sin una respuesta final: no se deja al empleado
     # con la pantalla muda.
+    # Se acabaron los pasos sin respuesta final. El mensaje depende de lo que
+    # SÍ se logró: "Preparé lo que pude" después de preparar bien 37
+    # constancias sonaba a error y hacía repetir la confirmación.
+    _hechas = [x["herramienta"] for x in pasos
+               if (x.get("resultado") or {}).get("listo")
+               or (x.get("resultado") or {}).get("ruta") == "documentos"]
+    if any(h == "mostrar_boton_registrar" for h in _hechas):
+        return "Listo. Aprieta el botón de abajo para registrarlo.", pasos
+    if any(h == "mostrar_boton_generar" for h in _hechas):
+        return "Listo. Aprieta el botón de abajo para generar.", pasos
+    if any(h.startswith("preparar") for h in _hechas):
+        return ("Ya está preparado: revisa el resumen de abajo y aprieta el "
+                "botón."), pasos
     return ("Preparé lo que pude de tu solicitud. Revisa el resumen de abajo "
             "o dime si falta algo."), pasos
 

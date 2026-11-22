@@ -27,7 +27,7 @@ los dos lados: en el panel y en el ejecutor de las herramientas, para que una
 herramienta no se pueda disparar desde el chat de un empleado.
 """
 
-VERSION = "documentos v5 · formulario sin chat · 21-nov"
+VERSION = "documentos v9 · QR 2.3 cm inferior derecha · 21-nov"
 
 import os
 import re
@@ -48,6 +48,18 @@ TAB_COMISIONES = "Comisiones"
 # Los dos tipos tal como están escritos EN LA COLUMNA tipo_comision del Sheet.
 # Si alguien los renombra allá, aquí deja de filtrar: por eso están en una
 # sola constante y no repartidos por el código.
+# QR del minutario: inferior derecha ("ID") y 2.3 cm de lado.
+#
+# El 2.3 NO es arbitrario y NO son los 2.0 que se pidieron: está medido en
+# oficios_module sobre escaneo degradado a 150 dpi, que es el caso real del
+# acuse firmado y escaneado. Con la URL completa (49 módulos) 2.3 cm lee
+# 12/12 veces y 2.0 cm falla 12/12. Un QR que no se lee falla en silencio:
+# el folio queda sin poder validarse y nadie se entera hasta que alguien lo
+# intenta. Para bajarlo a 2.0 se cambia este número y nada más.
+QR_LADO_CM = 2.3
+QR_POSICION = "ID"          # ID = inferior derecha
+QR_MARGEN_CM = 1.0
+
 TIPO_CM = "Encargado CM"
 TIPO_GENERAL = "General"
 
@@ -224,6 +236,17 @@ HERRAMIENTAS_DOC = [
                         "económicos, pases, saludos o cualquier otro tema."),
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
+        "name": "buscar_oficio",
+        "description": ("Busca comisiones YA generadas en el minutario. "
+                        "Úsala cuando pida ver, mostrar o recuperar una "
+                        "comisión anterior, no cuando pida generar una."),
+        "parameters": {"type": "object", "properties": {
+            "centro": {"type": "string",
+                       "description": "Centro de maestros, número o nombre"},
+            "persona": {"type": "string",
+                        "description": "Nombre de la persona, si lo dice"},
+        }, "required": []}}},
+    {"type": "function", "function": {
         "name": "mostrar_boton_generar",
         "description": ("Llámala cuando el admin confirme que los datos del "
                         "resumen están bien. Saca el botón de generar."),
@@ -289,9 +312,28 @@ def _filtrar_centro(df, columnas, centro):
         m = df[c].astype(str).map(lambda v: _casa_centro(centro, v))
         mask = m if mask is False else (mask | m)
     dfx = df[mask]
-    if dfx.empty:
-        return dfx, f"No hay nadie del centro «{centro}» en esa hoja."
-    return dfx, None
+    if not dfx.empty:
+        return dfx, None
+
+    # Cero resultados tiene DOS causas muy distintas y el mensaje tiene que
+    # decir cuál: o escribió mal el centro, o esa hoja no registra el centro
+    # de nadie. El 21-nov la hoja de Constancias no traía centro y el mensaje
+    # decía "no encontré a nadie con ese nombre", que suena a culpa del
+    # admin: se gastó un turno averiguándolo.
+    hay_centros = False
+    for c in cols:
+        vals = df[c].astype(str)
+        if vals.str.contains(r"centro|\bcm\b|\d{2}\s*-\s*\d{2}",
+                             case=False, regex=True, na=False).any():
+            hay_centros = True
+            break
+    if not hay_centros:
+        return dfx, ("Esa hoja NO registra el centro de maestros (las "
+                     "columnas que podrían traerlo vienen con otra cosa), "
+                     "así que no puedo filtrar por centro. Puedo generar "
+                     "todas, o dime los nombres de las personas.")
+    return dfx, (f"No hay nadie del centro «{centro}» en esa hoja. Revisa el "
+                 f"nombre o dame el número del centro.")
 
 
 def _iso(v):
@@ -324,6 +366,8 @@ def ejecutar(nombre, args, rol=None):
         return _t_constancias(args)
     if nombre == "preparar_comisiones":
         return _t_comisiones(args)
+    if nombre == "buscar_oficio":
+        return _t_buscar(args)
     if nombre == "no_es_de_documentos":
         return {"ruta": "otro"}
     if nombre == "faltan_datos":
@@ -335,6 +379,55 @@ def ejecutar(nombre, args, rol=None):
         st.session_state["_doc_mostrar_boton"] = True
         return {"listo": True}
     return {"error": f"Herramienta desconocida: {nombre}"}
+
+
+def _t_buscar(args):
+    """Busca comisiones ya registradas. Devuelve folio, fecha y liga.
+
+    NO devuelve nombres: la liga y el folio bastan para que el admin abra el
+    documento, y los nombres no tienen por qué viajar al modelo.
+    """
+    if not hay_minutario():
+        return {"error": ("El minutario no está disponible, así que no puedo "
+                          "buscar oficios registrados.")}
+    try:
+        df = _OF.cargar_oficios(_deps["get_client"])
+    except Exception as e:
+        return {"error": f"No se pudo leer el minutario: {e}"}
+    if df is None or df.empty:
+        return {"error": "El minutario está vacío."}
+
+    col = {c.upper(): c for c in df.columns}
+    def _c(n):
+        return col.get(n, n)
+    dfx = df[df[_c("ASUNTO")].astype(str).str.contains(
+        "comisi", case=False, na=False)]
+    if dfx.empty:
+        return {"encontrados": 0,
+                "nota": ("No hay comisiones registradas en el minutario. "
+                         "Solo aparecen las generadas desde que se conectó.")}
+    centro = str(args.get("centro") or "").strip()
+    if centro:
+        dfx = dfx[dfx[_c("OBSERVACIONES")].astype(str).map(
+            lambda v: _casa_centro(centro, v))]
+    persona = str(args.get("persona") or "").strip()
+    if persona:
+        dfx = dfx[dfx[_c("DIRIGIDO_A")].astype(str).map(
+            lambda v: _casa_nombre(persona, v))]
+    if dfx.empty:
+        return {"encontrados": 0,
+                "nota": "No hay comisiones registradas que cuadren con eso."}
+
+    dfx = dfx.sort_values(_c("FECHA_OFICIO"), ascending=False)
+    salida = []
+    for _, r in dfx.head(3).iterrows():
+        salida.append({"folio": str(r.get(_c("ID_OFICIO"), "")),
+                       "fecha": str(r.get(_c("FECHA_OFICIO"), "")),
+                       "liga": str(r.get(_c("URL_EMITIDO"), "")) or "(sin liga)"})
+    # Se guardan para pintarlos en el panel con nombre y todo.
+    st.session_state["doc_hallados"] = salida
+    return {"encontrados": len(dfx), "ultimos": salida,
+            "nota": ("Dale la liga del más reciente. NO enumeres nombres.")}
 
 
 def _t_constancias(args):
@@ -470,6 +563,134 @@ def _t_comisiones(args):
 # ──────────────────────────────────────────────────────────────────────────
 # PANEL
 # ──────────────────────────────────────────────────────────────────────────
+def _pl(n, uno, varios):
+    """Singular y plural de verdad. "1 personas" y "1 documentos" se leen
+    como formulario mal hecho y le quitan seriedad a un documento oficial."""
+    return uno if n == 1 else varios
+
+
+# oficios_module es OPCIONAL igual que todo lo demás: si no está, las
+# comisiones se generan exactamente como hoy y solo no se registran.
+try:
+    import oficios_module as _OF
+    _OF_ERROR = ""
+except Exception as _e_of:
+    _OF = None
+    _OF_ERROR = f"{type(_e_of).__name__}: {_e_of}"
+
+
+def hay_minutario() -> bool:
+    return _OF is not None and bool(_deps.get("get_client"))
+
+
+def registrar_en_minutario(pend, ruta_docx):
+    """Sube cada comisión a Drive con su QR y la registra en el minutario.
+
+    Reutiliza ENTERO el pipeline que ya existe en oficios_module: nada de
+    esto se reescribió. registrar_emitidos_lote hace una lectura y una
+    escritura para todo el lote —por la cuota de Sheets— y devuelve el token
+    de cada oficio; estampar_lote_pdf pone un QR distinto por página;
+    subir_bytes_drive devuelve la liga.
+
+    Solo comisiones. Las constancias no son oficios: no llevan folio del
+    minutario ni QR.
+
+    Devuelve (cuantos_registrados, avisos). No lanza: si algo falla, la
+    comisión YA está generada y descargable, y lo único que se pierde es el
+    registro. Perder el registro es malo; perder el documento, peor.
+    """
+    avisos = []
+    if pend.get("clase") != "comisiones":
+        return 0, []
+    if not hay_minutario():
+        return 0, [f"El minutario no está disponible. {_OF_ERROR}".strip()]
+
+    pdf_path = convertir_word_a_pdf(ruta_docx)
+    if not pdf_path or not os.path.exists(pdf_path):
+        return 0, ["Para registrar en el minutario hace falta el PDF, y no "
+                   "hay conversor en el servidor. Agrega `libreoffice` a "
+                   "packages.txt. El Word ya está descargable."]
+    with open(pdf_path, "rb") as f:
+        crudo = f.read()
+
+    # El QR se estampa por PÁGINA, así que hay que saber qué página es cada
+    # oficio. Si las cuentas no cuadran NO se adivina: un QR en la página
+    # equivocada manda a validar el oficio de otra persona.
+    try:
+        paginas = _OF.paginas_con_contenido(crudo)
+    except Exception as e:
+        return 0, [f"No se pudieron contar las páginas del PDF: {e}"]
+    if len(paginas) != len(pend["personas"]):
+        return 0, [f"El PDF trae {len(paginas)} páginas con contenido y son "
+                   f"{len(pend['personas'])} oficios. No reparto los QR a "
+                   f"ciegas: revisa si alguna comisión ocupa dos páginas."]
+
+    anio = pend["fecha_doc"][:4]
+    asunto = (f"Comisión {pend['tipo']} del {pend['fecha_inicio']} al "
+              f"{pend['fecha_fin']}")
+    registros = [{
+        "anio": anio,
+        "folio": str(pend["oficio_inicial"] + i),
+        "fecha_oficio": pend["fecha_doc"],
+        "asunto": asunto,
+        "dirigido_a": nombre,
+        "cargo_destino": pend["tipo"],
+        "observaciones": (f"Centro: {pend['centro']}" if pend.get("centro")
+                          else "Generado desde ARI"),
+        "pagina": paginas[i],
+    } for i, nombre in enumerate(pend["personas"])]
+
+    aceptados, errs = _OF.registrar_emitidos_lote(_deps["get_client"],
+                                                  registros)
+    avisos += list(errs or [])
+    if not aceptados:
+        return 0, avisos or ["El minutario no aceptó ningún oficio."]
+
+    # Un PDF por oficio: el minutario apunta al documento de esa persona, no
+    # a un archivo de 40 páginas donde hay que buscarla.
+    try:
+        sellado = _OF.estampar_lote_pdf(
+            crudo, {r["pagina"]: r["token"] for r in aceptados},
+            posicion=QR_POSICION, lado_cm=QR_LADO_CM,
+            margen_cm=QR_MARGEN_CM)
+    except Exception as e:
+        avisos.append(f"Quedó registrado pero sin QR: {e}")
+        sellado = crudo
+
+    pymupdf = getattr(_OF, "pymupdf", None)
+    cambios = {}
+    for r in aceptados:
+        try:
+            if pymupdf is not None:
+                doc = pymupdf.open(stream=sellado, filetype="pdf")
+                try:
+                    una = pymupdf.open()
+                    una.insert_pdf(doc, from_page=r["pagina"],
+                                   to_page=r["pagina"])
+                    trozo = una.tobytes()
+                    una.close()
+                finally:
+                    doc.close()
+            else:
+                trozo = sellado
+            url = _OF.subir_bytes_drive(
+                trozo, f"{r['id_oficio'].replace('/', '-')}.pdf",
+                "application/pdf")
+            if str(url).startswith("ERROR"):
+                avisos.append(f"{r['id_oficio']}: no se pudo subir — {url}")
+            else:
+                cambios[r["id_oficio"]] = {"URL_EMITIDO": url}
+        except Exception as e:
+            avisos.append(f"{r['id_oficio']}: {type(e).__name__}: {e}")
+
+    if cambios:
+        try:
+            _OF.actualizar_filas_lote(_deps["get_client"], cambios)
+        except Exception as e:
+            avisos.append(f"Las ligas no se escribieron en el minutario: {e}")
+    return len(aceptados), avisos
+
+
 def _resumen(pend):
     """La línea que ve el admin antes de generar. Lleva título propio porque
     el panel se redibuja al final del hilo y, si entre medias pregunta otra
@@ -478,13 +699,14 @@ def _resumen(pend):
         _c = f" · centro **{pend['centro']}**" if pend.get("centro") else ""
         return (f"📄 **Constancias pendientes de generar**\n\n"
                 f"Quincena **{pend['quincena']}** de **{pend['anio']}**{_c} · "
-                f"**{len(pend['personas'])}** constancias")
+                f"**{len(pend['personas'])}** "
+                + _pl(len(pend['personas']), 'constancia', 'constancias'))
     of, n = pend["oficio_inicial"], len(pend["personas"])
     anio = pend["fecha_doc"][:4]
     return (f"📄 **Comisiones pendientes de generar**\n\n"
             f"**{pend['tipo']}** · oficios **{of}/52/{anio}** a "
             f"**{of + n - 1}/52/{anio}** · del **{pend['fecha_inicio']}** "
-            f"al **{pend['fecha_fin']}** · **{n}** personas"
+            f"al **{pend['fecha_fin']}** · **{n}** {_pl(n, 'persona', 'personas')}"
             + (f" · centro **{pend['centro']}**" if pend.get("centro") else ""))
 
 
@@ -571,7 +793,8 @@ def panel_documento():
 
     st.markdown(_resumen(pend))
 
-    with st.expander(f"👁️ Ver las {len(pend['personas'])} personas"):
+    _np = len(pend["personas"])
+    with st.expander(f"👁️ Ver {_pl(_np, 'a la persona', f'las {_np} personas')}"):
         if pend["clase"] == "comisiones":
             of = pend["oficio_inicial"]
             anio = pend["fecha_doc"][:4]
@@ -622,6 +845,11 @@ def panel_documento():
                         st.error(f"No se pudieron generar: {e}")
                         return
                 st.session_state["doc_generado"] = {"word": ruta}
+                if pend["clase"] == "comisiones" and hay_minutario():
+                    with st.spinner("Registrando en el minutario..."):
+                        _n, _av = registrar_en_minutario(pend, ruta)
+                    st.session_state["doc_generado"]["minutario"] = {
+                        "n": _n, "avisos": _av}
                 st.rerun()
         with c2:
             if st.button("🗑️ Cancelar", key="doc_cancel",
@@ -639,7 +867,17 @@ def panel_documento():
         st.session_state.pop("doc_generado", None)
         return
 
-    st.success(f"✅ Listo: {len(pend['personas'])} documentos en un solo Word.")
+    _nd = len(pend["personas"])
+    st.success(f"✅ Listo: {_nd} {_pl(_nd, 'documento', 'documentos')} en un "
+               f"{_pl(_nd, 'archivo', 'solo archivo')} Word.")
+    _min = hecho.get("minutario")
+    if _min:
+        if _min["n"]:
+            st.info(f"📘 {_min['n']} {_pl(_min['n'], 'oficio', 'oficios')} "
+                    f"{_pl(_min['n'], 'quedó', 'quedaron')} en el minutario "
+                    f"con QR y liga de Drive.")
+        for _a in _min.get("avisos", []):
+            st.warning(_a)
     c1, c2, c3 = st.columns(3)
     with c1:
         with open(ruta, "rb") as f:
