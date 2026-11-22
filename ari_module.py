@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v35 · ruta de documentos tolera typos · 21-nov"
+ARI_VERSION = "agente v36 · no fabrica documentos en el chat · 21-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -2621,9 +2621,17 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                 # dice con todas sus letras en vez de reventar.
                 if _DOC is not None and (deps_pase or {}).get("get_client"):
                     _DOC.configurar(get_client=deps_pase["get_client"])
+                # _doc_hilo marca que ESTAMOS en una conversación de
+                # documentos, aunque todavía no haya nada preparado. Antes la
+                # continuación exigía doc_pend, que solo existe DESPUÉS de
+                # llamar a preparar_*. Pero en el primer turno el agente solo
+                # pregunta ("¿de qué año?"), así que al contestar "2026" no
+                # había estado, el mensaje caía al cerebro de dudas y ese
+                # fabricó una constancia en el chat. Pasó el 21-nov.
                 _es_doc = _DOC is not None and st.session_state.get("rol") == "admin" and (
                     _parece_documento(pregunta)
-                    or (bool(st.session_state.get("doc_pend"))
+                    or ((bool(st.session_state.get("doc_pend"))
+                         or bool(st.session_state.get("_doc_hilo")))
                         and _es_continuacion_doc(pregunta)))
                 _es_pase = (not _es_doc) and bool(deps_pase) and not st.session_state.get("_ari_pase_cerrado") and (
                     _parece_pase(pregunta)
@@ -2634,6 +2642,7 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                 try:
                     if _es_doc:
                         _nom = (deps_pase or {}).get("nombre", "")
+                        st.session_state["_doc_hilo"] = True
                         with st.spinner("ARI esta preparando los documentos..."):
                             # forzar=None: hay DOS herramientas de preparar y
                             # obligar a una elegiría mal la mitad de las veces.
@@ -2643,6 +2652,23 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                                 sistema=prompt_agente_doc(_nom),
                                 ejecutor=_ejecutar_doc, forzar=None, clase="doc")
                         _traza("agente_pasos", _pasos)
+                        # Aquí el modelo tiene SOLO dos trabajos: llamar a una
+                        # herramienta, o preguntar en una línea lo que falta.
+                        # Si no llamó a nada y suelta un párrafo largo, está
+                        # redactando el documento él mismo —tablas de
+                        # conceptos, "CONSTANCIA DE SERVICIO Y PAGO"— y eso es
+                        # un documento falso con aspecto de oficial. No pasa.
+                        if not _pasos and len(texto) > 400:
+                            texto = (
+                                "No alcancé a preparar el documento. Dímelo "
+                                "en una línea con los datos: para constancias "
+                                "la **quincena**, el **año** y el **centro**; "
+                                "para comisiones el **tipo** (coordinadores o "
+                                "generales), el **oficio inicial** y las "
+                                "**fechas**.\n\n"
+                                "Los documentos solo se generan con el botón "
+                                "del panel: lo que yo escriba en el chat "
+                                "nunca es el documento.")
                     elif _es_pase:
                         # El agente tampoco necesita doce turnos de contexto: le
                         # bastan los últimos del propio pase, y cada turno extra
@@ -2653,6 +2679,8 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                         _traza("agente_pasos", _pasos)
                         st.session_state.pop("_ari_sin_tools", None)
                     else:
+                        # Fuera de la ruta de documentos se cierra el hilo.
+                        st.session_state.pop("_doc_hilo", None)
                         with st.spinner("ARI esta pensando..."):
                             texto, _c = responder_ia(
                                 st.session_state["ari_sistema"], _hist)
