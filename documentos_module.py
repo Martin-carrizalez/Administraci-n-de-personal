@@ -27,7 +27,7 @@ los dos lados: en el panel y en el ejecutor de las herramientas, para que una
 herramienta no se pueda disparar desde el chat de un empleado.
 """
 
-VERSION = "documentos v3 · filtro por centro · 21-nov"
+VERSION = "documentos v5 · formulario sin chat · 21-nov"
 
 import os
 import re
@@ -201,6 +201,28 @@ HERRAMIENTAS_DOC = [
                                          "personas='todos'.")},
         }, "required": ["tipo", "oficio_inicial", "fecha_inicio",
                         "fecha_fin", "personas"]}}},
+    # Estas dos NO generan nada: existen para que el RUTEO lo decida el
+    # modelo. Se le obliga a llamar alguna herramienta (tool_choice
+    # "required"), así que siempre elige una de las cuatro y el código lee
+    # cuál. Antes el ruteo era mío, con listas de palabras, y "contncais" o
+    # "conatnacais" no entraban: el admin pedía constancias y ARI contestaba
+    # como chat. El modelo entiende esos typos sin problema; lo que le
+    # faltaba era estar obligado a comprometerse.
+    {"type": "function", "function": {
+        "name": "faltan_datos",
+        "description": ("Úsala cuando SÍ pide constancias o comisiones pero "
+                        "falta algún dato para prepararlas."),
+        "parameters": {"type": "object", "properties": {
+            "que_falta": {"type": "string",
+                          "description": ("Qué falta, en pocas palabras: "
+                                          "'el año', 'el oficio inicial'...")},
+        }, "required": ["que_falta"]}}},
+    {"type": "function", "function": {
+        "name": "no_es_de_documentos",
+        "description": ("Úsala cuando NO está pidiendo generar constancias ni "
+                        "comisiones: dudas de nómina, vacaciones, días "
+                        "económicos, pases, saludos o cualquier otro tema."),
+        "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
         "name": "mostrar_boton_generar",
         "description": ("Llámala cuando el admin confirme que los datos del "
@@ -302,6 +324,11 @@ def ejecutar(nombre, args, rol=None):
         return _t_constancias(args)
     if nombre == "preparar_comisiones":
         return _t_comisiones(args)
+    if nombre == "no_es_de_documentos":
+        return {"ruta": "otro"}
+    if nombre == "faltan_datos":
+        return {"ruta": "documentos", "falta": str(args.get("que_falta") or ""),
+                "nota": "Pregúntale SOLO eso, en una línea."}
     if nombre == "mostrar_boton_generar":
         if not st.session_state.get("doc_pend"):
             return {"error": "Todavía no hay nada preparado."}
@@ -649,12 +676,85 @@ def panel_documento():
             st.rerun()
 
 
+def formulario_directo():
+    """Generar sin chat: selectores y un botón. Solo admin.
+
+    Esto es lo que debió existir desde el principio. La ruta conversacional
+    tiene que ADIVINAR si "quiero las contncais de la 23" pide un documento,
+    y eso falló una y otra vez con los typos reales del admin. Aquí no hay
+    nada que adivinar: se elige en la lista y se aprieta el botón. El chat
+    queda como atajo, no como único camino.
+    """
+    if not puede_documentos():
+        return
+    with st.expander("📄 Generar constancias o comisiones", expanded=False):
+        clase = st.radio("Qué documento", ["Constancias", "Comisiones"],
+                         horizontal=True, key="doc_f_clase")
+        hoy = date.today()
+        if clase == "Constancias":
+            c1, c2 = st.columns(2)
+            with c1:
+                q = st.selectbox("Quincena", list(range(1, 25)),
+                                 index=min(22, 23), key="doc_f_q")
+            with c2:
+                anio = st.number_input("Año", 2024, 2030, hoy.year, 1,
+                                       key="doc_f_anio")
+            centro = st.text_input(
+                "Centro o adscripción (opcional)", key="doc_f_centro_c",
+                placeholder="Tonalá, 14-05, La Palmita… vacío = todos")
+            if st.button("Preparar constancias", key="doc_f_ok_c",
+                         type="primary", use_container_width=True):
+                r = ejecutar("preparar_constancias",
+                             {"quincena": int(q), "anio": int(anio),
+                              "centro": centro, "personas": "todos"})
+                if r.get("listo"):
+                    st.session_state["_doc_mostrar_boton"] = True
+                    st.rerun()
+                st.error(r.get("error")
+                         or ("Falta: " + ", ".join(r.get("falta", []))))
+        else:
+            tipo = st.radio("Tipo", ["Coordinadores de Centro de Maestros",
+                                     "Generales (asesores)"],
+                            key="doc_f_tipo")
+            c1, c2 = st.columns(2)
+            with c1:
+                of = st.number_input("Oficio inicial", 1, 9999, 1, 1,
+                                     key="doc_f_of")
+                fi = st.date_input("Inicio de la comisión", value=None,
+                                   key="doc_f_fi", format="DD/MM/YYYY")
+            with c2:
+                centro = st.text_input("Centro (opcional)",
+                                       key="doc_f_centro_m",
+                                       placeholder="vacío = todos")
+                ff = st.date_input("Fin de la comisión", value=None,
+                                   key="doc_f_ff", format="DD/MM/YYYY")
+            if st.button("Preparar comisiones", key="doc_f_ok_m",
+                         type="primary", use_container_width=True):
+                if not fi or not ff:
+                    st.error("Faltan las fechas de la comisión.")
+                    return
+                r = ejecutar("preparar_comisiones", {
+                    "tipo": ("coordinador" if tipo.startswith("Coord")
+                             else "generales"),
+                    "oficio_inicial": int(of),
+                    "fecha_inicio": fi.isoformat(),
+                    "fecha_fin": ff.isoformat(),
+                    "centro": centro, "personas": "todos"})
+                if r.get("listo"):
+                    st.session_state["_doc_mostrar_boton"] = True
+                    st.rerun()
+                st.error(r.get("error")
+                         or ("Falta: " + ", ".join(r.get("falta", []))))
+
+
 def panel_documento_en_chat():
     """El panel como un mensaje de ARI, igual que el de los pases."""
     if not puede_documentos():
         return
     if not (st.session_state.get("doc_pend")
             or st.session_state.get("doc_ambiguos")):
+        # Nada en curso: se ofrece el formulario, que no depende del chat.
+        formulario_directo()
         return
     with st.chat_message("assistant"):
         panel_documento()

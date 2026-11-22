@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v36 · no fabrica documentos en el chat · 21-nov"
+ARI_VERSION = "agente v38 · el agente decide la ruta · 21-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -512,6 +512,13 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
                 if herramientas:
                     cuerpo["tools"] = herramientas
                     cuerpo["tool_choice"] = (
+                        # forzar="*" obliga a llamar ALGUNA herramienta
+                        # ("required"); un nombre obliga a esa en concreto.
+                        # Se usa para que el RUTEO lo decida el modelo
+                        # llamando a una herramienta y el código solo lea
+                        # cuál llamó: mis expresiones regulares no atrapan
+                        # "contncais" ni "conatnacais", el modelo sí.
+                        "required" if forzar == "*" else
                         {"type": "function", "function": {"name": forzar}}
                         if forzar else "auto")
                 hdr = {"Authorization": f"Bearer {api_key}",
@@ -521,6 +528,11 @@ def _responder_nvidia(mensajes, temperatura=0.2, json_mode=False,
                 if r.status_code == 400:
                     # El modelo no entiende chat_template_kwargs: se reintenta sin eso.
                     cuerpo.pop("chat_template_kwargs", None)
+                    r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=min(15, _resta(fin)))
+                if r.status_code == 400 and cuerpo.get("tool_choice") == "required":
+                    # Algunos modelos no soportan "required". Se baja a
+                    # "auto" en vez de perder el turno.
+                    cuerpo["tool_choice"] = "auto"
                     r = requests.post(NVIDIA_URL, headers=hdr, json=cuerpo, timeout=min(15, _resta(fin)))
                 if r.status_code == 200:
                     msg = r.json()["choices"][0]["message"]
@@ -803,6 +815,13 @@ def prompt_agente_doc(nombre=""):
         "Pregunta SOLO lo que falte, de uno en uno.\n"
         "Cuando tengas todo, llama a preparar_constancias o a "
         "preparar_comisiones.\n"
+        "SIEMPRE tienes que llamar a una herramienta. Si pide constancias o "
+        "comisiones pero falta un dato, llama a faltan_datos. Si el mensaje "
+        "NO es sobre generar constancias ni comisiones —dudas de nómina, "
+        "vacaciones, días económicos, pases, saludos— llama a "
+        "no_es_de_documentos y no contestes nada más.\n"
+        "El mensaje puede venir con errores de dedo ('contncais', 'comsion', "
+        "'conatnacais'): entiéndelo igual y no pidas que lo repita.\n"
         "Si responde listo=true, di en UNA frase qué se va a generar y "
         "cuántos son, y pide que confirme.\n"
         "Si confirma, llama a mostrar_boton_generar.\n"
@@ -939,8 +958,15 @@ def _agente(mensajes, deps, nombre="", herramientas=None, sistema=None,
                 return ("Ya tengo tu pase listo. Confirmalo con el boton de "
                         "registrar."), pasos
             raise RuntimeError("se acabo el presupuesto de tiempo del turno")
+        # forzar="*" ("required") va desde el PRIMER intento, porque aquí no
+        # es un reintento: es el ruteo. El modelo tiene que comprometerse
+        # llamando a una herramienta —incluida no_es_de_documentos— y el
+        # código lee cuál eligió. Solo en el primer paso: una vez que ya
+        # ejecutó algo, el turno siguiente es para que redacte la respuesta.
         msg = _responder_nvidia(hist, temperatura=0.2,
-                                herramientas=herramientas, fin=fin)
+                                herramientas=herramientas, fin=fin,
+                                forzar=("*" if forzar == "*" and not pasos
+                                        else None))
         llamadas = msg.get("tool_calls") or []
         if not llamadas:
             # Primer paso sin tool_call en un mensaje que el router ya marco
@@ -1330,9 +1356,30 @@ def _horas_del_texto(texto):
 # importa: se prueba de más específico a más general.
 _MARCAS_MOTIVO = (
     "porque", "por motivo de", "debido a", "tengo que", "tengo", "voy a",
-    "voy al", "voy", "para", "me toca", "llevar a", "llevo a", "asistir",
+    "voy al", "voy", "me toca", "llevar a", "llevo a", "asistir",
     "acudir", "cita",
 )
+# "para" NO está en la lista: "pase PARA EL martes 24" lo disparaba y el
+# motivo salía "Para el". Un motivo basura es peor que uno vacío, porque se
+# imprime en el documento y nadie lo relee.
+
+_RELLENO = {"para", "el", "la", "los", "las", "del", "de", "al", "un", "una",
+            "y", "que", "con", "en", "por", "mi", "me", "se", "lo", "es",
+            # Palabras del trámite: nombran el papel, no el motivo. Sin
+            # ellas aquí, "pase para el martes 24" dejaba "Pase para el"
+            # como motivo de un pase que no traía motivo.
+            "pase", "pases", "permiso", "solicitud", "tramite", "trámite",
+            "favor", "porfa", "necesito", "quiero", "ocupo"}
+
+
+def _vale_motivo(frase):
+    """Un motivo sirve si dice algo: al menos una palabra con contenido.
+
+    "Para el" tiene dos palabras y las dos son relleno. Sin esta prueba se
+    colaba como motivo de un pase el 21-nov.
+    """
+    pal = [w for w in frase.lower().split() if w not in _RELLENO]
+    return len(pal) >= 1 and any(len(w) >= 4 for w in pal)
 
 # Frases de trámite que NO son el motivo. Se quitan antes de buscarlo, porque
 # si no el motivo acaba siendo "necesito un pase de salida".
@@ -1401,10 +1448,13 @@ def _motivo_del_texto(mensajes):
             if p.startswith(m) or f" {m} " in f" {p} ":
                 corte = p.find(m)
                 frase = p[corte:].strip(" ,.;:")
-                if len(frase.split()) >= 2:
+                if len(frase.split()) >= 2 and _vale_motivo(frase):
                     return _cap(frase[:120])
-    # Si no hay marca, la pieza más larga: suele ser la explicación.
-    return _cap(max(piezas, key=lambda x: len(x.split())).strip(" ,.;:")[:120])
+    # Si no hay marca, la pieza más larga que diga algo.
+    for p in sorted(piezas, key=lambda x: -len(x.split())):
+        if _vale_motivo(p):
+            return _cap(p.strip(" ,.;:")[:120])
+    return ""
 
 
 def _rescatar_del_texto(mensajes, datos):
@@ -2621,18 +2671,32 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                 # dice con todas sus letras en vez de reventar.
                 if _DOC is not None and (deps_pase or {}).get("get_client"):
                     _DOC.configurar(get_client=deps_pase["get_client"])
-                # _doc_hilo marca que ESTAMOS en una conversación de
-                # documentos, aunque todavía no haya nada preparado. Antes la
-                # continuación exigía doc_pend, que solo existe DESPUÉS de
-                # llamar a preparar_*. Pero en el primer turno el agente solo
-                # pregunta ("¿de qué año?"), así que al contestar "2026" no
-                # había estado, el mensaje caía al cerebro de dudas y ese
-                # fabricó una constancia en el chat. Pasó el 21-nov.
-                _es_doc = _DOC is not None and st.session_state.get("rol") == "admin" and (
-                    _parece_documento(pregunta)
-                    or ((bool(st.session_state.get("doc_pend"))
-                         or bool(st.session_state.get("_doc_hilo")))
-                        and _es_continuacion_doc(pregunta)))
+                # EL RUTEO DEL ADMIN LO DECIDE EL AGENTE, no mis listas.
+                # Se le dan las herramientas de documentos y se le OBLIGA a
+                # llamar una (forzar="*"). Si llama a no_es_de_documentos,
+                # el mensaje sigue su camino al chat o al pase. Tres intentos
+                # con listas de palabras fallaron contra "comsion",
+                # "contancais", "conatnacais" y "contncais": el modelo
+                # entiende esos typos y yo no los iba a atrapar nunca.
+                # Cuesta una llamada extra (~1 s) y solo al admin, que es una
+                # persona.
+                _es_doc, _t_doc, _p_doc = False, "", []
+                if _DOC is not None and st.session_state.get("rol") == "admin":
+                    try:
+                        _nom = (deps_pase or {}).get("nombre", "")
+                        with st.spinner("ARI esta revisando..."):
+                            _t_doc, _p_doc = _agente(
+                                _hist[-4:], {}, _nom,
+                                herramientas=_DOC.HERRAMIENTAS_DOC,
+                                sistema=prompt_agente_doc(_nom),
+                                ejecutor=_ejecutar_doc, forzar="*", clase="doc")
+                        _usada = _p_doc[0]["herramienta"] if _p_doc else ""
+                        _es_doc = bool(_usada) and _usada != "no_es_de_documentos"
+                    except Exception as _e_doc_rt:
+                        # Si el agente de documentos falla, el mensaje sigue
+                        # al chat como siempre: no se pierde el turno.
+                        _traza("doc_ruta_error", f"{type(_e_doc_rt).__name__}: {_e_doc_rt}")
+                        _es_doc = False
                 _es_pase = (not _es_doc) and bool(deps_pase) and not st.session_state.get("_ari_pase_cerrado") and (
                     _parece_pase(pregunta)
                     or (bool(st.session_state.get("ari_pase"))
@@ -2641,34 +2705,27 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                        else ("agente (pase)" if _es_pase else "chat (duda de RH)"))
                 try:
                     if _es_doc:
-                        _nom = (deps_pase or {}).get("nombre", "")
                         st.session_state["_doc_hilo"] = True
-                        with st.spinner("ARI esta preparando los documentos..."):
-                            # forzar=None: hay DOS herramientas de preparar y
-                            # obligar a una elegiría mal la mitad de las veces.
-                            texto, _pasos = _agente(
-                                _hist[-4:], {}, _nom,
-                                herramientas=_DOC.HERRAMIENTAS_DOC,
-                                sistema=prompt_agente_doc(_nom),
-                                ejecutor=_ejecutar_doc, forzar=None, clase="doc")
+                        texto, _pasos = _t_doc, _p_doc
                         _traza("agente_pasos", _pasos)
-                        # Aquí el modelo tiene SOLO dos trabajos: llamar a una
-                        # herramienta, o preguntar en una línea lo que falta.
-                        # Si no llamó a nada y suelta un párrafo largo, está
-                        # redactando el documento él mismo —tablas de
-                        # conceptos, "CONSTANCIA DE SERVICIO Y PAGO"— y eso es
-                        # un documento falso con aspecto de oficial. No pasa.
-                        if not _pasos and len(texto) > 400:
-                            texto = (
-                                "No alcancé a preparar el documento. Dímelo "
-                                "en una línea con los datos: para constancias "
-                                "la **quincena**, el **año** y el **centro**; "
-                                "para comisiones el **tipo** (coordinadores o "
-                                "generales), el **oficio inicial** y las "
-                                "**fechas**.\n\n"
-                                "Los documentos solo se generan con el botón "
-                                "del panel: lo que yo escriba en el chat "
-                                "nunca es el documento.")
+                        # En esta ruta el modelo tiene SOLO dos trabajos: llamar
+                        # a una herramienta de verdad, o preguntar en una línea
+                        # lo que falta. Si suelta un párrafo largo está
+                        # redactando el documento él mismo —tablas de conceptos,
+                        # "CONSTANCIA DE SERVICIO Y PAGO"— y eso es un documento
+                        # falso con aspecto de oficial. No pasa.
+                        if len(texto) > 400 and not any(
+                                x["herramienta"].startswith("preparar")
+                                for x in _pasos):
+                            texto = ("No alcancé a preparar el documento. Dímelo "
+                                     "en una línea con los datos: para "
+                                     "constancias la **quincena**, el **año** y "
+                                     "el **centro**; para comisiones el **tipo** "
+                                     "(coordinadores o generales), el **oficio "
+                                     "inicial** y las **fechas**.\n\n"
+                                     "Los documentos solo se generan con el "
+                                     "botón del panel: lo que yo escriba en el "
+                                     "chat nunca es el documento.")
                     elif _es_pase:
                         # El agente tampoco necesita doce turnos de contexto: le
                         # bastan los últimos del propio pase, y cada turno extra
