@@ -27,7 +27,7 @@ los dos lados: en el panel y en el ejecutor de las herramientas, para que una
 herramienta no se pueda disparar desde el chat de un empleado.
 """
 
-VERSION = "documentos v14 · un PDF y un SHA por oficio · 21-nov"
+VERSION = "documentos v17 · escribe el minutario como la app · 22-nov"
 
 import os
 import re
@@ -189,9 +189,14 @@ HERRAMIENTAS_DOC = [
                         "encargados de Centro de Maestros."),
         "parameters": {"type": "object", "properties": {
             "tipo": {"type": "string",
-                     "description": ("'Encargados CM' para los encargados de "
-                                     "Centro de Maestros, 'Generales' para el "
-                                     "resto (asesores, coordinadores).")},
+                     "enum": ["coordinador", "generales"],
+                     "description": ("Uno de los dos, exactamente: "
+                                     "'coordinador' si pide la comisión de "
+                                     "coordinador o encargado de Centro de "
+                                     "Maestros (aunque lo escriba con erratas: "
+                                     "coordiandor, cordinador, encargdo); "
+                                     "'generales' para la comisión normal de "
+                                     "asesor.")},
             "oficio_inicial": {"type": "integer",
                                "description": "Número del primer oficio"},
             "fecha_inicio": {"type": "string",
@@ -263,6 +268,7 @@ HERRAMIENTAS_DOC = [
                                        "expedientes'. Vacío = cualquiera.")},
             "tipo_comision": {
                 "type": "string",
+                "enum": ["coordinador", "normal"],
                 "description": ("Para comisiones, cuál de los dos tipos: "
                                 "'coordinador' (coordinador o encargado de "
                                 "Centro de Maestros) o 'normal' (la de "
@@ -291,7 +297,13 @@ def _tipo_comision(valor):
     #   · generales (las de los asesores)                -> Generales
     # "coordinador" es la palabra que se usa al hablar; "Encargado CM" la que
     # está escrita en la columna tipo_comision del Sheet. Las dos entran.
-    if any(w in t for w in ("coordinad", "encargad", "cm", "centro")):
+    # "coord" y no "coordinad": lo escribiste "coordiandor", con la a y la n
+    # cambiadas de lugar, y la cadena larga no coincidía. Cayó a Generales,
+    # donde esa persona no está, y el agente se quedó dando vueltas. El enum
+    # de la herramienta ya evita que llegue texto libre; esto es la red por
+    # si un modelo lo ignora.
+    if any(w in t for w in ("coord", "cordin", "cordi", "encarg", "cm",
+                            "centro")):
         return "Encargados CM"
     return "Generales"
 
@@ -682,15 +694,15 @@ def registrar_en_minutario(pend, ruta_docx):
     """
     avisos = []
     if pend.get("clase") != "comisiones":
-        return 0, []
+        return 0, [], "", []
     if not hay_minutario():
-        return 0, [f"El minutario no está disponible. {_OF_ERROR}".strip()]
+        return 0, [f"El minutario no está disponible. {_OF_ERROR}".strip()], "", []
 
     pdf_path = convertir_word_a_pdf(ruta_docx)
     if not pdf_path or not os.path.exists(pdf_path):
         return 0, ["Para registrar en el minutario hace falta el PDF, y no "
                    "hay conversor en el servidor. Agrega `libreoffice` a "
-                   "packages.txt. El Word ya está descargable."]
+                   "packages.txt. El Word ya está descargable."], "", []
     with open(pdf_path, "rb") as f:
         crudo = f.read()
 
@@ -700,24 +712,57 @@ def registrar_en_minutario(pend, ruta_docx):
     try:
         paginas = _OF.paginas_con_contenido(crudo)
     except Exception as e:
-        return 0, [f"No se pudieron contar las páginas del PDF: {e}"]
+        return 0, [f"No se pudieron contar las páginas del PDF: {e}"], "", []
     if len(paginas) != len(pend["personas"]):
         return 0, [f"El PDF trae {len(paginas)} páginas con contenido y son "
                    f"{len(pend['personas'])} oficios. No reparto los QR a "
-                   f"ciegas: revisa si alguna comisión ocupa dos páginas."]
+                   f"ciegas: revisa si alguna comisión ocupa dos páginas."], "", []
 
     anio = pend["fecha_doc"][:4]
-    asunto = (f"Comisión {pend['tipo']} del {pend['fecha_inicio']} al "
-              f"{pend['fecha_fin']}")
+
+    # LOS CAMPOS SE ESCRIBEN COMO LOS ESCRIBE LA APP, no como se me ocurrió.
+    # Yo ponía ASUNTO="Comisión Encargados CM del … al …" y
+    # CARGO_DESTINO="Encargados CM". El minutario de verdad usa
+    # ASUNTO="Se asigna Comisión/Coordinador" (o "Se asigna comision") y en
+    # CARGO_DESTINO el cargo de la persona. Romper esa convención no es solo
+    # feo: mi propio buscador separa los dos tipos de comisión por la palabra
+    # "coordinador" en el ASUNTO, así que lo que yo registraba quedaba
+    # clasificado como comisión normal aunque fuera de coordinador.
+    _coord = pend["tipo"] == "Encargados CM"
+    asunto = "Se asigna Comisión/Coordinador" if _coord else "Se asigna comision"
+
+    # El cargo sale del Sheet, con el MISMO respaldo que usa el generador
+    # para la plantilla: así el oficio y el minutario dicen lo mismo.
+    cargos = {}
+    try:
+        # get_client es una FUNCIÓN: hay que llamarla. Pasarla sin llamar
+        # reventaba dentro del try y el except se lo tragaba en silencio, así
+        # que todos salían con el cargo genérico aunque el Sheet tuviera el
+        # suyo. Un except que no avisa convierte un bug en una costumbre.
+        _dfc = _cargar_tab(_deps["get_client"](), TAB_COMISIONES)
+        for _, _r in _dfc.iterrows():
+            cargos[str(_r.get("nombre_completo", ""))] = (
+                str(_r.get("cargo", "") or "").strip()
+                or "Asesor Pedagógico de la Dirección de Formación Continua")
+    except Exception as e:
+        avisos.append(f"No pude leer los cargos del Sheet ({e}); se usó el "
+                      f"cargo genérico en el minutario.")
+
+    # El periodo va en OBSERVACIONES, no en el ASUNTO: ahí es donde la app
+    # pone el texto libre ("Carga en lote", "Lote de emisión").
+    _obs = f"Lote de emisión · {pend['fecha_inicio']} a {pend['fecha_fin']}"
+    if pend.get("centro"):
+        _obs += f" · Centro: {pend['centro']}"
+
     registros = [{
         "anio": anio,
         "folio": str(pend["oficio_inicial"] + i),
         "fecha_oficio": pend["fecha_doc"],
         "asunto": asunto,
         "dirigido_a": nombre,
-        "cargo_destino": pend["tipo"],
-        "observaciones": (f"Centro: {pend['centro']}" if pend.get("centro")
-                          else "Generado desde ARI"),
+        "cargo_destino": cargos.get(
+            nombre, "Asesor Pedagógico de la Dirección de Formación Continua"),
+        "observaciones": _obs,
         "pagina": paginas[i],
     } for i, nombre in enumerate(pend["personas"])]
 
@@ -725,7 +770,7 @@ def registrar_en_minutario(pend, ruta_docx):
                                                   registros)
     avisos += list(errs or [])
     if not aceptados:
-        return 0, avisos or ["El minutario no aceptó ningún oficio."]
+        return 0, avisos or ["El minutario no aceptó ningún oficio."], "", []
 
     # Un PDF por oficio: el minutario apunta al documento de esa persona, no
     # a un archivo de 40 páginas donde hay que buscarla.
@@ -765,7 +810,24 @@ def registrar_en_minutario(pend, ruta_docx):
             _OF.actualizar_filas_lote(_deps["get_client"], cambios)
         except Exception as e:
             avisos.append(f"Las ligas no se escribieron en el minutario: {e}")
-    return len(aceptados), avisos
+
+    # EL PDF SELLADO SE GUARDA Y SE DEVUELVE. Antes solo subía a Drive y el
+    # botón de descarga seguía dando el Word SIN QR: lo que el admin imprimía
+    # y mandaba a firmar no llevaba código, así que el acuse escaneado no se
+    # podía validar. Lo que se imprime tiene que ser esto.
+    ruta_sellada = os.path.join(
+        tempfile.gettempdir(),
+        f"{pend['tipo'].replace(' ', '_')}_{pend['oficio_inicial']}_CON_QR.pdf")
+    try:
+        with open(ruta_sellada, "wb") as f:
+            f.write(sellado)
+    except Exception as e:
+        avisos.append(f"No se pudo guardar el PDF con QR: {e}")
+        ruta_sellada = ""
+    return len(aceptados), avisos, ruta_sellada, [
+        {"folio": r["id_oficio"],
+         "liga": (cambios.get(r["id_oficio"]) or {}).get("URL_EMITIDO", "")}
+        for r in aceptados]
 
 
 def _resumen(pend):
@@ -949,9 +1011,11 @@ def panel_documento():
                 st.session_state["doc_generado"] = {"word": ruta}
                 if pend["clase"] == "comisiones" and hay_minutario():
                     with st.spinner("Registrando en el minutario..."):
-                        _n, _av = registrar_en_minutario(pend, ruta)
+                        _n, _av, _pdfqr, _ligas = registrar_en_minutario(
+                            pend, ruta)
                     st.session_state["doc_generado"]["minutario"] = {
-                        "n": _n, "avisos": _av}
+                        "n": _n, "avisos": _av, "pdf_qr": _pdfqr,
+                        "ligas": _ligas}
                 st.rerun()
         with c2:
             if st.button("🗑️ Cancelar", key="doc_cancel",
@@ -974,17 +1038,35 @@ def panel_documento():
                f"{_pl(_nd, 'archivo', 'solo archivo')} Word.")
     _min = hecho.get("minutario")
     if _min:
+        _qr = _min.get("pdf_qr")
+        if _qr and os.path.exists(_qr):
+            # ESTE es el que se imprime y se manda a firmar. El Word de
+            # arriba NO lleva QR, y un oficio sin QR no se puede validar
+            # cuando vuelve escaneado como acuse.
+            st.warning("**Para imprimir y firmar usa este PDF**, no el Word: "
+                       "el Word no lleva el código QR y sin él el acuse "
+                       "escaneado no se puede validar.")
+            with open(_qr, "rb") as f:
+                st.download_button(
+                    "🖨️ Descargar PDF CON QR (este es el que se firma)",
+                    f.read(), file_name=os.path.basename(_qr),
+                    mime="application/pdf", key="doc_dl_qr",
+                    type="primary", use_container_width=True)
         if _min["n"]:
             st.info(f"📘 {_min['n']} {_pl(_min['n'], 'oficio', 'oficios')} "
                     f"{_pl(_min['n'], 'quedó', 'quedaron')} en el minutario "
-                    f"con QR y liga de Drive.")
+                    f"con su QR y su liga de Drive.")
+            for _l in _min.get("ligas", []):
+                if _l.get("liga"):
+                    st.markdown(f"- **{_l['folio']}** · [ver en Drive]"
+                                f"({_l['liga']})")
         for _a in _min.get("avisos", []):
             st.warning(_a)
     c1, c2, c3 = st.columns(3)
     with c1:
         with open(ruta, "rb") as f:
             st.download_button(
-                "📄 Descargar Word", f.read(),
+                "📄 Word (editable, SIN QR)", f.read(),
                 file_name=os.path.basename(ruta),
                 mime=("application/vnd.openxmlformats-officedocument"
                       ".wordprocessingml.document"),

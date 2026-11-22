@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v43 · distingue los 2 tipos de comisión · 21-nov"
+ARI_VERSION = "agente v46 · no dice hecho lo que no está · 22-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -832,10 +832,13 @@ def prompt_agente_doc(nombre=""):
         "misma persona puede tener las dos: si la persona trae varias, di "
         "cuál es cuál por su asunto en vez de elegir tú. Si te dicen cuál "
         "quieren, pásalo en tipo_comision: 'coordinador' o 'normal'.\n"
-        "REGLA IMPORTANTE: generar una comisión quema un número de oficio del "
-        "minutario y eso no se deshace. Si NO te dio número de oficio inicial "
-        "ni fechas de la comisión, NO llames a preparar_comisiones: o llama a "
-        "buscar_oficio, o llama a faltan_datos. Ante la duda, buscar.\n"
+        "CÓMO ELEGIR ENTRE GENERAR Y BUSCAR:\n"
+        "- Si te da número de oficio Y fechas de la comisión, quiere GENERAR: "
+        "llama a preparar_comisiones y NO busques.\n"
+        "- Si NO te da número de oficio ni fechas, quiere ver una que ya "
+        "existe: llama a buscar_oficio.\n"
+        "- Si te falta un solo dato para generar, llama a faltan_datos con "
+        "ese dato. No cambies de herramienta a medio camino.\n"
         "SIEMPRE tienes que llamar a una herramienta. Si pide constancias o "
         "comisiones pero falta un dato, llama a faltan_datos. Si el mensaje "
         "NO es sobre generar constancias ni comisiones —dudas de nómina, "
@@ -1055,8 +1058,22 @@ def _agente(mensajes, deps, nombre="", herramientas=None, sistema=None,
     if any(h.startswith("preparar") for h in _hechas):
         return ("Ya está preparado: revisa el resumen de abajo y aprieta el "
                 "botón."), pasos
-    return ("Preparé lo que pude de tu solicitud. Revisa el resumen de abajo "
-            "o dime si falta algo."), pasos
+
+    # Se acabaron los pasos y NADA salió bien. Antes esto decía "Preparé lo
+    # que pude" y no había ningún resumen que revisar: el empleado se
+    # quedaba mirando una frase que no significaba nada. El motivo real está
+    # en el resultado de la última herramienta y es lo que hay que decir.
+    for x in reversed(pasos):
+        res = x.get("resultado") or {}
+        if res.get("error"):
+            return str(res["error"]), pasos
+        if res.get("falta"):
+            return ("Me falta " + ", ".join(str(f) for f in res["falta"])
+                    + " para poder seguir."), pasos
+    if pasos:
+        return ("No pude completarlo. Vuelve a decírmelo en una línea con "
+                "todos los datos."), pasos
+    return ("No alcancé a procesar eso. Dímelo otra vez, más corto."), pasos
 
 
 def _responder_gemini(sistema, mensajes, temperatura=0.2, json_mode=False):
@@ -2770,7 +2787,28 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
                         # redactando el documento él mismo —tablas de conceptos,
                         # "CONSTANCIA DE SERVICIO Y PAGO"— y eso es un documento
                         # falso con aspecto de oficial. No pasa.
-                        if len(texto) > 400 and not any(
+                        # ARI NO PUEDE DECIR QUE YA GENERÓ NADA. Los
+                        # documentos solo existen cuando se aprieta el botón
+                        # del panel, y eso ocurre en otro rerun. El 21-nov
+                        # escribió "✅ Comisión creada exitosamente… imprímelo
+                        # y firma las 2 firmas" antes de que existiera el
+                        # archivo, y encima con la instrucción de los PASES,
+                        # que no aplica a una comisión. Decir que algo está
+                        # hecho cuando no lo está es el error que más caro ha
+                        # salido en todo este sistema.
+                        _miente = (not st.session_state.get("doc_generado")
+                                   and any(w in _sin_acentos(texto.lower())
+                                           for w in ("creada", "creado",
+                                                     "generada", "generado",
+                                                     "generados", "generadas",
+                                                     "exitosamente", "ya quedo",
+                                                     "se genero", "he generado",
+                                                     "listo:")))
+                        if _miente:
+                            texto = ("Ya está preparado. **Todavía no se ha "
+                                     "generado nada**: aprieta el botón del "
+                                     "panel de abajo para generarlo.")
+                        elif len(texto) > 400 and not any(
                                 x["herramienta"].startswith("preparar")
                                 for x in _pasos):
                             texto = ("No alcancé a preparar el documento. Dímelo "
