@@ -43,7 +43,7 @@ QUINCENAS = [
     {"q":"Q-20","fecha":date(2026,10,29),"concepto":"Fortalecimiento CC/CT según ajustes salariales (Básica / Apoyo Básica)"},
     {"q":"Q-21","fecha":date(2026,11,12),"concepto":"Sueldo ordinario"},
     {"q":"Q-22","fecha":date(2026,11,27),"concepto":"Bono anual 24 días inicial + Apoyo a la integración educativa especial (Docentes Básica)"},
-    {"q":"Q-23","fecha":date(2026,12,14),"concepto":"Aguinaldo + 32 Prima vacacional (los cobran los cuatro subsistemas: Docentes Básica, Docentes Nivel Superior, Apoyo Básica y Apoyo No Docente Nivel Superior)"},
+    {"q":"Q-23","fecha":date(2026,12,14),"concepto":"Aguinaldo + Prima vacacional, concepto 32 (los cobran los cuatro subsistemas: Docentes Básica, Docentes Nivel Superior, Apoyo Básica y Apoyo No Docente Nivel Superior)"},
     # El G9 se marca en la Q-24 pero el depósito cae hasta enero. Va dicho
     # dentro del concepto para que ARI lo aclare sin que nadie se lo pregunte:
     # si no, en diciembre lo reclaman como si faltara.
@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v32 · el motivo no sale de la app · 21-nov"
+ARI_VERSION = "agente v34 · códigos no son cantidades · 21-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -666,6 +666,66 @@ def _ejecutar_doc(nombre, args):
         if a.get(k):
             a[k] = _normalizar_fecha(a[k])
     return _DOC.ejecutar(nombre, a, st.session_state.get("rol"))
+
+
+# Preguntas que el prompt NO puede contestar, interceptadas antes del modelo.
+# El 21 de noviembre ARI explicó que la "Deducción con Código 19" era ahorro
+# voluntario o cuota sindical. No hay catálogo de códigos de deducción en
+# ningún prompt: se lo inventó, con tono de autoridad, sobre un descuento en
+# la nómina de una persona. El prompt ya decía "no inventes nada fuera de
+# este prompt" y lo ignoró, así que esto NO se arregla con más prompt: se
+# arregla no dejándole contestar.
+_RE_CODIGO_NOMINA = re.compile(
+    r"\b(?:c[oó]digo|clave)\s*(?:n[uú]m(?:ero)?\.?\s*)?\d{1,3}\b"
+    r"|\b(?:deducci[oó]n|descuento|retenci[oó]n)\s+(?:con\s+)?"
+    r"(?:c[oó]digo|clave|concepto)?\s*\d{1,3}\b", re.I)
+
+_SIN_CATALOGO = (
+    "No tengo el catálogo de códigos de deducción, así que **no te puedo "
+    "decir qué significa ese código** y prefiero no adivinarlo: es un "
+    "descuento en tu nómina.\n\n"
+    "Para eso:\n"
+    "- Revisa tu recibo de nómina, donde viene la descripción del concepto.\n"
+    "- Si el monto no cuadra o no lo reconoces, acude al área de RH de la "
+    "DFC con tu recibo.\n\n"
+    "Tienes **5 días hábiles** después de la entrega de la quincena para "
+    "presentar aclaraciones (Circular No. 9/2014).")
+
+
+def _respuesta_fija(texto):
+    """Respuestas que da el CÓDIGO, no el modelo. Devuelve None si no aplica.
+
+    Son los temas donde una respuesta inventada tiene consecuencias y el
+    prompt no trae el dato. Vale más un "no lo sé, ve a RH" exacto que un
+    párrafo convincente y falso.
+    """
+    t = _txt(texto)
+    if _RE_CODIGO_NOMINA.search(t):
+        return _SIN_CATALOGO
+    # Constancias y comisiones las genera RH, no el empleado. Antes esta
+    # pregunta caía al cerebro de dudas, que contestó con un desglose de
+    # pagos de la quincena 23 que nadie había pedido.
+    tl = _sin_acentos(" ".join(t.lower().split()))
+    if st.session_state.get("rol") != "admin" and any(
+            w in tl for w in ("constanc", "contanc", "ontanc", "constac",
+                              "onstac", "cosntanc", "comision", "comisio",
+                              "comsio", "comisi", "comsion")):
+        # Sin exigir verbo. Antes pedía "hacer|genera|quiero|…" además del
+        # sustantivo, y "me HACES las comsiones" se colaba porque "haces" no
+        # está en esa lista. Pedir dos aciertos sobre un texto con typos
+        # falla el doble; con el sustantivo basta.
+        #
+        # La excepción: la Constancia de Percepciones y Deducciones SÍ está
+        # en el prompt, con los pasos para descargarla del portal. Esa
+        # pregunta tiene que llegar al modelo.
+        if not any(w in tl for w in ("percepcion", "deduccion", "deducion",
+                                     "sat", "cfdi", "fiscal")):
+            return ("Las constancias de servicio y los oficios de comisión "
+                    "los elabora el área de RH de la DFC; yo no los genero "
+                    "desde aquí.\n\n"
+                    "Solicítalos directamente con el área de RH indicando el "
+                    "periodo que necesitas.")
+    return None
 
 
 def _parece_documento(texto) -> bool:
@@ -1949,6 +2009,9 @@ AVISO LEGAL (DISCLAIMER):
 
 REGLAS DE COMPORTAMIENTO:
 - Responde ÚNICAMENTE con la información que está en este prompt. No inventes ni supongas nada fuera de él.
+- Los prefijos de los conceptos de pago (G4, G5, G6, G7, G9, CF, BE, GU, BN y el 32 de la prima vacacional) son CÓDIGOS de concepto de nómina. NO son cantidades, ni días, ni montos, ni porcentajes. Nunca los conviertas en una cifra: "concepto 32" jamás es "32 días".
+- En este prompt NO hay montos, ni sueldos, ni número de días de ninguna prestación. Por lo tanto NO des cifras de dinero ni de días. Si te preguntan cuánto les toca, di que eso se consulta en el recibo de nómina o con el área de RH de la DFC.
+- Tampoco hay catálogo de códigos de deducción o descuento. Si preguntan qué significa un código o clave de deducción, di que no lo tienes y que lo vean en su recibo o en RH.
 - Si alguien pregunta algo que no está en tu base de conocimiento, indícale que consulte directamente con el área de RH de la DFC o visite el portal: https://martin-carrizalez.github.io/portal-RH-DFC/
 - Sé amable, claro y conciso. Usa lenguaje accesible, no burocrático.
 - Si te preguntan por un formato o documento, indica que puede descargarlo en el portal.
@@ -2501,96 +2564,104 @@ def render_ari(contexto_usuario: str = "", deps_pase: dict = None):
             # ARI acaba de preguntar del pase. Una duda de otro tema se va al
             # cerebro de dudas, que es el que tiene la normativa, y el pase
             # SE QUEDA ABIERTO esperando el botón.
-            # Documentos va PRIMERO: solo lo alcanza el admin, y "necesito
-            # las comisiones" no debe confundirse con un pase.
-            # documentos_module necesita get_client. Viene en deps_pase para
-            # que app_incidencias solo tenga que agregar UNA clave a ese dict
-            # y no haya que inyectar nada más. Si falta, la herramienta lo
-            # dice con todas sus letras en vez de reventar.
-            if _DOC is not None and (deps_pase or {}).get("get_client"):
-                _DOC.configurar(get_client=deps_pase["get_client"])
-            _es_doc = _DOC is not None and st.session_state.get("rol") == "admin" and (
-                _parece_documento(pregunta)
-                or (bool(st.session_state.get("doc_pend"))
-                    and _es_continuacion_doc(pregunta)))
-            _es_pase = (not _es_doc) and bool(deps_pase) and not st.session_state.get("_ari_pase_cerrado") and (
-                _parece_pase(pregunta)
-                or (bool(st.session_state.get("ari_pase"))
-                    and _es_continuacion_pase(pregunta)))
-            _traza("0_ruta", "agente (documentos)" if _es_doc
-                   else ("agente (pase)" if _es_pase else "chat (duda de RH)"))
-            try:
-                if _es_doc:
-                    _nom = (deps_pase or {}).get("nombre", "")
-                    with st.spinner("ARI esta preparando los documentos..."):
-                        # forzar=None: hay DOS herramientas de preparar y
-                        # obligar a una elegiría mal la mitad de las veces.
-                        texto, _pasos = _agente(
-                            _hist[-4:], {}, _nom,
-                            herramientas=_DOC.HERRAMIENTAS_DOC,
-                            sistema=prompt_agente_doc(_nom),
-                            ejecutor=_ejecutar_doc, forzar=None, clase="doc")
-                    _traza("agente_pasos", _pasos)
-                elif _es_pase:
-                    # El agente tampoco necesita doce turnos de contexto: le
-                    # bastan los últimos del propio pase, y cada turno extra
-                    # son tokens que vuelven a viajar en cada paso.
-                    with st.spinner("ARI esta trabajando..."):
-                        texto, _pasos = _agente(_hist[-4:], deps_pase,
-                                                deps_pase.get("nombre", ""))
-                    _traza("agente_pasos", _pasos)
-                    st.session_state.pop("_ari_sin_tools", None)
-                else:
-                    with st.spinner("ARI esta pensando..."):
-                        texto, _c = responder_ia(
-                            st.session_state["ari_sistema"], _hist)
-            except Exception as e:
-                # El agente vive en NVIDIA (es quien soporta herramientas). Si
-                # se cae, Gemini contesta igual pero SIN herramientas: ARI
-                # sigue resolviendo dudas y el pase pasa al formulario de
-                # emergencia. Degradar no es lo mismo que morir.
-                st.session_state["_ari_chat_error"] = f"{type(e).__name__}: {e}"
+            # ANTES de cualquier ruteo: si el CÓDIGO tiene la respuesta exacta,
+            # el modelo no participa. Cero llamadas y cero invención.
+            _fija = _respuesta_fija(pregunta)
+            _es_doc = _es_pase = False
+            if _fija:
+                _traza("0_ruta", "respuesta fija (sin modelo)")
+                texto = _fija
+            else:
+                # Documentos va PRIMERO: solo lo alcanza el admin, y "necesito
+                # las comisiones" no debe confundirse con un pase.
+                # documentos_module necesita get_client. Viene en deps_pase para
+                # que app_incidencias solo tenga que agregar UNA clave a ese dict
+                # y no haya que inyectar nada más. Si falta, la herramienta lo
+                # dice con todas sus letras en vez de reventar.
+                if _DOC is not None and (deps_pase or {}).get("get_client"):
+                    _DOC.configurar(get_client=deps_pase["get_client"])
+                _es_doc = _DOC is not None and st.session_state.get("rol") == "admin" and (
+                    _parece_documento(pregunta)
+                    or (bool(st.session_state.get("doc_pend"))
+                        and _es_continuacion_doc(pregunta)))
+                _es_pase = (not _es_doc) and bool(deps_pase) and not st.session_state.get("_ari_pase_cerrado") and (
+                    _parece_pase(pregunta)
+                    or (bool(st.session_state.get("ari_pase"))
+                        and _es_continuacion_pase(pregunta)))
+                _traza("0_ruta", "agente (documentos)" if _es_doc
+                       else ("agente (pase)" if _es_pase else "chat (duda de RH)"))
                 try:
-                    # Se va DIRECTO a Gemini, no por responder_ia: NVIDIA
-                    # acaba de fallar y reintentarlo aqui duplicaba la espera
-                    # del empleado sin ninguna posibilidad de exito.
-                    with st.spinner("ARI esta pensando..."):
-                        texto = _responder_gemini(
-                            st.session_state["ari_sistema"], _hist)
-                    # El formulario de emergencia solo sale si esto ERA un
-                    # pase. Antes salía también cuando lo que falló era una
-                    # pregunta de nómina, y el empleado se encontraba campos
-                    # de pase sin haber pedido ninguno.
-                    if _es_pase:
-                        st.session_state["_ari_sin_tools"] = True
-                        st.session_state.setdefault(
-                            "ari_pase", {"tipo": "", "fecha": "", "motivo": ""})
-                        st.caption("Modo de respaldo: captura tu pase en los campos de abajo.")
-                    elif _es_doc:
-                        # Para documentos no hay formulario de emergencia, y
-                        # Gemini acaba de contestar SIN herramientas: no
-                        # preparó nada. Decirlo, no dejar que parezca hecho.
-                        st.warning("No pude preparar los documentos: el "
-                                   "agente no está disponible. **No se "
-                                   "preparó nada.** Usa la app de días "
-                                   "económicos mientras.")
-                except Exception as e2:
-                    texto = _mensaje_de_fallo(e2)
-                    st.session_state["_ari_chat_error"] = f"{type(e).__name__}: {e} || {type(e2).__name__}: {e2}"
-                    # Cuando fallan LOS DOS cerebros, el motivo se muestra
-                    # SIEMPRE, sin depender de ari_debug ni de ser admin.
-                    # Estuvo escondido detrás de una bandera y eso dejó la
-                    # causa invisible durante días: el empleado veía "sin
-                    # cuota" y nadie podía saber si era la llave, el nombre
-                    # del modelo o de verdad la cuota. No expone secretos:
-                    # son códigos HTTP y nombres de modelo.
-                    st.caption("Detalle técnico — NVIDIA: "
-                               f"{type(e).__name__}: {str(e)[:400]}")
-                    st.caption(f"Detalle técnico — GEMINI: {type(e2).__name__}: {str(e2)[:200]}")
-                    if _es_pase:
-                        st.session_state["_ari_sin_tools"] = True
-                        st.session_state.setdefault(
-                            "ari_pase", {"tipo": "", "fecha": "", "motivo": ""})
+                    if _es_doc:
+                        _nom = (deps_pase or {}).get("nombre", "")
+                        with st.spinner("ARI esta preparando los documentos..."):
+                            # forzar=None: hay DOS herramientas de preparar y
+                            # obligar a una elegiría mal la mitad de las veces.
+                            texto, _pasos = _agente(
+                                _hist[-4:], {}, _nom,
+                                herramientas=_DOC.HERRAMIENTAS_DOC,
+                                sistema=prompt_agente_doc(_nom),
+                                ejecutor=_ejecutar_doc, forzar=None, clase="doc")
+                        _traza("agente_pasos", _pasos)
+                    elif _es_pase:
+                        # El agente tampoco necesita doce turnos de contexto: le
+                        # bastan los últimos del propio pase, y cada turno extra
+                        # son tokens que vuelven a viajar en cada paso.
+                        with st.spinner("ARI esta trabajando..."):
+                            texto, _pasos = _agente(_hist[-4:], deps_pase,
+                                                    deps_pase.get("nombre", ""))
+                        _traza("agente_pasos", _pasos)
+                        st.session_state.pop("_ari_sin_tools", None)
+                    else:
+                        with st.spinner("ARI esta pensando..."):
+                            texto, _c = responder_ia(
+                                st.session_state["ari_sistema"], _hist)
+                except Exception as e:
+                    # El agente vive en NVIDIA (es quien soporta herramientas). Si
+                    # se cae, Gemini contesta igual pero SIN herramientas: ARI
+                    # sigue resolviendo dudas y el pase pasa al formulario de
+                    # emergencia. Degradar no es lo mismo que morir.
+                    st.session_state["_ari_chat_error"] = f"{type(e).__name__}: {e}"
+                    try:
+                        # Se va DIRECTO a Gemini, no por responder_ia: NVIDIA
+                        # acaba de fallar y reintentarlo aqui duplicaba la espera
+                        # del empleado sin ninguna posibilidad de exito.
+                        with st.spinner("ARI esta pensando..."):
+                            texto = _responder_gemini(
+                                st.session_state["ari_sistema"], _hist)
+                        # El formulario de emergencia solo sale si esto ERA un
+                        # pase. Antes salía también cuando lo que falló era una
+                        # pregunta de nómina, y el empleado se encontraba campos
+                        # de pase sin haber pedido ninguno.
+                        if _es_pase:
+                            st.session_state["_ari_sin_tools"] = True
+                            st.session_state.setdefault(
+                                "ari_pase", {"tipo": "", "fecha": "", "motivo": ""})
+                            st.caption("Modo de respaldo: captura tu pase en los campos de abajo.")
+                        elif _es_doc:
+                            # Para documentos no hay formulario de emergencia, y
+                            # Gemini acaba de contestar SIN herramientas: no
+                            # preparó nada. Decirlo, no dejar que parezca hecho.
+                            st.warning("No pude preparar los documentos: el "
+                                       "agente no está disponible. **No se "
+                                       "preparó nada.** Usa la app de días "
+                                       "económicos mientras.")
+                    except Exception as e2:
+                        texto = _mensaje_de_fallo(e2)
+                        st.session_state["_ari_chat_error"] = f"{type(e).__name__}: {e} || {type(e2).__name__}: {e2}"
+                        # Cuando fallan LOS DOS cerebros, el motivo se muestra
+                        # SIEMPRE, sin depender de ari_debug ni de ser admin.
+                        # Estuvo escondido detrás de una bandera y eso dejó la
+                        # causa invisible durante días: el empleado veía "sin
+                        # cuota" y nadie podía saber si era la llave, el nombre
+                        # del modelo o de verdad la cuota. No expone secretos:
+                        # son códigos HTTP y nombres de modelo.
+                        st.caption("Detalle técnico — NVIDIA: "
+                                   f"{type(e).__name__}: {str(e)[:400]}")
+                        st.caption(f"Detalle técnico — GEMINI: {type(e2).__name__}: {str(e2)[:200]}")
+                        if _es_pase:
+                            st.session_state["_ari_sin_tools"] = True
+                            st.session_state.setdefault(
+                                "ari_pase", {"tipo": "", "fecha": "", "motivo": ""})
             st.markdown(texto)
         st.session_state.ari_messages.append({"role": "assistant", "content": texto})
 

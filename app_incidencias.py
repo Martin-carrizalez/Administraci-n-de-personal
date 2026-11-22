@@ -3166,7 +3166,7 @@ PAGOS = [
         # Aguinaldo y prima vacacional (32) los cobran los CUATRO subsistemas.
         ("14 Dic", "Q-23", [
             ("Aguinaldo", "🟡🟣🟢🔵"),
-            ("32 Prima vacacional", "🟡🟣🟢🔵"),
+            ("Prima vacacional (concepto 32)", "🟡🟣🟢🔵"),
         ]),
         # Los G y la CF los cobran docentes Y apoyo de nivel superior.
         # BE es solo de docentes; GU y BN solo de apoyo.
