@@ -124,7 +124,7 @@ def _registrar_pregunta(pregunta: str, origen: str, rol: str = ""):
 # Es opcional: si render_ari() se llama sin deps_pase, ARI funciona
 # exactamente como hasta hoy.
 
-ARI_VERSION = "agente v42 · ante la duda, busca · 21-nov"
+ARI_VERSION = "agente v43 · distingue los 2 tipos de comisión · 21-nov"
 
 # ═══════════════════════════════════════════════════════════════
 # DOS CEREBROS — mismo esquema que ARI.py, portado aquí
@@ -826,6 +826,12 @@ def prompt_agente_doc(nombre=""):
         "Si pide VER, MOSTRAR, MANDAR o RECUPERAR una comisión ya hecha, el "
         "ACUSE, el oficio firmado o una copia para reimprimir, llama a "
         "buscar_oficio con el centro o la persona.\n"
+        "En el minutario hay DOS tipos de comisión y se distinguen por el "
+        "asunto: 'Comisión/Coordinador' (coordinador o encargado de Centro "
+        "de Maestros) y 'asigna/signa Comisión' (la normal, de asesor). Una "
+        "misma persona puede tener las dos: si la persona trae varias, di "
+        "cuál es cuál por su asunto en vez de elegir tú. Si te dicen cuál "
+        "quieren, pásalo en tipo_comision: 'coordinador' o 'normal'.\n"
         "REGLA IMPORTANTE: generar una comisión quema un número de oficio del "
         "minutario y eso no se deshace. Si NO te dio número de oficio inicial "
         "ni fechas de la comisión, NO llames a preparar_comisiones: o llama a "
